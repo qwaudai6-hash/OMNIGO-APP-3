@@ -38,9 +38,6 @@ func (e *GatewayError) Error() string {
 	if e.StatusMsg != "" {
 		msg = fmt.Sprintf("%s (gateway msg: %s)", msg, e.StatusMsg)
 	}
-	if e.Internal != nil {
-		return fmt.Sprintf("payfast gateway error (HTTP %d): %s [cause: %v]", e.StatusCode, msg, e.Internal)
-	}
 	return fmt.Sprintf("payfast gateway error (HTTP %d): %s", e.StatusCode, msg)
 }
 
@@ -55,8 +52,13 @@ func IsTransient(err error) bool {
 		return false
 	}
 
-	// Context deadline exceeded or cancellation due to timeout
-	if errors.Is(err, context.DeadlineExceeded) {
+	// Explicit client cancellation (user closed tab / connection aborted) is NOT a transient gateway timeout
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+
+	// Context deadline exceeded due to timeout
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrCircuitBreakerOpen) {
 		return true
 	}
 

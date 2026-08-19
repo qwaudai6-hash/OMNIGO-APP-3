@@ -10,14 +10,15 @@ import (
 
 // Client handles all interaction with PayFast Pakistan gateway.
 type Client struct {
-	merchantID   string
-	securedKey   string
-	merchantName string
-	baseURL      string
-	successURL   string
-	failureURL   string
-	httpClient   *http.Client
-	tokens       *TokenManager
+	merchantID     string
+	securedKey     string
+	merchantName   string
+	baseURL        string
+	successURL     string
+	failureURL     string
+	httpClient     *http.Client
+	tokens         *TokenManager
+	circuitBreaker *CircuitBreaker
 }
 
 // NewClient constructs a production-ready PayFast client from environment variables or custom config.
@@ -33,15 +34,17 @@ func NewClient(merchantID, securedKey, merchantName, baseURL string) *Client {
 		Timeout: 20 * time.Second,
 	}
 
+	cb := NewCircuitBreaker(5, 10*time.Second)
 	c := &Client{
-		merchantID:   merchantID,
-		securedKey:   securedKey,
-		merchantName: merchantName,
-		baseURL:      strings.TrimRight(baseURL, "/"),
-		successURL:   os.Getenv("PAYFAST_SUCCESS_URL"),
-		failureURL:   os.Getenv("PAYFAST_FAILURE_URL"),
-		httpClient:   httpClient,
-		tokens:       NewTokenManager(httpClient, baseURL, merchantID, securedKey),
+		merchantID:     merchantID,
+		securedKey:     securedKey,
+		merchantName:   merchantName,
+		baseURL:        strings.TrimRight(baseURL, "/"),
+		successURL:     os.Getenv("PAYFAST_SUCCESS_URL"),
+		failureURL:     os.Getenv("PAYFAST_FAILURE_URL"),
+		httpClient:     httpClient,
+		tokens:         NewTokenManager(httpClient, baseURL, merchantID, securedKey, cb),
+		circuitBreaker: cb,
 	}
 
 	return c
@@ -55,6 +58,11 @@ func NewClientFromEnv() *Client {
 		os.Getenv("PAYFAST_MERCHANT_NAME"),
 		os.Getenv("PAYFAST_BASE_URL"),
 	)
+}
+
+// CircuitBreaker returns the underlying circuit breaker instance.
+func (c *Client) CircuitBreaker() *CircuitBreaker {
+	return c.circuitBreaker
 }
 
 // IsConfigured returns true if merchant credentials are present.

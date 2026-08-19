@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS payment_transactions (
     idempotency_key     VARCHAR(255) UNIQUE,
     metadata            JSONB,
     error_message       TEXT,
+    callback_processed_at TIMESTAMPTZ,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -36,7 +37,7 @@ ALTER TABLE payment_transactions
 -- Concurrency protection: only one active payment attempt per order at any time
 CREATE UNIQUE INDEX IF NOT EXISTS ux_payment_active_order
 ON payment_transactions(order_tracking_id)
-WHERE status IN ('pending', 'processing', '3ds_required', 'settlement_pending', 'gateway_pending');
+WHERE status IN ('processing', '3ds_required', 'settlement_pending', 'gateway_pending');
 
 -- Helper for idempotency: if a caller re-uses an idempotency key, return existing record.
 -- This is enforced by the UNIQUE index on idempotency_key above.

@@ -443,3 +443,82 @@ func TestFlexibleTypes(t *testing.T) {
 	})
 }
 
+func TestCircuitBreaker(t *testing.T) {
+	cb := NewCircuitBreaker(3, 50*time.Millisecond)
+
+	if cb.State() != StateClosed {
+		t.Errorf("expected closed state, got %v", cb.State())
+	}
+
+	mockErr := &GatewayError{StatusCode: 504, Message: "Gateway Timeout"}
+
+	// 1. Trigger consecutive failures
+	for i := 0; i < 3; i++ {
+		_ = cb.Execute(func() error {
+			return mockErr
+		})
+	}
+
+	// 2. Circuit should be Open
+	if cb.State() != StateOpen {
+		t.Errorf("expected circuit to be Open after 3 failures, got %v", cb.State())
+	}
+
+	// 3. Subsequent calls should fail-fast with ErrCircuitBreakerOpen
+	err := cb.Execute(func() error {
+		return nil
+	})
+	if err != ErrCircuitBreakerOpen {
+		t.Errorf("expected ErrCircuitBreakerOpen, got %v", err)
+	}
+
+	// 4. Wait for cooldown period to elapse -> HalfOpen
+	time.Sleep(60 * time.Millisecond)
+
+	// 5. Probe request succeeds -> Circuit should reset to Closed
+	err = cb.Execute(func() error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected probe call to succeed, got %v", err)
+	}
+	if cb.State() != StateClosed {
+		t.Errorf("expected circuit to reset to Closed, got %v", cb.State())
+	}
+}
+
+func TestIsTransientAndSanitization(t *testing.T) {
+	t.Run("context.Canceled is NOT transient", func(t *testing.T) {
+		if IsTransient(context.Canceled) {
+			t.Errorf("context.Canceled must not be treated as transient gateway timeout")
+		}
+	})
+
+	t.Run("context.DeadlineExceeded IS transient", func(t *testing.T) {
+		if !IsTransient(context.DeadlineExceeded) {
+			t.Errorf("context.DeadlineExceeded must be transient")
+		}
+	})
+
+	t.Run("ErrCircuitBreakerOpen IS transient", func(t *testing.T) {
+		if !IsTransient(ErrCircuitBreakerOpen) {
+			t.Errorf("ErrCircuitBreakerOpen must be transient")
+		}
+	})
+
+	t.Run("GatewayError does not leak sensitive internal payload in Error string", func(t *testing.T) {
+		gwErr := &GatewayError{
+			StatusCode: 500,
+			Message:    "Gateway communication failure",
+			StatusMsg:  "Declined",
+			Internal:   context.DeadlineExceeded,
+		}
+
+		errStr := gwErr.Error()
+		if errStr != "payfast gateway error (HTTP 500): Gateway communication failure (gateway msg: Declined)" {
+			t.Errorf("unexpected error string output: %s", errStr)
+		}
+	})
+}
+
+

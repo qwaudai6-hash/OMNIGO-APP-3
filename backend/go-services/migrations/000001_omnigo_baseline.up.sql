@@ -126,6 +126,8 @@ CREATE TABLE IF NOT EXISTS orders (
     delivery_type         VARCHAR(30),
     total_amount          NUMERIC(12,2) NOT NULL DEFAULT 0,
     admin_commission      NUMERIC(12,2) DEFAULT 0.00,
+    vendor_escrow         NUMERIC(12,2) DEFAULT 0.00,
+    delivery_escrow       NUMERIC(12,2) DEFAULT 0.00,
     currency              VARCHAR(10) NOT NULL DEFAULT 'PKR',
     payment_gateway       VARCHAR(30) DEFAULT 'cod',
     payment_status        VARCHAR(30) DEFAULT 'pending',
@@ -496,6 +498,7 @@ CREATE TABLE IF NOT EXISTS payment_transactions (
     idempotency_key     VARCHAR(255) UNIQUE,
     metadata            JSONB,
     error_message       TEXT,
+    callback_processed_at TIMESTAMPTZ,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -513,7 +516,7 @@ ALTER TABLE payment_transactions
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_payment_active_order
 ON payment_transactions(order_tracking_id)
-WHERE status IN ('pending', 'processing', '3ds_required', 'settlement_pending', 'gateway_pending');
+WHERE status IN ('processing', '3ds_required', 'settlement_pending', 'gateway_pending');
 
 -- ── Auth Flow Tables ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS password_reset_tokens (

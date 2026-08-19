@@ -21,17 +21,19 @@ type TokenManager struct {
 	baseURL    string
 	merchantID string
 	securedKey string
-	mu         sync.RWMutex
-	cache      TokenCache
+	circuitBreaker *CircuitBreaker
+	mu             sync.RWMutex
+	cache          TokenCache
 }
 
 // NewTokenManager initializes a new TokenManager securely.
-func NewTokenManager(client *http.Client, baseURL, merchantID, securedKey string) *TokenManager {
+func NewTokenManager(client *http.Client, baseURL, merchantID, securedKey string, cb *CircuitBreaker) *TokenManager {
 	return &TokenManager{
-		client:     client,
-		baseURL:    strings.TrimRight(baseURL, "/"),
-		merchantID: merchantID,
-		securedKey: securedKey,
+		client:         client,
+		baseURL:        strings.TrimRight(baseURL, "/"),
+		merchantID:     merchantID,
+		securedKey:     securedKey,
+		circuitBreaker: cb,
 	}
 }
 
@@ -53,7 +55,22 @@ func (tm *TokenManager) GetToken(ctx context.Context, customerIP string) (string
 		return tm.cache.AccessToken, nil
 	}
 
-	token, expiresInStr, err := tm.fetchToken(ctx)
+	var token, expiresInStr string
+	var err error
+	if tm.circuitBreaker != nil {
+		err = tm.circuitBreaker.Execute(func() error {
+			t, exp, fErr := tm.fetchToken(ctx)
+			if fErr != nil {
+				return fErr
+			}
+			token = t
+			expiresInStr = exp
+			return nil
+		})
+	} else {
+		token, expiresInStr, err = tm.fetchToken(ctx)
+	}
+
 	if err != nil {
 		return "", err
 	}
@@ -134,12 +151,19 @@ func (tm *TokenManager) fetchToken(ctx context.Context) (string, string, error) 
 		return "", "", &GatewayError{
 			StatusCode: resp.StatusCode,
 			Message:    "Authentication failed at gateway",
-			Internal:   fmt.Errorf("status code %d", resp.StatusCode),
+			Internal:   fmt.Errorf("status code %d: %s", resp.StatusCode, string(body)),
 		}
 	}
 
 	var res AuthTokenResponse
 	if err := json.Unmarshal(body, &res); err == nil && res.Token != "" {
+		if res.Code != "" && res.Code != "00" {
+			return "", "", &GatewayError{
+				StatusCode: resp.StatusCode,
+				Message:    "Authentication rejected by gateway",
+				StatusMsg:  fmt.Sprintf("code=%s msg=%s", res.Code, res.Message),
+			}
+		}
 		return res.Token, res.ExpiresIn, nil
 	}
 
