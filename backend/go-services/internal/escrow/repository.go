@@ -122,6 +122,22 @@ func (r *Repository) UnfreezeOnDisputeRejection(ctx context.Context, disputeID u
 	return err
 }
 
+// RefundDisputedHold marks a disputed hold as refunded and returns the hold details.
+func (r *Repository) RefundDisputedHold(ctx context.Context, disputeID uuid.UUID) (*EscrowHold, error) {
+	var hold EscrowHold
+	err := r.db.QueryRow(ctx,
+		`UPDATE escrow_holds 
+		 SET status = 'refunded', released_at = NOW() 
+		 WHERE dispute_id = $1 AND status = 'disputed'
+		 RETURNING id, order_tracking_id, vendor_tracking_id, amount, status, hold_until, created_at`,
+		disputeID,
+	).Scan(&hold.ID, &hold.OrderTrackingID, &hold.VendorTrackingID, &hold.Amount, &hold.Status, &hold.HoldUntil, &hold.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &hold, nil
+}
+
 // GetReleasableHolds returns all held escrows past their hold_until time.
 func (r *Repository) GetReleasableHolds(ctx context.Context) ([]EscrowHold, error) {
 	rows, err := r.db.Query(ctx,

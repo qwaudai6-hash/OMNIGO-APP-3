@@ -126,6 +126,48 @@ func (s *Service) UnfreezeOnRejection(ctx context.Context, disputeID uuid.UUID) 
 	return s.repo.UnfreezeOnDisputeRejection(ctx, disputeID)
 }
 
+// RefundDispute executes a double-entry ledger refund to the customer and marks the escrow hold refunded.
+func (s *Service) RefundDispute(ctx context.Context, disputeID uuid.UUID) error {
+	hold, err := s.repo.RefundDisputedHold(ctx, disputeID)
+	if err != nil {
+		return fmt.Errorf("failed to mark escrow hold refunded: %w", err)
+	}
+
+	// Fetch customer tracking ID from orders
+	var customerTrackingID string
+	err = s.db.QueryRow(ctx,
+		`SELECT customer_tracking_id FROM orders WHERE order_tracking_id = $1`,
+		hold.OrderTrackingID,
+	).Scan(&customerTrackingID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch order customer: %w", err)
+	}
+
+	// Double-entry ledger transfer: vendor_locked_escrow -> customer_wallet
+	idempotencyKey := fmt.Sprintf("escrow:refund:%s", disputeID.String())
+	_, err = s.ledger.Transfer(ctx, ledger.TransferRequest{
+		DebitAccount:   ledger.AccountVendorLockedEscrow,
+		CreditAccount:  ledger.AccountCustomerWallet,
+		Amount:         hold.Amount,
+		Currency:       "PKR",
+		ReferenceType:  "dispute_refund",
+		ReferenceID:    hold.OrderTrackingID,
+		Description:    fmt.Sprintf("Dispute refund for order %s to customer %s", hold.OrderTrackingID, customerTrackingID),
+		IdempotencyKey: idempotencyKey,
+	})
+	if err != nil {
+		return fmt.Errorf("ledger refund transfer failed: %w", err)
+	}
+
+	// Update order payment status to refunded
+	_, _ = s.db.Exec(ctx,
+		`UPDATE orders SET payment_status = 'refunded', updated_at = NOW() WHERE order_tracking_id = $1`,
+		hold.OrderTrackingID,
+	)
+
+	return nil
+}
+
 // GetHoldsByVendor returns escrow hold history for a vendor.
 func (s *Service) GetHoldsByVendor(ctx context.Context, vendorTrackingID string) ([]EscrowHold, error) {
 	return s.repo.GetHoldsByVendor(ctx, vendorTrackingID)

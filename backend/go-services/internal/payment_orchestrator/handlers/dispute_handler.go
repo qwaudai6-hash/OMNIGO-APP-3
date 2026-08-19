@@ -147,10 +147,16 @@ func (h *DisputeHandler) Resolve(c *gin.Context) {
 		return
 	}
 
-	// If rejected, unfreeze escrow so it can be released normally
-	if req.Status == "rejected" {
+	// If resolved in customer favor, execute double-entry refund from escrow to customer
+	if req.Status == "resolved" {
+		if err := h.escrow.RefundDispute(ctx, disputeID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to process escrow refund: " + err.Error()})
+			return
+		}
+	} else if req.Status == "rejected" {
+		// If rejected, unfreeze escrow so it can be released normally to vendor
 		if err := h.escrow.UnfreezeOnRejection(ctx, disputeID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to unfreeze escrow"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to unfreeze escrow: " + err.Error()})
 			return
 		}
 	}
