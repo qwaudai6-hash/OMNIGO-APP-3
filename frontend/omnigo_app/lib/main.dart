@@ -1,0 +1,280 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
+import 'package:flutter_stripe/flutter_stripe.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'core/services/cart_provider.dart';
+import 'core/services/session_registry.dart';
+import 'core/services/notification_service.dart';
+import 'core/network/websocket_client.dart';
+import 'core/theme/app_theme.dart';
+import 'core/di/service_locator.dart';
+import 'features/auth/presentation/screens/login_screen.dart';
+import 'features/auth/presentation/screens/dynamic_signup_screen.dart';
+import 'features/customer/presentation/screens/customer_dashboard_screen.dart';
+import 'features/vendor/presentation/screens/vendor_dashboard_screen.dart';
+import 'features/vendor/presentation/screens/vendor_live_map_screen.dart';
+import 'features/vendor/presentation/screens/vendor_inventory_screen.dart';
+import 'features/vendor/presentation/screens/vendor_analytics_screen.dart';
+import 'features/rider/presentation/screens/rider_map_screen.dart';
+import 'features/rider/presentation/screens/rider_wallet_screen.dart';
+import 'features/admin/presentation/screens/admin_surveillance_screen.dart';
+import 'features/admin/presentation/screens/admin_finance_screen.dart';
+import 'features/admin/presentation/screens/admin_ai_control_center_screen.dart';
+
+import 'package:sentry_flutter/sentry_flutter.dart';
+
+// Background FCM handler — must be top-level function
+@pragma('vm:entry-point')
+Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  await Firebase.initializeApp();
+  debugPrint('[FCM Background] ${message.messageId}: ${message.notification?.title}');
+}
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Register shared singletons before any UI or service needs them.
+  setupServiceLocator();
+
+  // Initialize Firebase for push notifications
+  try {
+    await Firebase.initializeApp();
+    FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+    await NotificationService().initialize();
+  } catch (e) {
+    debugPrint("[Firebase Init Warning]: $e");
+  }
+
+  // Initialize Stripe with publishable key.
+  // Inject via build arg: --dart-define=STRIPE_PUBLISHABLE_KEY=pk_test_...
+  Stripe.publishableKey = const String.fromEnvironment('STRIPE_PUBLISHABLE_KEY');
+  unawaited(Stripe.instance.applySettings());
+
+  try {
+    // TimeoutException will be thrown if hydration takes more than 1500ms
+    await SessionRegistry.instance.hydrate().timeout(
+      const Duration(milliseconds: 1500),
+    );
+  } catch (e) {
+    debugPrint("[Session Boot Warning]: SharedPreferences hydration failed or timed out: $e");
+    // Fallback safely to guest/unauthenticated state to prevent engine boot lock
+  }
+
+  // Register FCM device token if user is already logged in
+  if (SessionRegistry.instance.isLoggedIn) {
+    unawaited(SessionRegistry.instance.registerFCMToken());
+  }
+
+  await SentryFlutter.init(
+    (options) {
+      options.dsn = 'https://03e0839e99a8b13867c29e1eb040e34b@o4507116744572928.ingest.us.sentry.io/4507116746866688';
+      // Set tracesSampleRate to 1.0 to capture 100% of transactions for performance monitoring.
+      // We recommend adjusting this value in production.
+      options.tracesSampleRate = 1.0;
+    },
+    appRunner: () => runApp(
+      ChangeNotifierProvider(
+        create: (context) => CartProvider()..loadCart(),
+        child: const OmnigoApp(),
+      ),
+    ),
+  );
+}
+
+class OmnigoApp extends StatefulWidget {
+  const OmnigoApp({super.key});
+
+  @override
+  State<OmnigoApp> createState() => _OmnigoAppState();
+}
+
+class _OmnigoAppState extends State<OmnigoApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+
+    // Edge-to-edge on Android so system bars draw behind app content.
+    // On iOS this call is a no-op; SafeArea widgets handle insets there.
+    if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      SystemChrome.setSystemUIOverlayStyle(
+        const SystemUiOverlayStyle(
+          systemNavigationBarColor: Colors.transparent,
+          statusBarColor: Colors.transparent,
+          statusBarIconBrightness: Brightness.dark,
+          statusBarBrightness: Brightness.light,
+        ),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  /// On Android, when the app goes to background the OS aggressively pauses
+  /// the WebSocket. We mirror that on the Dart side to avoid noisy reconnect
+  /// failures, then resume the link when the app is foregrounded.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final ws = sl<WebSocketClient>();
+    switch (state) {
+      case AppLifecycleState.paused:
+      case AppLifecycleState.detached:
+      case AppLifecycleState.hidden:
+        ws.pause();
+        break;
+      case AppLifecycleState.resumed:
+        ws.resume();
+        break;
+      case AppLifecycleState.inactive:
+        // Brief (e.g. incoming call overlay). Do not pause — keep telemetry.
+        break;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'OMNIGO',
+      theme: AppTheme.lightTheme,
+      debugShowCheckedModeBanner: false,
+      initialRoute: '/',
+      builder: (context, child) {
+        // Use the full display on phones/tablets; only frame a mobile-sized
+        // preview on large desktop / web canvases for local development.
+        final shortestSide = MediaQuery.of(context).size.shortestSide;
+        final isDesktopCanvas = kIsWeb || !Platform.isAndroid && !Platform.isIOS;
+        final shouldFrame = isDesktopCanvas && shortestSide > 600;
+
+        if (!shouldFrame) {
+          return child ?? const SizedBox.shrink();
+        }
+
+        return Scaffold(
+          backgroundColor: Colors.grey.shade900,
+          body: Center(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(40),
+              child: Container(
+                width: 400,
+                height: 850,
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  boxShadow: [
+                    BoxShadow(color: Colors.black26, blurRadius: 30, spreadRadius: 10),
+                  ],
+                ),
+                child: child,
+              ),
+            ),
+          ),
+        );
+      },
+      onGenerateRoute: (settings) {
+        final args = settings.arguments as String?;
+        final name = settings.name;
+        
+        final isLoggedIn = SessionRegistry.instance.isLoggedIn;
+        final role = SessionRegistry.instance.role;
+        final trackingId = SessionRegistry.instance.trackingId;
+
+        // Centralized Multi-Tenant Route Guard
+        if (name == '/vendor-dashboard' || name == '/vendor-live-map' || name == '/vendor-inventory' || name == '/vendor-analytics') {
+          if (!isLoggedIn) {
+            // Not authenticated: Redirect to signup landing page in login mode
+            return MaterialPageRoute(
+              builder: (context) => const DynamicSignupScreen(startInLoginMode: true),
+            );
+          }
+          if (role != 'vendor') {
+            // Mismatched role check: redirect immediately to respective active page to prevent redirect loops
+            return MaterialPageRoute(
+              builder: (context) => role == 'rider'
+                  ? RiderMapScreen(trackingId: trackingId ?? '')
+                  : CustomerDashboardScreen(trackingId: trackingId ?? 'CUST-0000'),
+            );
+          }
+        }
+
+        if (settings.name == '/login') {
+          return MaterialPageRoute(
+            builder: (context) => LoginScreen(role: args ?? 'customer'),
+          );
+        }
+        if (settings.name == '/customer-dashboard') {
+          return MaterialPageRoute(
+            builder: (context) => CustomerDashboardScreen(trackingId: args ?? trackingId ?? 'CUST-0000'),
+          );
+        }
+        if (settings.name == '/vendor-dashboard') {
+          return MaterialPageRoute(
+            builder: (context) => VendorDashboardScreen(
+              trackingId: args ?? trackingId ?? 'VEND-0000',
+            ),
+          );
+        }
+        if (settings.name == '/vendor-live-map') {
+          return MaterialPageRoute(
+            builder: (context) => const VendorLiveMapScreen(),
+          );
+        }
+        if (settings.name == '/vendor-inventory') {
+          return MaterialPageRoute(
+            builder: (context) => VendorInventoryScreen(
+              vendorTrackingId: args ?? trackingId ?? 'VEND-0000',
+            ),
+          );
+        }
+        if (settings.name == '/vendor-analytics') {
+          return MaterialPageRoute(
+            builder: (context) => VendorAnalyticsScreen(
+              vendorTrackingId: args ?? trackingId ?? 'VEND-0000',
+            ),
+          );
+        }
+        if (settings.name == '/rider-map') {
+          return MaterialPageRoute(
+            builder: (context) => RiderMapScreen(trackingId: args ?? trackingId ?? ''),
+          );
+        }
+        if (settings.name == '/rider-wallet') {
+          return MaterialPageRoute(
+            builder: (context) => RiderWalletScreen(trackingId: args ?? trackingId ?? ''),
+          );
+        }
+        if (settings.name == '/admin-surveillance') {
+          return MaterialPageRoute(
+            builder: (context) => const AdminSurveillanceScreen(),
+          );
+        }
+        if (settings.name == '/admin-finance') {
+          return MaterialPageRoute(
+            builder: (context) => const AdminFinanceScreen(),
+          );
+        }
+        if (settings.name == '/admin-ai-control') {
+          return MaterialPageRoute(
+            builder: (context) => const AdminAiControlCenterScreen(),
+          );
+        }
+        return null;
+      },
+      routes: {
+        '/': (context) => const DynamicSignupScreen(),
+        '/admin-surveillance': (context) => const AdminSurveillanceScreen(),
+        '/admin-finance': (context) => const AdminFinanceScreen(),
+        '/admin-ai-control': (context) => const AdminAiControlCenterScreen(),
+      },
+    );
+  }
+}

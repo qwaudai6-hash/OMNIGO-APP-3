@@ -1,0 +1,92 @@
+{{- if .Values.services.monolithService }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "omnigo.fullname" . }}-monolith
+  labels:
+    {{- include "omnigo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: monolith
+spec:
+  replicas: {{ .Values.services.monolithService.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "omnigo.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: monolith
+  template:
+    metadata:
+      labels:
+        {{- include "omnigo.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: monolith
+    spec:
+      containers:
+        - name: monolith
+          image: "{{ .Values.services.monolithService.image }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: {{ .Values.services.monolithService.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.services.monolithService.port | quote }}
+            - name: DB_WRITER_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "omnigo.fullname" . }}-secrets
+                  key: DB_WRITER_DSN
+            - name: DB_READER_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "omnigo.fullname" . }}-secrets
+                  key: DB_READER_DSN
+            - name: REDIS_ADDRS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "omnigo.fullname" . }}-secrets
+                  key: REDIS_ADDRS
+            - name: KAFKA_BROKERS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "omnigo.fullname" . }}-secrets
+                  key: KAFKA_BROKERS
+            - name: JWT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "omnigo.fullname" . }}-secrets
+                  key: JWT_SECRET_KEY
+            - name: NEO4J_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "omnigo.fullname" . }}-secrets
+                  key: NEO4J_URI
+            - name: NEO4J_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "omnigo.fullname" . }}-secrets
+                  key: NEO4J_USER
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "omnigo.fullname" . }}-secrets
+                  key: NEO4J_PASSWORD
+          resources:
+            {{- toYaml .Values.services.monolithService.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "omnigo.fullname" . }}-monolith
+  labels:
+    {{- include "omnigo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: monolith
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.services.monolithService.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "omnigo.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: monolith
+{{- end }}

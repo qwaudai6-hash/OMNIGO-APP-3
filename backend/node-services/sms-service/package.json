@@ -1,0 +1,21 @@
+{
+  "name": "sms-service",
+  "version": "1.0.0",
+  "description": "OMNIGO SMS gateway service for Pakistan local gateways with Twilio fallback",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --check src/index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.7.9",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "kafkajs": "^2.2.4",
+    "pg": "^8.22.0",
+    "twilio": "^5.5.2"
+  }
+}

@@ -1,0 +1,443 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_stripe/flutter_stripe.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:maplibre_gl/maplibre_gl.dart';
+import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../../../../core/theme/app_theme.dart';
+import '../../../../core/services/cart_provider.dart';
+import '../../../../core/network/api_client.dart';
+import '../../../../core/network/api_endpoints.dart';
+import '../../../../core/di/service_locator.dart';
+import 'order_success_screen.dart';
+
+class CheckoutScreen extends StatefulWidget {
+  const CheckoutScreen({super.key});
+
+  @override
+  State<CheckoutScreen> createState() => _CheckoutScreenState();
+}
+
+class _CheckoutScreenState extends State<CheckoutScreen> {
+  int _currentStep = 0;
+  String _selectedPaymentMethod = 'cod';
+  bool _isLoading = false;
+
+  // Real delivery location — fetched from GPS
+  String _deliveryAddress = 'Fetching your location...';
+  LatLng? _deliveryLocation;
+  bool _isFetchingLocation = true;
+  String? _locationError;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchCurrentLocation();
+  }
+
+  Future<void> _fetchCurrentLocation() async {
+    setState(() {
+      _isFetchingLocation = true;
+      _locationError = null;
+    });
+
+    try {
+      final bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        setState(() {
+          _locationError = 'Location services are disabled. Please enable GPS.';
+          _isFetchingLocation = false;
+        });
+        return;
+      }
+
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) {
+          setState(() {
+            _locationError = 'Location permission denied. Please enable in Settings.';
+            _isFetchingLocation = false;
+          });
+          return;
+        }
+      }
+
+      if (permission == LocationPermission.deniedForever) {
+        setState(() {
+          _locationError = 'Location permission permanently denied. Enable in Settings.';
+          _isFetchingLocation = false;
+        });
+        return;
+      }
+
+      final Position position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+      );
+
+      final latLng = LatLng(position.latitude, position.longitude);
+
+      // Reverse geocode to get human-readable address. Goes through the
+      // internal /api/v1/geo/reverse proxy (Kong → admin service) so we
+      // never hit the public Nominatim service from the mobile client —
+      // see phase 5 of the architecture plan.
+      String address = '${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)}';
+      try {
+        final data = await sl<ApiClient>().get(
+          ApiEndpoints.geocodingReverse(position.latitude, position.longitude),
+        ) as Map<String, dynamic>;
+        final addr = (data['address'] ?? <String, dynamic>{}) as Map<String, dynamic>;
+        final parts = <String>[
+          if (addr['road'] != null) (addr['road'] as String),
+          if (addr['suburb'] != null) (addr['suburb'] as String),
+          if (addr['city'] != null)
+            (addr['city'] as String)
+          else if (addr['town'] != null)
+            (addr['town'] as String),
+          if (addr['country'] != null) (addr['country'] as String),
+        ];
+        if (parts.isNotEmpty) address = parts.join(', ');
+      } catch (_) {
+        // Use coordinates as fallback
+      }
+
+      if (mounted) {
+        setState(() {
+          _deliveryLocation = latLng;
+          _deliveryAddress = address;
+          _isFetchingLocation = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _locationError = 'Failed to get location: $e';
+          _isFetchingLocation = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _submitOrder(CartProvider cart) async {
+    if (_deliveryLocation == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please wait for location to be fetched'), backgroundColor: Colors.orange),
+      );
+      return;
+    }
+
+    setState(() => _isLoading = true);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final userTrackId = prefs.getString('tracking_id') ?? '';
+      final apiClient = sl<ApiClient>();
+
+      final items = cart.items.values.map((i) => {
+        'product_tracking_id': i.productId,
+        'quantity': i.quantity,
+      },).toList();
+
+      final storeTrackingId = cart.items.values.first.storeTrackingId;
+
+      // Place the order FIRST so the backend allocates a real ORD- tracking
+      // ID. Previously we generated a synthetic ID up-front and passed it
+      // to Stripe, which meant the Stripe PaymentIntent and the order
+      // row had different IDs — the webhook couldn't correlate the
+      // payment back to the order.
+      final payload = {
+        'user_tracking_id': userTrackId,
+        'vendor_store_tracking_id': storeTrackingId,
+        'dropoff_lat': _deliveryLocation!.latitude,
+        'dropoff_lng': _deliveryLocation!.longitude,
+        'payment_gateway': _selectedPaymentMethod,
+        'currency': 'PKR',
+        'device_session_nonce': DateTime.now().millisecondsSinceEpoch.toString(),
+        'items': items,
+        'total_amount': cart.totalAmount,
+      };
+
+      final response = await apiClient.post(ApiEndpoints.orderCheckout(), payload);
+      final realOrderTrackingId =
+          response['order_tracking_id'] ?? response['tracking_id'];
+      if (realOrderTrackingId == null) {
+        throw Exception('Order creation failed: no tracking id returned');
+      }
+
+      // If card payment selected, create Stripe PaymentIntent using the
+      // REAL order tracking ID so the webhook can correlate.
+      if (_selectedPaymentMethod == 'card') {
+        final checkoutResponse = await apiClient.post(
+          ApiEndpoints.stripeCheckout(),
+          {
+            'gateway': 'stripe',
+            'order_id': realOrderTrackingId,
+            'customer_id': userTrackId,
+            'amount': cart.totalAmount,
+            'currency': 'PKR',
+            'return_url': '${ApiEndpoints.gatewayBase}/order-success',
+            'cancel_url': '${ApiEndpoints.gatewayBase}/checkout',
+          },
+        ) as Map<String, dynamic>;
+
+        final clientSecret = checkoutResponse['client_secret']?.toString();
+        if (clientSecret != null && clientSecret.isNotEmpty) {
+          try {
+            await Stripe.instance.initPaymentSheet(
+              paymentSheetParameters: SetupPaymentSheetParameters(
+                paymentIntentClientSecret: clientSecret,
+                merchantDisplayName: 'OMNIGO Super App',
+                allowsDelayedPaymentMethods: true,
+              ),
+            );
+            await Stripe.instance.presentPaymentSheet();
+          } catch (e) {
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Payment cancelled or failed')),
+              );
+            }
+            return;
+          }
+        } else {
+          throw Exception('No client secret returned from checkout');
+        }
+      }
+
+      final trackingId = realOrderTrackingId.toString();
+      await cart.clearCart();
+
+      if (mounted) {
+        await Navigator.pushAndRemoveUntil(
+          context,
+          MaterialPageRoute<void>(builder: (_) => OrderSuccessScreen(trackingId: trackingId)),
+          (route) => route.isFirst,
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF8F9FA),
+      appBar: AppBar(
+        title: const Text('Checkout', style: TextStyle(color: AppTheme.blackAccent, fontWeight: FontWeight.bold)),
+        backgroundColor: Colors.white,
+        elevation: 0,
+        iconTheme: const IconThemeData(color: AppTheme.blackAccent),
+      ),
+      body: Consumer<CartProvider>(
+        builder: (context, cart, child) {
+          if (cart.items.isEmpty && !_isLoading) {
+            return const Center(child: Text('Your cart is empty.'));
+          }
+
+          return Stepper(
+            type: StepperType.vertical,
+            currentStep: _currentStep,
+            onStepContinue: () {
+              if (_currentStep < 2) {
+                setState(() => _currentStep += 1);
+              } else {
+                _submitOrder(cart);
+              }
+            },
+            onStepCancel: () {
+              if (_currentStep > 0) {
+                setState(() => _currentStep -= 1);
+              } else {
+                Navigator.pop(context);
+              }
+            },
+            controlsBuilder: (context, details) {
+              final isLastStep = _currentStep == 2;
+              return Container(
+                margin: const EdgeInsets.only(top: 24),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppTheme.blackAccent,
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        ),
+                        onPressed: _isLoading ? null : details.onStepContinue,
+                        child: _isLoading
+                            ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                            : Text(isLastStep ? 'Place Order' : 'Continue', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                      ),
+                    ),
+                    if (_currentStep > 0 && !_isLoading) ...[
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: OutlinedButton(
+                          style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          ),
+                          onPressed: details.onStepCancel,
+                          child: const Text('Back', style: TextStyle(color: AppTheme.blackAccent)),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              );
+            },
+            steps: [
+              Step(
+                title: const Text('Delivery Address', style: TextStyle(fontWeight: FontWeight.bold)),
+                content: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey.shade200)),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (_isFetchingLocation) ...[
+                        const Row(
+                          children: [
+                            SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)),
+                            SizedBox(width: 12),
+                            Text('Fetching your location...'),
+                          ],
+                        ),
+                      ] else if (_locationError != null) ...[
+                        Row(
+                          children: [
+                            const Icon(Icons.error_outline, color: Colors.redAccent, size: 20),
+                            const SizedBox(width: 8),
+                            Expanded(child: Text(_locationError!, style: const TextStyle(color: Colors.redAccent, fontSize: 13))),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        TextButton.icon(
+                          onPressed: _fetchCurrentLocation,
+                          icon: const Icon(Icons.refresh, size: 16),
+                          label: const Text('Retry'),
+                        ),
+                      ] else ...[
+                        Row(
+                          children: [
+                            const Icon(Icons.location_on, color: Colors.green),
+                            const SizedBox(width: 8),
+                            Expanded(child: Text(_deliveryAddress, style: const TextStyle(fontSize: 14))),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Lat: ${_deliveryLocation?.latitude.toStringAsFixed(4)}, Lng: ${_deliveryLocation?.longitude.toStringAsFixed(4)}',
+                          style: TextStyle(color: Colors.grey.shade500, fontSize: 11),
+                        ),
+                        const SizedBox(height: 8),
+                        TextButton.icon(
+                          onPressed: _fetchCurrentLocation,
+                          icon: const Icon(Icons.my_location, size: 16),
+                          label: const Text('Refresh Location'),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                isActive: _currentStep >= 0,
+                state: _currentStep > 0 ? StepState.complete : StepState.indexed,
+              ),
+              Step(
+                title: const Text('Payment Method', style: TextStyle(fontWeight: FontWeight.bold)),
+                content: Column(
+                  children: [
+                    _buildPaymentOption('cod', 'Cash on Delivery', Icons.money),
+                    _buildPaymentOption('card', 'Credit/Debit Card', Icons.credit_card),
+                    _buildPaymentOption('jazzcash', 'JazzCash', Icons.phone_android),
+                  ],
+                ),
+                isActive: _currentStep >= 1,
+                state: _currentStep > 1 ? StepState.complete : StepState.indexed,
+              ),
+              Step(
+                title: const Text('Order Summary', style: TextStyle(fontWeight: FontWeight.bold)),
+                content: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey.shade200)),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      ...cart.items.values.map((item) => Padding(
+                        padding: const EdgeInsets.only(bottom: 8.0),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Expanded(child: Text('${item.quantity}x ${item.name}', maxLines: 1, overflow: TextOverflow.ellipsis)),
+                            Text('PKR ${(item.price * item.quantity).toStringAsFixed(0)}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                          ],
+                        ),
+                      ),),
+                      const Divider(),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text('Subtotal', style: TextStyle(color: Colors.grey)),
+                          Text('PKR ${cart.totalAmount.toStringAsFixed(0)}'),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      const Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text('Delivery Fee', style: TextStyle(color: Colors.grey)),
+                          Text('PKR 0'),
+                        ],
+                      ),
+                      const Divider(),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text('Total', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+                          Text('PKR ${cart.totalAmount.toStringAsFixed(0)}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Colors.redAccent)),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                isActive: _currentStep >= 2,
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildPaymentOption(String value, String title, IconData icon) {
+    final isSelected = _selectedPaymentMethod == value;
+    return GestureDetector(
+      onTap: () => setState(() => _selectedPaymentMethod = value),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: isSelected ? Colors.blue.shade50 : Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: isSelected ? AppTheme.blackAccent : Colors.grey.shade200, width: isSelected ? 2 : 1),
+        ),
+        child: Row(
+          children: [
+            Icon(icon, color: isSelected ? AppTheme.blackAccent : Colors.grey),
+            const SizedBox(width: 16),
+            Text(title, style: TextStyle(fontWeight: isSelected ? FontWeight.bold : FontWeight.normal)),
+            const Spacer(),
+            if (isSelected) const Icon(Icons.check_circle, color: AppTheme.blackAccent),
+          ],
+        ),
+      ),
+    );
+  }
+}

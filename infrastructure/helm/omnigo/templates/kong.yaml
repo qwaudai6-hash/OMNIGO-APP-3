@@ -1,0 +1,141 @@
+{{- if .Values.kong.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "omnigo.fullname" . }}-kong-config
+  labels:
+    {{- include "omnigo.labels" . }}
+data:
+  kong.yml: |
+    _format_version: "3.0"
+    services:
+      - name: auth-service
+        url: http://{{ include "omnigo.fullname" . }}-auth-service:{{ .Values.services.authService.port }}
+        routes:
+          - name: auth-routes
+            paths:
+              - /api/v1/auth
+            strip_path: false
+      
+      - name: product-service
+        url: http://{{ include "omnigo.fullname" . }}-product-service:{{ .Values.services.productService.port }}
+        routes:
+          - name: product-routes
+            paths:
+              - /api/v1/products
+            strip_path: false
+
+      - name: order-service
+        url: http://{{ include "omnigo.fullname" . }}-order-service:{{ .Values.services.orderService.port }}
+        routes:
+          - name: order-routes
+            paths:
+              - /api/v1/orders
+            strip_path: false
+
+      - name: admin-service
+        url: http://{{ include "omnigo.fullname" . }}-admin-service:{{ .Values.services.adminService.port }}
+        routes:
+          - name: admin-routes
+            paths:
+              - /api/v1/admin
+            strip_path: false
+
+      - name: delivery-gig-service
+        url: http://{{ include "omnigo.fullname" . }}-delivery-gig-service:{{ .Values.services.deliveryGigService.port }}
+        routes:
+          - name: delivery-routes
+            paths:
+              - /api/v1/delivery
+            strip_path: false
+
+      - name: ai-engine
+        url: http://{{ include "omnigo.fullname" . }}-ai-engine:{{ .Values.services.aiEngine.port }}
+        routes:
+          - name: ai-routes
+            paths:
+              - /api/v1/ai
+            strip_path: false
+
+      - name: websocket-gateway
+        url: http://{{ include "omnigo.fullname" . }}-websocket-gateway:{{ .Values.services.websocketGateway.port }}
+        routes:
+          - name: websocket-routes
+            paths:
+              - /ws
+            strip_path: false
+
+    plugins:
+      - name: rate-limiting
+        config:
+          minute: 200
+          policy: local
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "omnigo.fullname" . }}-api-gateway
+  labels:
+    {{- include "omnigo.labels" . }}
+spec:
+  type: LoadBalancer
+  ports:
+    - name: proxy
+      port: 8000
+      targetPort: 8000
+    - name: admin
+      port: 8001
+      targetPort: 8001
+  selector:
+    app.kubernetes.io/name: {{ include "omnigo.name" . }}-api-gateway
+    app.kubernetes.io/instance: {{ .Release.Name }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "omnigo.fullname" . }}-api-gateway
+  labels:
+    {{- include "omnigo.labels" . }}
+spec:
+  replicas: {{ .Values.kong.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "omnigo.name" . }}-api-gateway
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "omnigo.name" . }}-api-gateway
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: kong
+          image: "{{ .Values.kong.image }}"
+          env:
+            - name: KONG_DATABASE
+              value: "off"
+            - name: KONG_DECLARATIVE_CONFIG
+              value: /usr/local/kong/declarative/kong.yml
+            - name: KONG_PROXY_ACCESS_LOG
+              value: /dev/stdout
+            - name: KONG_ADMIN_ACCESS_LOG
+              value: /dev/stdout
+            - name: KONG_PROXY_ERROR_LOG
+              value: /dev/stderr
+            - name: KONG_ADMIN_ERROR_LOG
+              value: /dev/stderr
+            - name: KONG_ADMIN_LISTEN
+              value: 0.0.0.0:8001
+          ports:
+            - containerPort: 8000
+              name: proxy
+            - containerPort: 8001
+              name: admin
+          volumeMounts:
+            - name: kong-config
+              mountPath: /usr/local/kong/declarative
+      volumes:
+        - name: kong-config
+          configMap:
+            name: {{ include "omnigo.fullname" . }}-kong-config
+{{- end }}

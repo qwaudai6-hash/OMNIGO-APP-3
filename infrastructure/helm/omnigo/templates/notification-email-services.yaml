@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "omnigo.fullname" . }}-notification-service
+  labels:
+    {{- include "omnigo.labels" . }}
+spec:
+  replicas: {{ .Values.services.notificationService.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "omnigo.name" . }}-notification-service
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "omnigo.name" . }}-notification-service
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: notification-service
+          image: "{{ .Values.services.notificationService.image }}"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PORT
+              value: "8089"
+            - name: KAFKA_BROKERS
+              value: "{{ .Values.global.kafka.brokers }}"
+            - name: REDIS_ADDRS
+              value: "{{ .Values.global.redis.addrs }}"
+          ports:
+            - containerPort: 8089
+              name: http
+          resources:
+            {{- toYaml .Values.services.notificationService.resources | nindent 12 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "omnigo.fullname" . }}-email-service
+  labels:
+    {{- include "omnigo.labels" . }}
+spec:
+  replicas: {{ .Values.services.emailService.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "omnigo.name" . }}-email-service
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "omnigo.name" . }}-email-service
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: email-service
+          image: "{{ .Values.services.emailService.image }}"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PORT
+              value: "8090"
+            - name: KAFKA_BROKERS
+              value: "{{ .Values.global.kafka.brokers }}"
+          ports:
+            - containerPort: 8090
+              name: http
+          resources:
+            {{- toYaml .Values.services.emailService.resources | nindent 12 }}

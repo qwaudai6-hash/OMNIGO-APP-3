@@ -1,0 +1,25 @@
+{
+  "name": "omnigo-postgres-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "omnigo-postgres",
+    "database.port": "5432",
+    "database.user": "omnigo_user",
+    "database.password": "omnigo_password",
+    "database.dbname": "omnigo_db",
+    "database.server.name": "omnigo",
+    "plugin.name": "pgoutput",
+    "slot.name": "omnigo_slot",
+    "publication.name": "omnigo_pub",
+    "table.include.list": "public.users,public.stores,public.products,public.orders,public.deliveries,public.rides,public.reviews,public.favorites",
+    "tombstones.on.delete": "true",
+    "transforms": "unwrap",
+    "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+    "transforms.unwrap.drop.tombstones": "true",
+    "transforms.unwrap.delete.handling.mode": "rewrite",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "database.history.kafka.bootstrap.servers": "kafka-cluster:29092",
+    "database.history.kafka.topic": "schema-changes.omnigo"
+  }
+}

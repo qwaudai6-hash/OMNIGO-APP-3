@@ -1,0 +1,1 @@
+ALTER TABLE rider_wallet ADD COLUMN IF NOT EXISTS cash_in_hand NUMERIC(10,2) DEFAULT 0.0;

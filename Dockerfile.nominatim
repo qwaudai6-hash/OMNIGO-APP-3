@@ -1,0 +1,2 @@
+FROM omnigo-nominatim-pakistan:latest
+CMD ["/app/start.sh"]

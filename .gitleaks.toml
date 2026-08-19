@@ -1,0 +1,16 @@
+title = "gitleaks config"
+
+[allowlist]
+description = "Global allowlist for test keys and dummy passwords"
+paths = [
+  '''migrations/''',
+  '''backend/go-services/cmd/apply_migrations.go''',
+  '''infrastructure/''',
+]
+regexes = [
+  '''iY6vYcwHITP8CANz''',
+  '''dummy_secret_for_testing''',
+  '''dummy_jazzcash_salt''',
+  '''dummy_easypaisa_salt''',
+  '''password123''',
+]

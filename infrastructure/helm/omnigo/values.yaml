@@ -1,0 +1,118 @@
+global:
+  postgres:
+    user: omnigo_user
+    password: omnigo_password
+    db: omnigo_db
+    port: 5432
+    host: omnigo-postgres
+  redis:
+    addrs: redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
+  kafka:
+    brokers: kafka-cluster:29092
+  neo4j:
+    uri: neo4j://neo4j-graph:7687
+    user: neo4j
+    password: omnigo_password
+  clickhouse:
+    addr: clickhouse:9100
+  meilisearch:
+    masterKey: omnigo_meili_secret
+    host: omnigo-meilisearch:7700
+  jwtSecret: omnigo_jwt_super_secret_key_12345
+  tigerbeetle:
+    addr: tigerbeetle:3000
+postgres:
+  enabled: true
+  replicaCount: 1
+  image: postgres:15-alpine
+  port: 5432
+  storageSize: 5Gi
+redis:
+  enabled: true
+  replicaCount: 3
+  image: redis:7.0-alpine
+  ports:
+    - 6379
+    - 6380
+    - 6381
+kafka:
+  enabled: true
+  replicaCount: 1
+  image: confluentinc/cp-kafka:7.4.0
+  port: 9092
+tigerbeetle:
+  enabled: true
+  replicaCount: 1
+  image: ghcr.io/tigerbeetle/tigerbeetle:latest
+  port: 3000
+meilisearch:
+  enabled: true
+  replicaCount: 1
+  image: getmeili/meilisearch:v1.7
+  port: 7700
+clickhouse:
+  enabled: true
+  replicaCount: 1
+  image: clickhouse/clickhouse-server:23.3-alpine
+  port: 9100
+jaeger:
+  enabled: true
+  replicaCount: 1
+  image: jaegertracing/all-in-one:1.46
+  port: 16686
+kong:
+  enabled: true
+  replicaCount: 1
+  image: kong:3.4.0-alpine
+  port: 8000
+  adminPort: 8001
+services:
+  locationSyncWorker:
+    replicaCount: 1
+    image: omnigo-location-sync-worker:latest
+    resources:
+      limits:
+        cpu: 250m
+        memory: 256Mi
+  analyticsWorker:
+    replicaCount: 1
+    image: omnigo-analytics-worker:latest
+    resources:
+      limits:
+        cpu: 250m
+        memory: 256Mi
+  aiEngine:
+    replicaCount: 1
+    image: omnigo-ai-engine:latest
+    port: 8086
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+  notificationService:
+    replicaCount: 1
+    image: omnigo-notification-service:latest
+    port: 8089
+    resources:
+      limits:
+        cpu: 250m
+        memory: 256Mi
+  emailService:
+    replicaCount: 1
+    image: omnigo-email-service:latest
+    port: 8090
+    resources:
+      limits:
+        cpu: 250m
+        memory: 256Mi
+  monolithService:
+    replicaCount: 1
+    image: omnigo-monolith:latest
+    port: 8000
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+      requests:
+        cpu: 250m
+        memory: 256Mi

@@ -1,0 +1,100 @@
+_format_version: "3.0"
+services:
+  - name: auth-service
+    url: http://omnigo-monolith:8000
+    routes:
+      - name: auth-routes
+        paths:
+          - /api/v1/auth
+          - /api/v1/users
+        strip_path: false
+  
+  - name: vendor-store-service
+    url: http://omnigo-monolith:8000
+    routes:
+      - name: vendor-store-routes
+        paths:
+          - /api/v1/vendor
+          - /api/v1/stores
+          - /api/v1/geocoding
+        strip_path: false
+
+  - name: product-service
+    url: http://omnigo-monolith:8000
+    routes:
+      - name: product-routes
+        paths:
+          - /api/v1/products
+          - /api/v1/wishlist
+          - /api/v1/reviews
+        strip_path: false
+
+  - name: admin-service
+    url: http://omnigo-monolith:8000
+    routes:
+      - name: admin-routes
+        paths:
+          - /api/v1/admin
+          - /api/v1/geo
+        strip_path: false
+
+  - name: delivery-gig-service
+    url: http://omnigo-monolith:8000
+    routes:
+      - name: delivery-routes
+        paths:
+          - /api/v1/delivery
+        strip_path: false
+
+  - name: ride-service
+    url: http://omnigo-monolith:8000
+    routes:
+      - name: ride-routes
+        paths:
+          - /api/v1/rides
+          - /api/v1/ride
+        strip_path: false
+
+  - name: order-service
+    url: http://omnigo-monolith:8000
+    routes:
+      - name: order-routes
+        paths:
+          - /api/v1/orders
+          - /api/v1/cart
+          - /api/v1/chat
+          - /api/v1/ratings
+          - /api/v1/wallet
+        strip_path: false
+
+  - name: ai-engine
+    url: http://omnigo-ai-engine:8086
+    routes:
+      - name: ai-routes
+        paths:
+          - /api/v1/ai
+        strip_path: false
+
+  - name: payment-orchestrator
+    url: http://omnigo-monolith:8000
+    routes:
+      - name: payment-routes
+        paths:
+          - /api/v1/payments
+          - /api/v1/finance
+        strip_path: false
+
+  # Rust WebSocket Gateway via Proxy
+  - name: websocket-gateway
+    url: http://omnigo-monolith:8000
+    routes:
+      - name: websocket-routes
+        paths:
+          - /ws
+        strip_path: false
+
+plugins:
+  - name: rate-limiting
+    config:
+      minute: 200
+      policy: local

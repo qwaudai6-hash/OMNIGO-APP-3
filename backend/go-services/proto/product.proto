@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package pb;
+
+option go_package = "github.com/omnigo/backend/internal/product/pb;pb";
+
+message OrderItem {
+  string product_tracking_id = 1;
+  int32 quantity = 2;
+  double price_at_checkout = 3;
+  string store_tracking_id = 4;
+  string vendor_tracking_id = 5;
+}
+
+message ReserveRequest {
+  repeated OrderItem items = 1;
+  string order_tracking_id = 2;
+}
+
+message ReserveResponse {
+  bool success = 1;
+  string message = 2;
+  repeated OrderItem items = 3;
+  string vendor_tracking_id = 4;
+  string store_tracking_id = 5;
+}
+
+message ReleaseRequest {
+  repeated OrderItem items = 1;
+  string order_tracking_id = 2;
+}
+
+message ReleaseResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+service ProductInventoryService {
+  rpc ReserveProduct (ReserveRequest) returns (ReserveResponse);
+  rpc ReleaseProduct (ReleaseRequest) returns (ReleaseResponse);
+}

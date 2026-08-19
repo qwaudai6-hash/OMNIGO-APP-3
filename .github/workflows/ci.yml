@@ -1,0 +1,347 @@
+name: OMNIGO CI Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  # Prevent accidental remote connections during CI tests.
+  # Real DB/Redis/Neo4j are used only in deployed environments, not CI.
+  CI_ENVIRONMENT: true
+
+jobs:
+  # ── Go Services ─────────────────────────────────────────────
+  go-build:
+    name: Go Build & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend/go-services
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go-services/go.mod
+          cache-dependency-path: backend/go-services/go.sum
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build all services
+        run: go build ./...
+
+      - name: Run tests
+        run: go test ./... -v -count=1 -short
+        env:
+          JWT_SECRET_KEY: "dummy_jwt_secret_key_for_testing_in_ci_12345"
+          HMAC_SECRET: "dummy_secret_for_testing"
+          JAZZCASH_SALT: "dummy_jazzcash_salt"
+          EASYPAISA_SALT: "dummy_easypaisa_salt"
+          DATABASE_URL: "postgres://omnigo_user:omnigo_password@localhost:5433/omnigo_db"
+          REDIS_ADDRS: "localhost:6379"
+
+      - name: Run vet
+        run: go vet ./...
+
+  # ── Flutter App ─────────────────────────────────────────────
+  flutter-ci:
+    name: Flutter CI — Analyze, Test, Android Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend/omnigo_app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version-file: frontend/omnigo_app/pubspec.yaml
+          channel: 'stable'
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Verify formatting
+        run: dart format --set-exit-if-changed lib/
+
+      - name: Analyze code
+        run: flutter analyze --no-pub --no-fatal-infos
+
+      - name: Run tests
+        run: flutter test --no-pub
+
+      - name: Build Android APK (smoke)
+        run: |
+          flutter build apk --debug \
+            --dart-define=API_HOST=${{ vars.FLUTTER_API_HOST || 'omnigo-app-production.up.railway.app' }} \
+            --dart-define=STRIPE_PUBLISHABLE_KEY=${{ vars.STRIPE_PUBLISHABLE_KEY || 'pk_test_placeholder' }}
+
+  # ── Flutter iOS Build ─────────────────────────────────────────
+  flutter-build-ios:
+    name: Flutter CI — iOS Build (macOS)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: frontend/omnigo_app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version-file: frontend/omnigo_app/pubspec.yaml
+          channel: 'stable'
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build iOS (no code signing)
+        run: |
+          flutter build ios --no-codesign \
+            --dart-define=API_HOST=${{ vars.FLUTTER_API_HOST || 'omnigo-app-production.up.railway.app' }} \
+            --dart-define=STRIPE_PUBLISHABLE_KEY=${{ vars.STRIPE_PUBLISHABLE_KEY || 'pk_test_placeholder' }}
+
+  # ── Security Scan ───────────────────────────────────────────
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
+        continue-on-error: false
+
+  # ── Docker Smoke Builds (every PR and push) ─────────────────
+  docker-smoke-go:
+    name: Docker Smoke Build — Go services
+    runs-on: ubuntu-latest
+    needs: [go-build]
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [
+          admin-service,
+          analytics-worker,
+          auth-service,
+          delivery-gig-service,
+          graph-sync-worker,
+          location-sync-worker,
+          map-service,
+          order-service,
+          payment-orchestrator,
+          product-service,
+          ride-service,
+          vendor-store-service,
+          gateway
+        ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Smoke build image
+        uses: docker/build-push-action@v6
+        with:
+          context: backend/go-services
+          file: backend/go-services/Dockerfile
+          build-args: SERVICE=${{ matrix.service }}
+          push: false
+          load: true
+          tags: omnigo/${{ matrix.service }}:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  docker-smoke-other:
+    name: Docker Smoke Build — Node/Python
+    runs-on: ubuntu-latest
+    needs: [flutter-ci]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Smoke build notification-service
+        uses: docker/build-push-action@v6
+        with:
+          context: backend/node-services/notification-service
+          file: backend/node-services/notification-service/Dockerfile
+          push: false
+          load: true
+          tags: omnigo/notification-service:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke build email-service
+        uses: docker/build-push-action@v6
+        with:
+          context: backend/node-services/email-service
+          file: backend/node-services/email-service/Dockerfile
+          push: false
+          load: true
+          tags: omnigo/email-service:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke build sms-service
+        uses: docker/build-push-action@v6
+        with:
+          context: backend/node-services/sms-service
+          file: backend/node-services/sms-service/Dockerfile
+          push: false
+          load: true
+          tags: omnigo/sms-service:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke build ai-engine
+        uses: docker/build-push-action@v6
+        with:
+          context: backend/python-services/ai-engine
+          file: backend/python-services/ai-engine/Dockerfile
+          push: false
+          load: true
+          tags: omnigo/ai-engine:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Publish Images (push only) ──────────────────────────────
+  publish-images:
+    name: Publish Images
+    runs-on: ubuntu-latest
+    needs: [go-build, flutter-ci, docker-smoke-go, docker-smoke-other]
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - context: backend/go-services
+            file: backend/go-services/Dockerfile
+            build_args: SERVICE=admin-service
+            name: admin-service
+          - context: backend/go-services
+            file: backend/go-services/Dockerfile
+            build_args: SERVICE=analytics-worker
+            name: analytics-worker
+          - context: backend/go-services
+            file: backend/go-services/Dockerfile
+            build_args: SERVICE=auth-service
+            name: auth-service
+          - context: backend/go-services
+            file: backend/go-services/Dockerfile
+            build_args: SERVICE=delivery-gig-service
+            name: delivery-gig-service
+          - context: backend/go-services
+            file: backend/go-services/Dockerfile
+            build_args: SERVICE=graph-sync-worker
+            name: graph-sync-worker
+          - context: backend/go-services
+            file: backend/go-services/Dockerfile
+            build_args: SERVICE=location-sync-worker
+            name: location-sync-worker
+          - context: backend/go-services
+            file: backend/go-services/Dockerfile
+            build_args: SERVICE=map-service
+            name: map-service
+          - context: backend/go-services
+            file: backend/go-services/Dockerfile
+            build_args: SERVICE=order-service
+            name: order-service
+          - context: backend/go-services
+            file: backend/go-services/Dockerfile
+            build_args: SERVICE=payment-orchestrator
+            name: payment-orchestrator
+          - context: backend/go-services
+            file: backend/go-services/Dockerfile
+            build_args: SERVICE=product-service
+            name: product-service
+          - context: backend/go-services
+            file: backend/go-services/Dockerfile
+            build_args: SERVICE=ride-service
+            name: ride-service
+          - context: backend/go-services
+            file: backend/go-services/Dockerfile
+            build_args: SERVICE=vendor-store-service
+            name: vendor-store-service
+          - context: backend/go-services
+            file: backend/go-services/Dockerfile
+            build_args: SERVICE=gateway
+            name: gateway
+          - context: backend/node-services/notification-service
+            file: backend/node-services/notification-service/Dockerfile
+            name: notification-service
+          - context: backend/node-services/email-service
+            file: backend/node-services/email-service/Dockerfile
+            name: email-service
+          - context: backend/node-services/sms-service
+            file: backend/node-services/sms-service/Dockerfile
+            name: sms-service
+          - context: backend/python-services/ai-engine
+            file: backend/python-services/ai-engine/Dockerfile
+            name: ai-engine
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set lowercase owner name
+        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> ${GITHUB_ENV}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          build-args: ${{ matrix.build_args }}
+          push: true
+          tags: |
+            ghcr.io/${{ env.OWNER_LC }}/omnigo-${{ matrix.name }}:${{ github.sha }}
+            ghcr.io/${{ env.OWNER_LC }}/omnigo-${{ matrix.name }}:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/omnigo-${{ matrix.name }}:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/omnigo-${{ matrix.name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Optional: Deploy to Railway (push only) ─────────────────
+  # Requires RAILWAY_TOKEN and RAILWAY_PROJECT_ID secrets.
+  # Uncomment and configure Railway CLI step when ready.
+  # deploy-railway:
+  #   name: Deploy to Railway
+  #   runs-on: ubuntu-latest
+  #   needs: [publish-images]
+  #   if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: railway/cli@v2
+  #       with:
+  #         railway_token: ${{ secrets.RAILWAY_TOKEN }}
+  #     - run: railway up --detach

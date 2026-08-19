@@ -1,0 +1,47 @@
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck      # unchecked errors
+    - gosimple      # simplifications
+    - govet         # standard go vet
+    - ineffassign   # unused assignments
+    - staticcheck   # extensive static analysis
+    - unused        # unused identifiers
+    - gosec         # security issues
+    - gocritic      # opinionated style + bug checks
+    - bodyclose     # http body must be closed
+    - sqlclosecheck # sql rows must be closed
+    - rowserrcheck  # sql.Rows.Err must be checked
+    - exportloopref # loop ref capture bug
+
+linters-settings:
+  gosec:
+    severity: high
+    confidence: medium
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - performance
+      - style
+    disabled-tags:
+      - experimental
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - gosec
+        - gocritic
+        - errcheck
+  max-same-issues: 0
+  max-issues-per-linter: 0
+
+# Test coverage threshold: 40% for any non-trivial package.
+# CI will fail if total coverage drops below this.
+coverage:
+  total:
+    threshold: 40

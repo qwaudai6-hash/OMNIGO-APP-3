@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "omnigo.fullname" . }}-location-sync-worker
+  labels:
+    {{- include "omnigo.labels" . }}
+spec:
+  replicas: {{ .Values.services.locationSyncWorker.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "omnigo.name" . }}-location-sync-worker
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "omnigo.name" . }}-location-sync-worker
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: location-sync-worker
+          image: "{{ .Values.services.locationSyncWorker.image }}"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: REDIS_ADDRS
+              value: "{{ .Values.global.redis.addrs }}"
+            - name: KAFKA_BROKERS
+              value: "{{ .Values.global.kafka.brokers }}"
+            - name: DB_WRITER_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "omnigo.fullname" . }}-secrets
+                  key: db-writer-dsn
+          resources:
+            {{- toYaml .Values.services.locationSyncWorker.resources | nindent 12 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "omnigo.fullname" . }}-analytics-worker
+  labels:
+    {{- include "omnigo.labels" . }}
+spec:
+  replicas: {{ .Values.services.analyticsWorker.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "omnigo.name" . }}-analytics-worker
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "omnigo.name" . }}-analytics-worker
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: analytics-worker
+          image: "{{ .Values.services.analyticsWorker.image }}"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CLICKHOUSE_ADDR
+              value: "{{ .Values.global.clickhouse.addr }}"
+            - name: KAFKA_BROKERS
+              value: "{{ .Values.global.kafka.brokers }}"
+          resources:
+            {{- toYaml .Values.services.analyticsWorker.resources | nindent 12 }}

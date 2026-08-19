@@ -1,0 +1,54 @@
+{{- if .Values.meilisearch.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "omnigo.fullname" . }}-meilisearch
+  labels:
+    {{- include "omnigo.labels" . }}
+spec:
+  ports:
+    - port: {{ .Values.meilisearch.port }}
+      targetPort: 7700
+  selector:
+    app.kubernetes.io/name: {{ include "omnigo.name" . }}-meilisearch
+    app.kubernetes.io/instance: {{ .Release.Name }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "omnigo.fullname" . }}-meilisearch
+  labels:
+    {{- include "omnigo.labels" . }}
+spec:
+  replicas: {{ .Values.meilisearch.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "omnigo.name" . }}-meilisearch
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "omnigo.name" . }}-meilisearch
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: meilisearch
+          image: "{{ .Values.meilisearch.image }}"
+          env:
+            - name: MEILI_ENV
+              value: "development"
+            - name: MEILI_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "omnigo.fullname" . }}-secrets
+                  key: meilisearch-master-key
+          ports:
+            - containerPort: 7700
+              name: api
+          volumeMounts:
+            - name: meilidata
+              mountPath: /meili_data
+      volumes:
+        - name: meilidata
+          emptyDir: {}
+{{- end }}

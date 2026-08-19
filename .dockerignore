@@ -1,0 +1,15 @@
+# Don't send frontend, docs, etc. to Docker build context
+frontend/
+.git/
+*.md
+.env
+.env.*
+.DS_Store
+.idea/
+.vscode/
+uploads/
+secrets/
+*.pbf
+*.pem
+*.key
+*.crt

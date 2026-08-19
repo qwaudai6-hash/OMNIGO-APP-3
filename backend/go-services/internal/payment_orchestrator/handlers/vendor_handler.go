@@ -1,0 +1,167 @@
+package handlers
+
+import (
+	"fmt"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// VendorHandler handles vendor wallet and payout queries.
+type VendorHandler struct {
+	db *pgxpool.Pool
+}
+
+func NewVendorHandler(db *pgxpool.Pool) *VendorHandler {
+	return &VendorHandler{db: db}
+}
+
+// GetWallet handles GET /api/v1/vendor/wallet/:vendor_id
+func (h *VendorHandler) GetWallet(c *gin.Context) {
+	vendorID := c.Param("vendor_id")
+	ctx := c.Request.Context()
+
+	var balance, lifetimeEarnings, totalPayouts float64
+	err := h.db.QueryRow(ctx,
+		`SELECT COALESCE(balance, 0), COALESCE(lifetime_earnings, 0), COALESCE(total_payouts, 0)
+		 FROM vendor_wallet WHERE vendor_tracking_id = $1`,
+		vendorID,
+	).Scan(&balance, &lifetimeEarnings, &totalPayouts)
+	if err != nil {
+		// No wallet row yet — return zeros
+		balance = 0
+		lifetimeEarnings = 0
+		totalPayouts = 0
+	}
+
+	var pendingBalance float64
+	_ = h.db.QueryRow(ctx,
+		`SELECT COALESCE(SUM(amount), 0) FROM escrow_holds WHERE vendor_tracking_id = $1 AND status = 'held'`,
+		vendorID,
+	).Scan(&pendingBalance)
+
+	c.JSON(http.StatusOK, gin.H{
+		"vendor_tracking_id": vendorID,
+		"balance":            balance,
+		"lifetime_earnings":  lifetimeEarnings,
+		"total_payouts":      totalPayouts,
+		"pending_balance":    pendingBalance,
+	})
+}
+
+// ListPayouts handles GET /api/v1/vendor/payouts/:vendor_id
+func (h *VendorHandler) ListPayouts(c *gin.Context) {
+	vendorID := c.Param("vendor_id")
+	ctx := c.Request.Context()
+
+	rows, err := h.db.Query(ctx,
+		`SELECT id, amount, COALESCE(method, ''), status, COALESCE(created_at, NOW()), COALESCE(completed_at, '0001-01-01')
+		 FROM vendor_payouts WHERE vendor_tracking_id = $1 ORDER BY created_at DESC LIMIT 20`,
+		vendorID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	type PayoutResponse struct {
+		ID          string  `json:"id"`
+		Amount      float64 `json:"amount"`
+		Method      string  `json:"method"`
+		Status      string  `json:"status"`
+		CreatedAt   string  `json:"created_at"`
+		CompletedAt string  `json:"completed_at"`
+	}
+
+	var payouts []PayoutResponse
+	for rows.Next() {
+		var p PayoutResponse
+		if err := rows.Scan(&p.ID, &p.Amount, &p.Method, &p.Status, &p.CreatedAt, &p.CompletedAt); err != nil {
+			continue
+		}
+		payouts = append(payouts, p)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"payouts": payouts})
+}
+
+type WithdrawRequest struct {
+	VendorTrackingID string  `json:"vendor_tracking_id" binding:"required"`
+	Amount           float64 `json:"amount" binding:"required,gt=0"`
+	Method           string  `json:"method" binding:"required"`
+}
+
+// RequestWithdraw handles POST /api/v1/vendor/withdraw
+func (h *VendorHandler) RequestWithdraw(c *gin.Context) {
+	var req WithdrawRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx := c.Request.Context()
+	tx, err := h.db.Begin(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to begin transaction: %v", err)})
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	var balance float64
+	err = tx.QueryRow(ctx,
+		`SELECT COALESCE(balance, 0) FROM vendor_wallet WHERE vendor_tracking_id = $1 FOR UPDATE`,
+		req.VendorTrackingID,
+	).Scan(&balance)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "vendor wallet not found or initialized"})
+		return
+	}
+
+	if balance < req.Amount {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "insufficient withdrawable balance"})
+		return
+	}
+
+	_, err = tx.Exec(ctx,
+		`UPDATE vendor_wallet
+		 SET balance = balance - $1, total_payouts = total_payouts + $1
+		 WHERE vendor_tracking_id = $2`,
+		req.Amount, req.VendorTrackingID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update wallet balance: %v", err)})
+		return
+	}
+
+	_, err = tx.Exec(ctx,
+		`INSERT INTO vendor_payouts (id, vendor_tracking_id, amount, method, status, batch_id)
+		 VALUES (gen_random_uuid(), $1, $2, $3, 'pending', NULL)`,
+		req.VendorTrackingID, req.Amount, req.Method,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to insert payout entry: %v", err)})
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to commit transaction: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "withdrawal request submitted successfully",
+		"status":  "pending",
+	})
+}
+
+// RegisterRoutes registers vendor wallet/payout endpoints.
+func (h *VendorHandler) RegisterRoutes(router *gin.Engine) {
+	vendor := router.Group("/api/v1/vendor")
+	{
+		vendor.GET("/wallet/:vendor_id", h.GetWallet)
+		vendor.GET("/payouts/:vendor_id", h.ListPayouts)
+		vendor.POST("/withdraw", h.RequestWithdraw)
+	}
+}
