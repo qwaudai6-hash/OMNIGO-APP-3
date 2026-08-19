@@ -218,6 +218,48 @@ func (c *Client) GetTransactionStatus(ctx context.Context, transactionID string)
 	return &statusRes, nil
 }
 
+// GetTransactionStatusByBasketID calls GET /transaction/basket/<basket_id>
+func (c *Client) GetTransactionStatusByBasketID(ctx context.Context, basketID string) (*TransactionStatusResponse, error) {
+	token, err := c.GetAuthToken(ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get auth token: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/transaction/basket/%s", c.baseURL, url.PathEscape(basketID))
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, &GatewayError{
+			StatusCode: resp.StatusCode,
+			Message:    "Transaction status check by basket ID failed",
+			Internal:   fmt.Errorf("status %d", resp.StatusCode),
+		}
+	}
+
+	var statusRes TransactionStatusResponse
+	if err := json.Unmarshal(bodyBytes, &statusRes); err != nil {
+		return nil, fmt.Errorf("failed to parse transaction status response: %w", err)
+	}
+
+	return &statusRes, nil
+}
+
 // GetTemporaryTransactionToken calls POST /transaction/token
 func (c *Client) GetTemporaryTransactionToken(ctx context.Context, req TemporaryTokenRequest) (*TemporaryTokenResponse, error) {
 	token, err := c.GetAuthToken(ctx, req.CustomerIP)

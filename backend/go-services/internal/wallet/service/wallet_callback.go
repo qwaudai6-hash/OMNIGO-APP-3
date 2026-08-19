@@ -35,8 +35,7 @@ func WalletSalt(gateway string) string {
 	if s := os.Getenv("WALLET_INTEGRITY_SALT"); s != "" {
 		return s
 	}
-	// ponytail: sandbox fallback; production MUST set env var.
-	return "sandbox_salt_123"
+	return ""
 }
 
 // ComputeWalletSignature generates the HMAC-SHA256 signature for a payment request.

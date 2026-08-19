@@ -324,6 +324,36 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 			t.Error("Failed status was ignored")
 		}
 	})
+
+	t.Run("Status Check By Basket ID", func(t *testing.T) {
+		basketServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/token" {
+				w.WriteHeader(http.StatusOK)
+				json.NewEncoder(w).Encode(AuthTokenResponse{Code: "00", Token: "fake", ExpiresIn: "3600"})
+				return
+			}
+			if r.URL.Path == "/transaction/basket/order_999" {
+				w.WriteHeader(http.StatusOK)
+				json.NewEncoder(w).Encode(TransactionStatusResponse{
+					StatusCode:    "00",
+					BasketID:      "order_999",
+					TransactionID: "txn_basket_999",
+					TxnAmt:        "500.00",
+				})
+				return
+			}
+		}))
+		defer basketServer.Close()
+
+		bClient := NewClient("merchantID", "secretKey", "Test Merchant", basketServer.URL)
+		bRes, err := bClient.GetTransactionStatusByBasketID(ctx, "order_999")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if bRes.StatusCode != "00" || bRes.BasketID != "order_999" || bRes.TxnAmt != "500.00" {
+			t.Errorf("unexpected basket status response: %+v", bRes)
+		}
+	})
 }
 
 func TestFlexibleTypes(t *testing.T) {
