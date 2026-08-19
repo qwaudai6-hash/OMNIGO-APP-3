@@ -239,10 +239,27 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 
 	// Also fetch authoritative mobile number from the users table (never trust the frontend)
 	var authoritativeMobile string
-	err = tx.QueryRow(c.Request.Context(), `SELECT phone FROM users WHERE tracking_id = $1`, customerTrackingID).Scan(&authoritativeMobile)
+	err = tx.QueryRow(c.Request.Context(), `SELECT COALESCE(phone, '') FROM users WHERE tracking_id = $1`, customerTrackingID).Scan(&authoritativeMobile)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user profile"})
 		return
+	}
+	if authoritativeMobile == "" && req.CustomerMobileNo != "" {
+		authoritativeMobile = req.CustomerMobileNo
+	}
+	if authoritativeMobile == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Customer phone number is required for payment verification"})
+		return
+	}
+
+	if req.AccountTypeID == "" {
+		if req.CardNumber != "" {
+			req.AccountTypeID = "2" // Default card account type
+		} else if req.AccountNumber != "" {
+			req.AccountTypeID = "3" // Default bank/wallet account type
+		} else {
+			req.AccountTypeID = "1"
+		}
 	}
 
 	// 3. Insert Pending Payment Attempt
@@ -592,6 +609,23 @@ func (h *PayFastSplitHandler) verifyAndSettle(c *gin.Context, internalTxnID stri
 	err = h.executeSplit(c.Request.Context(), internalTxnID, orderID, expectedAmount, gatewayTxnID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Settlement failed"})
+		return
+	}
+
+	if strings.Contains(c.GetHeader("Accept"), "text/html") {
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head><title>Payment Successful</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="font-family:sans-serif;text-align:center;padding:50px 20px;">
+    <h2 style="color:#2e7d32;">Payment Authenticated Successfully</h2>
+    <p>Your order #<strong>%s</strong> is being processed.</p>
+    <script>
+        if (window.opener) { window.opener.postMessage({status: 'success', order_id: '%s'}, '*'); }
+        if (window.FlutterChannel) { window.FlutterChannel.postMessage(JSON.stringify({status: 'success', order_id: '%s'})); }
+    </script>
+</body>
+</html>`, orderID, orderID, orderID))
 		return
 	}
 
