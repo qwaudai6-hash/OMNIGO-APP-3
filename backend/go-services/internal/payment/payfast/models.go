@@ -1,9 +1,63 @@
 package payfast
 
 import (
+	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
+
+// FlexibleBool unmarshals both JSON boolean (true/false) and string ("true"/"false"/"1"/"0").
+type FlexibleBool bool
+
+func (b *FlexibleBool) UnmarshalJSON(data []byte) error {
+	s := strings.Trim(string(data), "\"")
+	s = strings.ToLower(strings.TrimSpace(s))
+	switch s {
+	case "true", "1", "t", "yes", "y":
+		*b = true
+		return nil
+	case "false", "0", "f", "no", "n", "", "null":
+		*b = false
+		return nil
+	default:
+		var rawBool bool
+		if err := json.Unmarshal(data, &rawBool); err == nil {
+			*b = FlexibleBool(rawBool)
+			return nil
+		}
+		*b = false
+		return nil
+	}
+}
+
+func (b FlexibleBool) Bool() bool {
+	return bool(b)
+}
+
+// FlexibleString unmarshals JSON strings, numbers, and booleans into a normalized string representation.
+type FlexibleString string
+
+func (fs *FlexibleString) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*fs = FlexibleString(s)
+		return nil
+	}
+	var b bool
+	if err := json.Unmarshal(data, &b); err == nil {
+		*fs = FlexibleString(strconv.FormatBool(b))
+		return nil
+	}
+	trimmed := strings.Trim(string(data), "\"")
+	*fs = FlexibleString(trimmed)
+	return nil
+}
+
+func (fs FlexibleString) String() string {
+	return string(fs)
+}
 
 // Environment specifies Sandbox vs Production gateway endpoints.
 type Environment string
@@ -77,15 +131,15 @@ func (c CustomerValidationRequest) String() string {
 
 // CustomerValidationResponse is returned by POST /customer/validate
 type CustomerValidationResponse struct {
-	Code                         string `json:"code"`
-	Message                      string `json:"message"`
-	TransactionID                string `json:"transaction_id"`
-	Data3DSAcsURL                string `json:"data_3ds_acsurl"`
-	Data3DSPaReq                 string `json:"data_3ds_pareq"`
-	Data3DSHTML                  string `json:"data_3ds_html"`
-	Data3DSSecureID              string `json:"data_3ds_secureid"`
-	Data3DSGatewayRecommendation string `json:"data_3ds_gatewayrecommendation"`
-	ECI                          string `json:"eci"`
+	Code                         string         `json:"code"`
+	Message                      string         `json:"message"`
+	TransactionID                string         `json:"transaction_id"`
+	Data3DSAcsURL                string         `json:"data_3ds_acsurl"`
+	Data3DSPaReq                 string         `json:"data_3ds_pareq"`
+	Data3DSHTML                  string         `json:"data_3ds_html"`
+	Data3DSSecureID              string         `json:"data_3ds_secureid"`
+	Data3DSGatewayRecommendation string         `json:"data_3ds_gatewayrecommendation"`
+	ECI                          FlexibleString `json:"eci"`
 }
 
 // InitiateTransactionRequest contains fields for POST /transaction
@@ -176,18 +230,18 @@ func (t TemporaryTokenRequest) String() string {
 
 // TemporaryTokenResponse is returned by POST /transaction/token
 type TemporaryTokenResponse struct {
-	StatusCode                   string `json:"status_code"`
-	StatusMsg                    string `json:"status_msg"`
-	InstrumentAlias              string `json:"instrument_alias"`
-	InstrumentToken              string `json:"instrument_token"`
-	TransactionID                string `json:"transaction_id"`
-	OtpRequired                  string `json:"otp_required"`
-	ECI                          string `json:"eci"`
-	Data3DSAcsURL                string `json:"data_3ds_acsurl"`
-	Data3DSPaReq                 string `json:"data_3ds_pareq"`
-	Data3DSHTML                  string `json:"data_3ds_html"`
-	Data3DSSecureID              string `json:"data_3ds_secureid"`
-	Data3DSGatewayRecommendation string `json:"data_3ds_gatewayrecommendation"`
+	StatusCode                   string         `json:"status_code"`
+	StatusMsg                    string         `json:"status_msg"`
+	InstrumentAlias              string         `json:"instrument_alias"`
+	InstrumentToken              string         `json:"instrument_token"`
+	TransactionID                string         `json:"transaction_id"`
+	OtpRequired                  FlexibleBool   `json:"otp_required"`
+	ECI                          FlexibleString `json:"eci"`
+	Data3DSAcsURL                string         `json:"data_3ds_acsurl"`
+	Data3DSPaReq                 string         `json:"data_3ds_pareq"`
+	Data3DSHTML                  string         `json:"data_3ds_html"`
+	Data3DSSecureID              string         `json:"data_3ds_secureid"`
+	Data3DSGatewayRecommendation string         `json:"data_3ds_gatewayrecommendation"`
 }
 
 // TokenizedTransactionRequest is for POST /transaction/tokenized

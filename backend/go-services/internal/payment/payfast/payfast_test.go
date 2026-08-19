@@ -325,3 +325,60 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 		}
 	})
 }
+
+func TestFlexibleTypes(t *testing.T) {
+	t.Run("FlexibleBool unmarshaling", func(t *testing.T) {
+		type TestStruct struct {
+			Flag FlexibleBool `json:"flag"`
+		}
+
+		// Raw boolean true
+		var t1 TestStruct
+		if err := json.Unmarshal([]byte(`{"flag": true}`), &t1); err != nil || !t1.Flag.Bool() {
+			t.Errorf("expected true, got %v (err: %v)", t1.Flag.Bool(), err)
+		}
+
+		// String "true"
+		var t2 TestStruct
+		if err := json.Unmarshal([]byte(`{"flag": "true"}`), &t2); err != nil || !t2.Flag.Bool() {
+			t.Errorf("expected true, got %v (err: %v)", t2.Flag.Bool(), err)
+		}
+
+		// Raw boolean false
+		var t3 TestStruct
+		if err := json.Unmarshal([]byte(`{"flag": false}`), &t3); err != nil || t3.Flag.Bool() {
+			t.Errorf("expected false, got %v (err: %v)", t3.Flag.Bool(), err)
+		}
+
+		// String "false"
+		var t4 TestStruct
+		if err := json.Unmarshal([]byte(`{"flag": "false"}`), &t4); err != nil || t4.Flag.Bool() {
+			t.Errorf("expected false, got %v (err: %v)", t4.Flag.Bool(), err)
+		}
+	})
+
+	t.Run("FlexibleString unmarshaling", func(t *testing.T) {
+		type TestStruct struct {
+			Val FlexibleString `json:"val"`
+		}
+
+		// String value "05"
+		var t1 TestStruct
+		if err := json.Unmarshal([]byte(`{"val": "05"}`), &t1); err != nil || t1.Val.String() != "05" {
+			t.Errorf("expected '05', got %v (err: %v)", t1.Val.String(), err)
+		}
+
+		// Boolean value true
+		var t2 TestStruct
+		if err := json.Unmarshal([]byte(`{"val": true}`), &t2); err != nil || t2.Val.String() != "true" {
+			t.Errorf("expected 'true', got %v (err: %v)", t2.Val.String(), err)
+		}
+
+		// Numeric value 123
+		var t3 TestStruct
+		if err := json.Unmarshal([]byte(`{"val": 123}`), &t3); err != nil || t3.Val.String() != "123" {
+			t.Errorf("expected '123', got %v (err: %v)", t3.Val.String(), err)
+		}
+	})
+}
+

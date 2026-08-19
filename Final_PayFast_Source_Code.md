@@ -1,9 +1,24 @@
-# OMNIGO Super-App — Complete Official PayFast Payment Gateway Integration
+# OMNIGO Super-App — Official PayFast Payment Gateway Integration
 
-> **Document Version:** 4.0 (Production Hardened & Fully Grounded in Official PayFast Pakistan Spec)  
+> **Document Version:** 5.0 (Production Hardened & Fully Grounded in Official PayFast Pakistan Spec)  
 > **Target Gateway:** PayFast Pakistan (APPS Pvt Ltd / 1LINK Network)  
-> **Integration Scenario:** Scenario 1 / Option C — Temporary Transaction Token ➔ 3DS OTP Authentication ➔ Tokenized Transaction Capture ➔ Status Verification ➔ Transactional Outbox Settlement  
-> **Security Baseline:** PCI-DSS Zero-Cardholder-Data Persistence, Fail-Closed Constant-Time HMAC Signature Validation, Idempotent Transactional Outbox.
+> **Integration Scenario:** Scenario 1 — Temporary Transaction Token ➔ 3DS OTP Authentication ➔ Tokenized Transaction Capture ➔ Mandatory Status Verification ➔ Transactional Outbox Settlement  
+> **Security Baseline:** PCI-DSS Zero-Cardholder-Data Persistence, Fail-Closed Constant-Time HMAC Signature Validation, Idempotent 3-Way Transactional Outbox Split.
+
+---
+
+## 🔒 Security & PCI-DSS Baseline Compliance
+
+1. **Zero Cardholder Data Persistence:**  
+   Primary Account Number (PAN), Card Expiry Date (MM/YY), and Card Verification Value (CVV) are processed strictly in-memory during temporary token creation and are **never** persisted to PostgreSQL, Redis, local disk, or cache.
+2. **Comprehensive Logging Hardening:**  
+   PAN, CVV, and card expiry are strictly excluded from HTTP request dumps, panic recovery logs, distributed tracing attributes, OpenTelemetry baggage, error monitoring, reverse proxy access logs (Nginx/Traefik), debug logs, Kafka payloads, and Redis values.
+3. **Fail-Closed Verification:**  
+   - All 3DS callbacks require HMAC-SHA256 signed `md` parameter validated using constant-time comparison against `INTERNAL_CALLBACK_SECRET`.
+   - Post-capture status inquiry (`GET /transaction/<id>`) is **mandatory** and fail-closed: missing, unparseable, or mismatched `txnamt` immediately aborts settlement.
+   - Money comparisons are calculated in integer minor units (paisa) to avoid floating-point inaccuracies.
+4. **Transient Network Timeout vs Deterministic Rejection:**  
+   Network timeouts or connection disruptions during tokenized capture or status inquiry transition payments to `gateway_pending` rather than `failed`, preventing erroneous double charges or missed captures until automated periodic reconciliation runs.
 
 ---
 
@@ -46,10 +61,10 @@
          │                                                                │
          ▼                                                                │
 ┌────────────────────────────────────────────────────────────────────────┐│
-│ Transaction Status Verification (GET /transaction/<gateway_txn_id>)   ││
-│ • Verify status_code == "00"                                           ││
-│ • Verify BasketID == OrderID                                           ││
-│ • Verify Gateway Amount == Order Amount in minor units (paisa)         ││
+│ Mandatory Status Verification (GET /transaction/<gateway_txn_id>)     ││
+│ • Fail-closed: Verify status_code == "00"                              ││
+│ • Fail-closed: Verify BasketID == OrderID                              ││
+│ • Fail-closed: Verify Gateway Amount == Order Amount in exact paisa    ││
 └────────┬───────────────────────────────────────────────────────────────┘│
          │                                                                │
          ▼                                                                │
@@ -58,10 +73,13 @@
 │ • Single PostgreSQL transaction boundary:                              ││
 │   1. Lock payment_transactions row (FOR UPDATE)                        ││
 │   2. Lock orders row (FOR UPDATE) & re-verify authoritative amount     ││
-│   3. Compute dynamic 3-way split (Admin Commission + Vendor Escrow)    ││
+│   3. Compute dynamic 3-way split:                                      ││
+│      - PayFastHolding ➔ AdminRevenue                                   ││
+│      - PayFastHolding ➔ VendorLockedEscrow                             ││
+│      - PayFastHolding ➔ CentralEscrow (Delivery pool)                  ││
 │   4. Update payment_transactions ➔ 'settlement_pending'                ││
 │   5. Update orders ➔ payment_status = 'settlement_pending'             ││
-│   6. INSERT into outbox_events (topic: 'payment_settlement')           ││
+│   6. INSERT full 3-way transfer list into outbox_events                ││
 │   7. COMMIT                                                            ││
 └────────────────────────────────────────────────────────────────────────┘┘
 ```
@@ -70,14 +88,14 @@
 
 ## 📂 File Index
 
-1. [`internal/payment/payfast/models.go`](#1-internalpaymentpayfastmodelsgo) — Structs, DTOs, API Requests/Responses, Redaction stringers.
+1. [`internal/payment/payfast/models.go`](#1-internalpaymentpayfastmodelsgo) — Structs, DTOs, FlexibleBool & FlexibleString unmarshalers, Masked stringers.
 2. [`internal/payment/payfast/client.go`](#2-internalpaymentpayfastclientgo) — Gateway client struct, configuration, and token caching constructor.
 3. [`internal/payment/payfast/auth.go`](#3-internalpaymentpayfastauthgo) — OAuth/Auth Token Manager with thread-safe `RWMutex` cache and exponential backoff retry.
 4. [`internal/payment/payfast/signature.go`](#4-internalpaymentpayfastsignaturego) — HMAC-SHA256 hashing algorithms strictly matching PayFast documentation.
 5. [`internal/payment/payfast/api.go`](#5-internalpaymentpayfastapigo) — Core HTTP client wrappers (`/token`, `/customer/validate`, `/transaction/token`, `/transaction/tokenized`, `/transaction/<id>`).
 6. [`internal/payment/payfast/errors.go`](#6-internalpaymentpayfasterrorsgo) — Masked domain errors and GatewayError wrapping.
-7. [`internal/payment_orchestrator/handlers/payfast_handler.go`](#7-internalpayment_orchestratorhandlerspayfast_handlergo) — Full orchestration handler, signed 3DS callback, concurrency guards, and transactional outbox.
-8. [`internal/payment/payfast/payfast_test.go`](#8-internalpaymentpayfastpayfast_testgo) — Unit & integration test suite (hashing, caching, 3DS flows, tampering detection).
+7. [`internal/payment_orchestrator/handlers/payfast_handler.go`](#7-internalpayment_orchestratorhandlerspayfast_handlergo) — Full orchestration handler, signed 3DS callback, timeout vs failed distinction, fail-closed verification, and 3-way outbox transfers.
+8. [`internal/payment/payfast/payfast_test.go`](#8-internalpaymentpayfastpayfast_testgo) — Unit & integration test suite (hashing, caching, 3DS flows, flexible types, tampering detection).
 9. [`migrations/payment_active_order_unique_index.sql`](#9-migrationspayment_active_order_unique_indexsql) — Partial unique database index for database-level concurrency protection.
 
 ---
@@ -88,9 +106,63 @@
 package payfast
 
 import (
+	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
+
+// FlexibleBool unmarshals both JSON boolean (true/false) and string ("true"/"false"/"1"/"0").
+type FlexibleBool bool
+
+func (b *FlexibleBool) UnmarshalJSON(data []byte) error {
+	s := strings.Trim(string(data), "\"")
+	s = strings.ToLower(strings.TrimSpace(s))
+	switch s {
+	case "true", "1", "t", "yes", "y":
+		*b = true
+		return nil
+	case "false", "0", "f", "no", "n", "", "null":
+		*b = false
+		return nil
+	default:
+		var rawBool bool
+		if err := json.Unmarshal(data, &rawBool); err == nil {
+			*b = FlexibleBool(rawBool)
+			return nil
+		}
+		*b = false
+		return nil
+	}
+}
+
+func (b FlexibleBool) Bool() bool {
+	return bool(b)
+}
+
+// FlexibleString unmarshals JSON strings, numbers, and booleans into a normalized string representation.
+type FlexibleString string
+
+func (fs *FlexibleString) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*fs = FlexibleString(s)
+		return nil
+	}
+	var b bool
+	if err := json.Unmarshal(data, &b); err == nil {
+		*fs = FlexibleString(strconv.FormatBool(b))
+		return nil
+	}
+	trimmed := strings.Trim(string(data), "\"")
+	*fs = FlexibleString(trimmed)
+	return nil
+}
+
+func (fs FlexibleString) String() string {
+	return string(fs)
+}
 
 // Environment specifies Sandbox vs Production gateway endpoints.
 type Environment string
@@ -164,15 +236,15 @@ func (c CustomerValidationRequest) String() string {
 
 // CustomerValidationResponse is returned by POST /customer/validate
 type CustomerValidationResponse struct {
-	Code                         string `json:"code"`
-	Message                      string `json:"message"`
-	TransactionID                string `json:"transaction_id"`
-	Data3DSAcsURL                string `json:"data_3ds_acsurl"`
-	Data3DSPaReq                 string `json:"data_3ds_pareq"`
-	Data3DSHTML                  string `json:"data_3ds_html"`
-	Data3DSSecureID              string `json:"data_3ds_secureid"`
-	Data3DSGatewayRecommendation string `json:"data_3ds_gatewayrecommendation"`
-	ECI                          string `json:"eci"`
+	Code                         string         `json:"code"`
+	Message                      string         `json:"message"`
+	TransactionID                string         `json:"transaction_id"`
+	Data3DSAcsURL                string         `json:"data_3ds_acsurl"`
+	Data3DSPaReq                 string         `json:"data_3ds_pareq"`
+	Data3DSHTML                  string         `json:"data_3ds_html"`
+	Data3DSSecureID              string         `json:"data_3ds_secureid"`
+	Data3DSGatewayRecommendation string         `json:"data_3ds_gatewayrecommendation"`
+	ECI                          FlexibleString `json:"eci"`
 }
 
 // InitiateTransactionRequest contains fields for POST /transaction
@@ -263,18 +335,18 @@ func (t TemporaryTokenRequest) String() string {
 
 // TemporaryTokenResponse is returned by POST /transaction/token
 type TemporaryTokenResponse struct {
-	StatusCode                   string `json:"status_code"`
-	StatusMsg                    string `json:"status_msg"`
-	InstrumentAlias              string `json:"instrument_alias"`
-	InstrumentToken              string `json:"instrument_token"`
-	TransactionID                string `json:"transaction_id"`
-	OtpRequired                  string `json:"otp_required"`
-	ECI                          string `json:"eci"`
-	Data3DSAcsURL                string `json:"data_3ds_acsurl"`
-	Data3DSPaReq                 string `json:"data_3ds_pareq"`
-	Data3DSHTML                  string `json:"data_3ds_html"`
-	Data3DSSecureID              string `json:"data_3ds_secureid"`
-	Data3DSGatewayRecommendation string `json:"data_3ds_gatewayrecommendation"`
+	StatusCode                   string         `json:"status_code"`
+	StatusMsg                    string         `json:"status_msg"`
+	InstrumentAlias              string         `json:"instrument_alias"`
+	InstrumentToken              string         `json:"instrument_token"`
+	TransactionID                string         `json:"transaction_id"`
+	OtpRequired                  FlexibleBool   `json:"otp_required"`
+	ECI                          FlexibleString `json:"eci"`
+	Data3DSAcsURL                string         `json:"data_3ds_acsurl"`
+	Data3DSPaReq                 string         `json:"data_3ds_pareq"`
+	Data3DSHTML                  string         `json:"data_3ds_html"`
+	Data3DSSecureID              string         `json:"data_3ds_secureid"`
+	Data3DSGatewayRecommendation string         `json:"data_3ds_gatewayrecommendation"`
 }
 
 // TokenizedTransactionRequest is for POST /transaction/tokenized
@@ -1385,7 +1457,7 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 		metaMap["instrument_token"] = tokenRes.InstrumentToken
 		metaMap["gateway_txn_id"] = tokenRes.TransactionID
 		metaMap["data_3ds_secureid"] = tokenRes.Data3DSSecureID
-		metaMap["eci"] = tokenRes.ECI
+		metaMap["eci"] = tokenRes.ECI.String()
 		metaMap["customer_mobile"] = authoritativeMobile
 		metaMap["account_type"] = req.AccountTypeID
 		metaMap["customer_ip"] = customerIP // Preserve original customer IP for 3DS tokenized call
@@ -1427,13 +1499,18 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 		TxnAmt:           amountStr,
 		CustomerIP:       customerIP,
 		MerCatCode:       os.Getenv("PAYFAST_MERCHANT_CATEGORY"),
-		ECI:              tokenRes.ECI,
+		ECI:              tokenRes.ECI.String(),
 	}
 
 	txnRes, err := h.payfast.InitiateTokenizedTransaction(c.Request.Context(), txnReq)
 	if err != nil {
-		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Tokenized transaction failed: "+err.Error())
-		c.JSON(http.StatusBadGateway, gin.H{"error": "Transaction processing failed"})
+		// Distinguish between transient network timeouts vs deterministic gateway rejections
+		h.markPaymentGatewayPending(c.Request.Context(), internalTxnID, tokenRes.TransactionID, "Tokenized transaction network timeout: "+err.Error())
+		c.JSON(http.StatusGatewayTimeout, gin.H{
+			"status":         "gateway_pending",
+			"error":          "Gateway timeout during capture; verification in progress",
+			"transaction_id": internalTxnID,
+		})
 		return
 	}
 
@@ -1530,8 +1607,12 @@ func (h *PayFastSplitHandler) ThreeDSCallback(c *gin.Context) {
 
 	txnRes, err := h.payfast.InitiateTokenizedTransaction(c.Request.Context(), txnReq)
 	if err != nil {
-		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Tokenized 3DS transaction failed: "+err.Error())
-		c.JSON(http.StatusBadGateway, gin.H{"error": "Transaction processing failed"})
+		// Network timeout on 3DS tokenized call: mark gateway_pending so background reconciliation can verify
+		h.markPaymentGatewayPending(c.Request.Context(), internalTxnID, meta.GatewayTxnID, "Tokenized 3DS transaction timeout: "+err.Error())
+		c.JSON(http.StatusGatewayTimeout, gin.H{
+			"status": "gateway_pending",
+			"error":  "Gateway timeout during 3DS transaction; reconciliation in progress",
+		})
 		return
 	}
 
@@ -1561,8 +1642,12 @@ func (h *PayFastSplitHandler) verifyAndSettle(c *gin.Context, internalTxnID stri
 
 	statusRes, err := h.payfast.GetTransactionStatus(c.Request.Context(), gatewayTxnID)
 	if err != nil {
-		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Status check failed: "+err.Error())
-		c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to verify transaction status"})
+		// Network timeout on status query: mark gateway_pending, do NOT mark failed
+		h.markPaymentGatewayPending(c.Request.Context(), internalTxnID, gatewayTxnID, "Status check timeout: "+err.Error())
+		c.JSON(http.StatusGatewayTimeout, gin.H{
+			"status": "gateway_pending",
+			"error":  "Gateway timeout during status verification; reconciliation pending",
+		})
 		return
 	}
 
@@ -1590,18 +1675,26 @@ func (h *PayFastSplitHandler) verifyAndSettle(c *gin.Context, internalTxnID stri
 		return
 	}
 
-	// Numerical amount comparison in minor units (paisa) to prevent string formatting/rounding discrepancies
-	if statusRes.TxnAmt != "" {
-		gatewayAmt, parseErr := strconv.ParseFloat(statusRes.TxnAmt, 64)
-		if parseErr == nil {
-			expectedPaisa := int64(math.Round(expectedAmount * 100))
-			gatewayPaisa := int64(math.Round(gatewayAmt * 100))
-			if expectedPaisa != gatewayPaisa {
-				h.markPaymentFailed(c.Request.Context(), internalTxnID, fmt.Sprintf("Amount mismatch: expected %d paisa, got %d paisa", expectedPaisa, gatewayPaisa))
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Transaction amount mismatch"})
-				return
-			}
-		}
+	// Mandatory fail-closed numerical amount comparison in minor units (paisa)
+	if statusRes.TxnAmt == "" {
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Missing TxnAmt in gateway status response")
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Transaction amount missing from gateway verification"})
+		return
+	}
+
+	gatewayAmt, parseErr := strconv.ParseFloat(statusRes.TxnAmt, 64)
+	if parseErr != nil {
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, fmt.Sprintf("Invalid TxnAmt in gateway status response: %s", statusRes.TxnAmt))
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid transaction amount from gateway"})
+		return
+	}
+
+	expectedPaisa := int64(math.Round(expectedAmount * 100))
+	gatewayPaisa := int64(math.Round(gatewayAmt * 100))
+	if expectedPaisa != gatewayPaisa {
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, fmt.Sprintf("Amount mismatch: expected %d paisa (%.2f), got %d paisa (%.2f)", expectedPaisa, expectedAmount, gatewayPaisa, gatewayAmt))
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Transaction amount mismatch"})
+		return
 	}
 
 	err = h.executeSplit(c.Request.Context(), internalTxnID, orderID, expectedAmount, gatewayTxnID)
@@ -1613,42 +1706,26 @@ func (h *PayFastSplitHandler) verifyAndSettle(c *gin.Context, internalTxnID stri
 	c.JSON(http.StatusOK, gin.H{"status": "settlement_pending", "order_id": orderID})
 }
 
-// markPaymentFailed transitions a payment to 'failed' status.
-// Only allows failure from specific states to prevent overwriting concurrent state changes.
-// Valid failure transitions: pending → failed, 3ds_required → failed, processing → failed.
+// markPaymentFailed transitions a payment to 'failed' status on deterministic rejection.
 func (h *PayFastSplitHandler) markPaymentFailed(ctx context.Context, internalTxnID string, reason string) {
 	_, _ = h.db.Exec(ctx,
 		`UPDATE payment_transactions SET status = 'failed', error_message = $1, updated_at = NOW()
-		 WHERE transaction_id = $2 AND status IN ('pending', '3ds_required', 'processing')`,
+		 WHERE transaction_id = $2 AND status IN ('pending', '3ds_required', 'processing', 'gateway_pending')`,
 		reason, internalTxnID,
 	)
 }
 
+// markPaymentGatewayPending transitions a payment to 'gateway_pending' on transient network timeouts.
+// This prevents incorrectly failing payments that might have succeeded on the gateway, allowing reconciliation.
+func (h *PayFastSplitHandler) markPaymentGatewayPending(ctx context.Context, internalTxnID string, gatewayTxnID string, reason string) {
+	_, _ = h.db.Exec(ctx,
+		`UPDATE payment_transactions SET status = 'gateway_pending', gateway_txn_id = COALESCE(NULLIF($1, ''), gateway_txn_id), error_message = $2, updated_at = NOW()
+		 WHERE transaction_id = $3 AND status IN ('pending', '3ds_required', 'processing')`,
+		gatewayTxnID, reason, internalTxnID,
+	)
+}
+
 // executeSplit performs the DB-atomic settlement preparation.
-//
-// Architecture: This function does NOT call the external ledger service directly.
-// Instead it records the settlement intent in an outbox_events table within the
-// same PostgreSQL transaction. A separate outbox worker (idempotent) will read
-// these events and execute the ledger transfers + escrow holds. This ensures that
-// the DB state and ledger are never inconsistent.
-//
-// Flow:
-//   DB Transaction:
-//     1. Lock payment_transactions row (FOR UPDATE) — idempotency check
-//     2. Lock orders row (FOR UPDATE) — re-read authoritative amount, verify status
-//     3. Verify amount hasn't changed since initial request
-//     4. Calculate commission split
-//     5. Mark payment as 'settlement_pending'
-//     6. Mark order as payment_status = 'settlement_pending'
-//     7. INSERT full settlement details into outbox_events (idempotency key included)
-//     8. COMMIT
-//
-//   Outbox Worker (separate service, not in this handler):
-//     1. Read PENDING outbox events
-//     2. Execute ledger.MultiTransfer (idempotent via idempotency key)
-//     3. Execute escrow.Hold (idempotent)
-//     4. Update payment → 'captured', order → 'paid'
-//     5. Mark outbox event as PROCESSED
 func (h *PayFastSplitHandler) executeSplit(ctx context.Context, internalTxnID string, orderID string, expectedAmount float64, gatewayTxnID string) error {
 	// 1. Begin atomic DB transaction
 	tx, err := h.db.Begin(ctx)
@@ -1718,8 +1795,31 @@ func (h *PayFastSplitHandler) executeSplit(ctx context.Context, internalTxnID st
 		return fmt.Errorf("failed to update order status for %s: %w", orderID, err)
 	}
 
-	// 6. Insert Settlement Outbox Event (atomic with DB state changes)
-	// The outbox worker will read this and execute the ledger transfers + escrow holds.
+	// 6. Complete 3-Way Outbox Transfers (PayFastHolding -> AdminRevenue + VendorLockedEscrow + CentralEscrow)
+	transfers := []map[string]interface{}{
+		{
+			"debit_account":  string(ledger.AccountPayFastHolding),
+			"credit_account": string(ledger.AccountAdminRevenue),
+			"amount":         split.AdminRevenue,
+			"idempotency":    idempotencyKey + ":admin",
+		},
+		{
+			"debit_account":  string(ledger.AccountPayFastHolding),
+			"credit_account": string(ledger.AccountVendorLockedEscrow),
+			"amount":         split.VendorEscrow,
+			"idempotency":    idempotencyKey + ":vendor",
+		},
+	}
+	if split.DeliveryEscrow > 0 {
+		transfers = append(transfers, map[string]interface{}{
+			"debit_account":  string(ledger.AccountPayFastHolding),
+			"credit_account": string(ledger.AccountCentralEscrow),
+			"amount":         split.DeliveryEscrow,
+			"idempotency":    idempotencyKey + ":delivery",
+		})
+	}
+
+	// Insert Settlement Outbox Event (atomic with DB state changes)
 	outboxPayload, err := json.Marshal(map[string]interface{}{
 		"internal_txn_id":      internalTxnID,
 		"order_id":             orderID,
@@ -1730,15 +1830,9 @@ func (h *PayFastSplitHandler) executeSplit(ctx context.Context, internalTxnID st
 		"currency":             currency,
 		"admin_revenue":        split.AdminRevenue,
 		"vendor_escrow":        split.VendorEscrow,
+		"delivery_escrow":      split.DeliveryEscrow,
 		"idempotency_key":      idempotencyKey,
-		"transfers": []map[string]interface{}{
-			{
-				"debit_account":  string(ledger.AccountPayFastHolding),
-				"credit_account": string(ledger.AccountAdminRevenue),
-				"amount":         split.AdminRevenue,
-				"idempotency":    idempotencyKey + ":admin",
-			},
-		},
+		"transfers":            transfers,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to marshal outbox payload: %w", err)
@@ -2112,6 +2206,63 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 		}
 	})
 }
+
+func TestFlexibleTypes(t *testing.T) {
+	t.Run("FlexibleBool unmarshaling", func(t *testing.T) {
+		type TestStruct struct {
+			Flag FlexibleBool `json:"flag"`
+		}
+
+		// Raw boolean true
+		var t1 TestStruct
+		if err := json.Unmarshal([]byte(`{"flag": true}`), &t1); err != nil || !t1.Flag.Bool() {
+			t.Errorf("expected true, got %v (err: %v)", t1.Flag.Bool(), err)
+		}
+
+		// String "true"
+		var t2 TestStruct
+		if err := json.Unmarshal([]byte(`{"flag": "true"}`), &t2); err != nil || !t2.Flag.Bool() {
+			t.Errorf("expected true, got %v (err: %v)", t2.Flag.Bool(), err)
+		}
+
+		// Raw boolean false
+		var t3 TestStruct
+		if err := json.Unmarshal([]byte(`{"flag": false}`), &t3); err != nil || t3.Flag.Bool() {
+			t.Errorf("expected false, got %v (err: %v)", t3.Flag.Bool(), err)
+		}
+
+		// String "false"
+		var t4 TestStruct
+		if err := json.Unmarshal([]byte(`{"flag": "false"}`), &t4); err != nil || t4.Flag.Bool() {
+			t.Errorf("expected false, got %v (err: %v)", t4.Flag.Bool(), err)
+		}
+	})
+
+	t.Run("FlexibleString unmarshaling", func(t *testing.T) {
+		type TestStruct struct {
+			Val FlexibleString `json:"val"`
+		}
+
+		// String value "05"
+		var t1 TestStruct
+		if err := json.Unmarshal([]byte(`{"val": "05"}`), &t1); err != nil || t1.Val.String() != "05" {
+			t.Errorf("expected '05', got %v (err: %v)", t1.Val.String(), err)
+		}
+
+		// Boolean value true
+		var t2 TestStruct
+		if err := json.Unmarshal([]byte(`{"val": true}`), &t2); err != nil || t2.Val.String() != "true" {
+			t.Errorf("expected 'true', got %v (err: %v)", t2.Val.String(), err)
+		}
+
+		// Numeric value 123
+		var t3 TestStruct
+		if err := json.Unmarshal([]byte(`{"val": 123}`), &t3); err != nil || t3.Val.String() != "123" {
+			t.Errorf("expected '123', got %v (err: %v)", t3.Val.String(), err)
+		}
+	})
+}
+
 
 ```
 

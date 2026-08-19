@@ -326,7 +326,7 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 		metaMap["instrument_token"] = tokenRes.InstrumentToken
 		metaMap["gateway_txn_id"] = tokenRes.TransactionID
 		metaMap["data_3ds_secureid"] = tokenRes.Data3DSSecureID
-		metaMap["eci"] = tokenRes.ECI
+		metaMap["eci"] = tokenRes.ECI.String()
 		metaMap["customer_mobile"] = authoritativeMobile
 		metaMap["account_type"] = req.AccountTypeID
 		metaMap["customer_ip"] = customerIP // Preserve original customer IP for 3DS tokenized call
@@ -368,13 +368,18 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 		TxnAmt:           amountStr,
 		CustomerIP:       customerIP,
 		MerCatCode:       os.Getenv("PAYFAST_MERCHANT_CATEGORY"),
-		ECI:              tokenRes.ECI,
+		ECI:              tokenRes.ECI.String(),
 	}
 
 	txnRes, err := h.payfast.InitiateTokenizedTransaction(c.Request.Context(), txnReq)
 	if err != nil {
-		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Tokenized transaction failed: "+err.Error())
-		c.JSON(http.StatusBadGateway, gin.H{"error": "Transaction processing failed"})
+		// Distinguish between transient network timeouts vs deterministic gateway rejections
+		h.markPaymentGatewayPending(c.Request.Context(), internalTxnID, tokenRes.TransactionID, "Tokenized transaction network timeout: "+err.Error())
+		c.JSON(http.StatusGatewayTimeout, gin.H{
+			"status":         "gateway_pending",
+			"error":          "Gateway timeout during capture; verification in progress",
+			"transaction_id": internalTxnID,
+		})
 		return
 	}
 
@@ -471,8 +476,12 @@ func (h *PayFastSplitHandler) ThreeDSCallback(c *gin.Context) {
 
 	txnRes, err := h.payfast.InitiateTokenizedTransaction(c.Request.Context(), txnReq)
 	if err != nil {
-		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Tokenized 3DS transaction failed: "+err.Error())
-		c.JSON(http.StatusBadGateway, gin.H{"error": "Transaction processing failed"})
+		// Network timeout on 3DS tokenized call: mark gateway_pending so background reconciliation can verify
+		h.markPaymentGatewayPending(c.Request.Context(), internalTxnID, meta.GatewayTxnID, "Tokenized 3DS transaction timeout: "+err.Error())
+		c.JSON(http.StatusGatewayTimeout, gin.H{
+			"status": "gateway_pending",
+			"error":  "Gateway timeout during 3DS transaction; reconciliation in progress",
+		})
 		return
 	}
 
@@ -502,8 +511,12 @@ func (h *PayFastSplitHandler) verifyAndSettle(c *gin.Context, internalTxnID stri
 
 	statusRes, err := h.payfast.GetTransactionStatus(c.Request.Context(), gatewayTxnID)
 	if err != nil {
-		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Status check failed: "+err.Error())
-		c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to verify transaction status"})
+		// Network timeout on status query: mark gateway_pending, do NOT mark failed
+		h.markPaymentGatewayPending(c.Request.Context(), internalTxnID, gatewayTxnID, "Status check timeout: "+err.Error())
+		c.JSON(http.StatusGatewayTimeout, gin.H{
+			"status": "gateway_pending",
+			"error":  "Gateway timeout during status verification; reconciliation pending",
+		})
 		return
 	}
 
@@ -531,18 +544,26 @@ func (h *PayFastSplitHandler) verifyAndSettle(c *gin.Context, internalTxnID stri
 		return
 	}
 
-	// Numerical amount comparison in minor units (paisa) to prevent string formatting/rounding discrepancies
-	if statusRes.TxnAmt != "" {
-		gatewayAmt, parseErr := strconv.ParseFloat(statusRes.TxnAmt, 64)
-		if parseErr == nil {
-			expectedPaisa := int64(math.Round(expectedAmount * 100))
-			gatewayPaisa := int64(math.Round(gatewayAmt * 100))
-			if expectedPaisa != gatewayPaisa {
-				h.markPaymentFailed(c.Request.Context(), internalTxnID, fmt.Sprintf("Amount mismatch: expected %d paisa, got %d paisa", expectedPaisa, gatewayPaisa))
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Transaction amount mismatch"})
-				return
-			}
-		}
+	// Mandatory fail-closed numerical amount comparison in minor units (paisa)
+	if statusRes.TxnAmt == "" {
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Missing TxnAmt in gateway status response")
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Transaction amount missing from gateway verification"})
+		return
+	}
+
+	gatewayAmt, parseErr := strconv.ParseFloat(statusRes.TxnAmt, 64)
+	if parseErr != nil {
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, fmt.Sprintf("Invalid TxnAmt in gateway status response: %s", statusRes.TxnAmt))
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid transaction amount from gateway"})
+		return
+	}
+
+	expectedPaisa := int64(math.Round(expectedAmount * 100))
+	gatewayPaisa := int64(math.Round(gatewayAmt * 100))
+	if expectedPaisa != gatewayPaisa {
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, fmt.Sprintf("Amount mismatch: expected %d paisa (%.2f), got %d paisa (%.2f)", expectedPaisa, expectedAmount, gatewayPaisa, gatewayAmt))
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Transaction amount mismatch"})
+		return
 	}
 
 	err = h.executeSplit(c.Request.Context(), internalTxnID, orderID, expectedAmount, gatewayTxnID)
@@ -554,42 +575,26 @@ func (h *PayFastSplitHandler) verifyAndSettle(c *gin.Context, internalTxnID stri
 	c.JSON(http.StatusOK, gin.H{"status": "settlement_pending", "order_id": orderID})
 }
 
-// markPaymentFailed transitions a payment to 'failed' status.
-// Only allows failure from specific states to prevent overwriting concurrent state changes.
-// Valid failure transitions: pending → failed, 3ds_required → failed, processing → failed.
+// markPaymentFailed transitions a payment to 'failed' status on deterministic rejection.
 func (h *PayFastSplitHandler) markPaymentFailed(ctx context.Context, internalTxnID string, reason string) {
 	_, _ = h.db.Exec(ctx,
 		`UPDATE payment_transactions SET status = 'failed', error_message = $1, updated_at = NOW()
-		 WHERE transaction_id = $2 AND status IN ('pending', '3ds_required', 'processing')`,
+		 WHERE transaction_id = $2 AND status IN ('pending', '3ds_required', 'processing', 'gateway_pending')`,
 		reason, internalTxnID,
 	)
 }
 
+// markPaymentGatewayPending transitions a payment to 'gateway_pending' on transient network timeouts.
+// This prevents incorrectly failing payments that might have succeeded on the gateway, allowing reconciliation.
+func (h *PayFastSplitHandler) markPaymentGatewayPending(ctx context.Context, internalTxnID string, gatewayTxnID string, reason string) {
+	_, _ = h.db.Exec(ctx,
+		`UPDATE payment_transactions SET status = 'gateway_pending', gateway_txn_id = COALESCE(NULLIF($1, ''), gateway_txn_id), error_message = $2, updated_at = NOW()
+		 WHERE transaction_id = $3 AND status IN ('pending', '3ds_required', 'processing')`,
+		gatewayTxnID, reason, internalTxnID,
+	)
+}
+
 // executeSplit performs the DB-atomic settlement preparation.
-//
-// Architecture: This function does NOT call the external ledger service directly.
-// Instead it records the settlement intent in an outbox_events table within the
-// same PostgreSQL transaction. A separate outbox worker (idempotent) will read
-// these events and execute the ledger transfers + escrow holds. This ensures that
-// the DB state and ledger are never inconsistent.
-//
-// Flow:
-//   DB Transaction:
-//     1. Lock payment_transactions row (FOR UPDATE) — idempotency check
-//     2. Lock orders row (FOR UPDATE) — re-read authoritative amount, verify status
-//     3. Verify amount hasn't changed since initial request
-//     4. Calculate commission split
-//     5. Mark payment as 'settlement_pending'
-//     6. Mark order as payment_status = 'settlement_pending'
-//     7. INSERT full settlement details into outbox_events (idempotency key included)
-//     8. COMMIT
-//
-//   Outbox Worker (separate service, not in this handler):
-//     1. Read PENDING outbox events
-//     2. Execute ledger.MultiTransfer (idempotent via idempotency key)
-//     3. Execute escrow.Hold (idempotent)
-//     4. Update payment → 'captured', order → 'paid'
-//     5. Mark outbox event as PROCESSED
 func (h *PayFastSplitHandler) executeSplit(ctx context.Context, internalTxnID string, orderID string, expectedAmount float64, gatewayTxnID string) error {
 	// 1. Begin atomic DB transaction
 	tx, err := h.db.Begin(ctx)
@@ -659,8 +664,31 @@ func (h *PayFastSplitHandler) executeSplit(ctx context.Context, internalTxnID st
 		return fmt.Errorf("failed to update order status for %s: %w", orderID, err)
 	}
 
-	// 6. Insert Settlement Outbox Event (atomic with DB state changes)
-	// The outbox worker will read this and execute the ledger transfers + escrow holds.
+	// 6. Complete 3-Way Outbox Transfers (PayFastHolding -> AdminRevenue + VendorLockedEscrow + CentralEscrow)
+	transfers := []map[string]interface{}{
+		{
+			"debit_account":  string(ledger.AccountPayFastHolding),
+			"credit_account": string(ledger.AccountAdminRevenue),
+			"amount":         split.AdminRevenue,
+			"idempotency":    idempotencyKey + ":admin",
+		},
+		{
+			"debit_account":  string(ledger.AccountPayFastHolding),
+			"credit_account": string(ledger.AccountVendorLockedEscrow),
+			"amount":         split.VendorEscrow,
+			"idempotency":    idempotencyKey + ":vendor",
+		},
+	}
+	if split.DeliveryEscrow > 0 {
+		transfers = append(transfers, map[string]interface{}{
+			"debit_account":  string(ledger.AccountPayFastHolding),
+			"credit_account": string(ledger.AccountCentralEscrow),
+			"amount":         split.DeliveryEscrow,
+			"idempotency":    idempotencyKey + ":delivery",
+		})
+	}
+
+	// Insert Settlement Outbox Event (atomic with DB state changes)
 	outboxPayload, err := json.Marshal(map[string]interface{}{
 		"internal_txn_id":      internalTxnID,
 		"order_id":             orderID,
@@ -671,15 +699,9 @@ func (h *PayFastSplitHandler) executeSplit(ctx context.Context, internalTxnID st
 		"currency":             currency,
 		"admin_revenue":        split.AdminRevenue,
 		"vendor_escrow":        split.VendorEscrow,
+		"delivery_escrow":      split.DeliveryEscrow,
 		"idempotency_key":      idempotencyKey,
-		"transfers": []map[string]interface{}{
-			{
-				"debit_account":  string(ledger.AccountPayFastHolding),
-				"credit_account": string(ledger.AccountAdminRevenue),
-				"amount":         split.AdminRevenue,
-				"idempotency":    idempotencyKey + ":admin",
-			},
-		},
+		"transfers":            transfers,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to marshal outbox payload: %w", err)
