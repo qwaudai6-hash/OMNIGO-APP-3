@@ -35,7 +35,7 @@ func (c *Client) ValidateCustomerPayment(ctx context.Context, req CustomerValida
 	formData.Set("secured_hash", securedHash)
 
 	// Instrument-specific parameters
-	if req.AccountTypeID == "1" {
+	if req.CardNumber != "" {
 		formData.Set("card_number", req.CardNumber)
 		formData.Set("expiry_month", req.ExpiryMonth)
 		formData.Set("expiry_year", req.ExpiryYear)
@@ -46,7 +46,7 @@ func (c *Client) ValidateCustomerPayment(ctx context.Context, req CustomerValida
 		if req.Data3DSCallbackURL != "" {
 			formData.Set("data_3ds_callback_url", req.Data3DSCallbackURL)
 		}
-	} else if req.AccountTypeID == "2" || req.AccountTypeID == "3" {
+	} else if req.AccountNumber != "" {
 		formData.Set("bank_code", req.BankCode)
 		formData.Set("account_number", req.AccountNumber)
 		formData.Set("cnic_number", req.CNICNumber)
@@ -122,7 +122,7 @@ func (c *Client) InitiateTransaction(ctx context.Context, req InitiateTransactio
 	securedHash := CalculateTransactionHash(req, otp, c.securedKey)
 	formData.Set("secured_hash", securedHash)
 
-	if req.AccountTypeID == "1" {
+	if req.CardNumber != "" {
 		formData.Set("card_number", req.CardNumber)
 		formData.Set("expiry_month", req.ExpiryMonth)
 		formData.Set("expiry_year", req.ExpiryYear)
@@ -133,7 +133,7 @@ func (c *Client) InitiateTransaction(ctx context.Context, req InitiateTransactio
 		if req.Data3DSPaRes != "" {
 			formData.Set("data_3ds_pares", req.Data3DSPaRes)
 		}
-	} else if req.AccountTypeID == "2" || req.AccountTypeID == "3" {
+	} else if req.AccountNumber != "" {
 		formData.Set("bank_code", req.BankCode)
 		formData.Set("account_number", req.AccountNumber)
 		formData.Set("cnic_number", req.CNICNumber)
@@ -239,7 +239,7 @@ func (c *Client) GetTemporaryTransactionToken(ctx context.Context, req Temporary
 	formData.Set("customer_ip", req.CustomerIP)
 
 	// Card specific
-	if req.AccountTypeID == "1" {
+	if req.CardNumber != "" {
 		formData.Set("card_number", req.CardNumber)
 		formData.Set("expiry_month", req.ExpiryMonth)
 		formData.Set("expiry_year", req.ExpiryYear)
@@ -250,6 +250,9 @@ func (c *Client) GetTemporaryTransactionToken(ctx context.Context, req Temporary
 		if req.Data3DSCallbackURL != "" {
 			formData.Set("data_3ds_callback_url", req.Data3DSCallbackURL)
 		}
+	} else if req.AccountNumber != "" {
+		formData.Set("account_number", req.AccountNumber)
+		formData.Set("cnic_number", req.CNICNumber)
 	}
 
 	securedHash := CalculateTemporaryTokenHash(req, c.securedKey)

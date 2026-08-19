@@ -21,17 +21,11 @@ func generateHMACSHA256(payload string, securedKey string) string {
 // Account/Wallet: basket_id + txnamt + account_number + cnic_number
 func CalculateValidationHash(req CustomerValidationRequest, securedKey string) string {
 	var payload string
-
-	switch req.AccountTypeID {
-	case "1": // Card
+	if req.CardNumber != "" {
 		payload = req.BasketID + req.TxnAmt + req.CardNumber + req.ExpiryMonth + req.ExpiryYear + req.CVV
-	case "2", "3": // Account or Wallet
-		payload = req.BasketID + req.TxnAmt + req.AccountNumber + req.CNICNumber
-	default:
-		// Fallback for unknown account types
+	} else {
 		payload = req.BasketID + req.TxnAmt + req.AccountNumber + req.CNICNumber
 	}
-
 	return generateHMACSHA256(payload, securedKey)
 }
 
@@ -42,16 +36,11 @@ func CalculateValidationHash(req CustomerValidationRequest, securedKey string) s
 // Note: If no OTP is present/required, the "+ otp" part simply adds an empty string.
 func CalculateTransactionHash(req InitiateTransactionRequest, otp string, securedKey string) string {
 	var payload string
-
-	switch req.AccountTypeID {
-	case "1": // Card
+	if req.CardNumber != "" {
 		payload = req.BasketID + req.TxnAmt + req.CardNumber + req.ExpiryMonth + req.ExpiryYear + req.CVV + otp
-	case "2", "3": // Account or Wallet
-		payload = req.BasketID + req.TxnAmt + req.AccountNumber + req.CNICNumber + otp
-	default:
+	} else {
 		payload = req.BasketID + req.TxnAmt + req.AccountNumber + req.CNICNumber + otp
 	}
-
 	return generateHMACSHA256(payload, securedKey)
 }
 
@@ -71,15 +60,13 @@ func VerifySignature(expected, received string) bool {
 // CalculateTemporaryTokenHash computes the required secured_hash for POST /transaction/token
 // Official rules:
 // Card: merchant_user_id + user_mobile_number + card_number + expiry_month + expiry_year + cvv
+// Account/Wallet: merchant_user_id + user_mobile_number + account_number + cnic_number
 func CalculateTemporaryTokenHash(req TemporaryTokenRequest, securedKey string) string {
 	var payload string
-	switch req.AccountTypeID {
-	case "1": // Card
+	if req.CardNumber != "" {
 		payload = req.MerchantUserId + req.CustomerMobileNo + req.CardNumber + req.ExpiryMonth + req.ExpiryYear + req.CVV
-	case "2", "3": // Account or Wallet
+	} else {
 		payload = req.MerchantUserId + req.CustomerMobileNo + req.AccountNumber + req.CNICNumber
-	default:
-		payload = req.MerchantUserId + req.CustomerMobileNo + req.CardNumber + req.ExpiryMonth + req.ExpiryYear + req.CVV
 	}
 	return generateHMACSHA256(payload, securedKey)
 }
