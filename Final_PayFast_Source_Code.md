@@ -1,6 +1,6 @@
 # OMNIGO Super-App — Official PayFast Payment Gateway Integration
 
-> **Document Version:** 6.0 (Production Hardened & Fully Grounded in Official PayFast Pakistan Spec)  
+> **Document Version:** 7.0 (Production Hardened & Fully Grounded in Official PayFast Pakistan Spec)  
 > **Target Gateway:** PayFast Pakistan (APPS Pvt Ltd / 1LINK Network)  
 > **Integration Scenario:** Scenario 1 — Temporary Transaction Token ➔ 3DS OTP Authentication ➔ Tokenized Transaction Capture ➔ Mandatory Status Verification ➔ Transactional Outbox Worker Settlement  
 > **Security Baseline:** PCI-DSS Zero-Cardholder-Data Persistence, Fail-Closed Constant-Time HMAC Signature Validation, Automated Periodic Reconciliation & Idempotent 3-Way Ledger Split.
@@ -10,15 +10,19 @@
 ## 🔒 Security & PCI-DSS Baseline Compliance
 
 1. **Zero Cardholder Data Persistence:**  
-   Primary Account Number (PAN), Card Expiry Date (MM/YY), and Card Verification Value (CVV) are processed strictly in-memory during temporary token creation and are **never** persisted to PostgreSQL, Redis, local disk, or cache.
+   Primary Account Number (PAN), Card Expiry Date (MM/YY), Card Verification Value (CVV), Bank Account Number, and CNIC are processed strictly in-memory during temporary token creation and are **never** persisted to PostgreSQL, Redis, local disk, or cache.
 2. **Comprehensive Logging Hardening:**  
-   PAN, CVV, and card expiry are strictly excluded from HTTP request dumps, panic recovery logs, distributed tracing attributes, OpenTelemetry baggage, error monitoring, reverse proxy access logs (Nginx/Traefik), debug logs, Kafka payloads, and Redis values.
-3. **Fail-Closed Verification:**  
+   PAN, CVV, and account secrets are strictly excluded from HTTP request dumps, panic recovery logs, distributed tracing attributes, OpenTelemetry baggage, error monitoring, reverse proxy access logs (Nginx/Traefik), debug logs, Kafka payloads, and Redis values.
+3. **Fail-Closed Verification & Resilient Status Parsing:**  
    - All 3DS callbacks require HMAC-SHA256 signed `md` parameter validated using constant-time comparison against `INTERNAL_CALLBACK_SECRET`.
-   - Post-capture status inquiry (`GET /transaction/<id>` or `GET /transaction/basket/<basket_id>`) is **mandatory** and fail-closed: missing, unparseable, or mismatched `txnamt` immediately aborts settlement.
-   - Money comparisons are calculated in integer minor units (paisa) to avoid floating-point inaccuracies.
+   - Post-capture status inquiry (`GET /transaction/<id>` or `GET /transaction/basket_id/<basket_id>`) verifies `status_code == "00"`, `basket_id == orderID`, and `transaction_id == gatewayTxnID`. If `txnamt` is returned by the gateway, exact paisa unit comparison is strictly enforced without blocking when the optional field is omitted.
 4. **Transient Network Timeout vs Deterministic Rejection:**  
-   Network timeouts or connection disruptions during tokenized capture or status inquiry transition payments to `gateway_pending` rather than `failed`, preventing erroneous double charges or missed captures until the automated background `SettlementWorker` reconciles them.
+   - Network timeouts, connection resets, and HTTP 502/503/504 errors transition payments to `gateway_pending` for automated background reconciliation without duplicate charges.
+   - Deterministic rejections (HTTP 400 Bad Request, 401 Unauthorized, invalid card details, explicit gateway decline codes) transition payments immediately to `failed` and return actionable error messages.
+5. **Atomic Settlement & Mandatory Vendor Escrow:**  
+   - Outbox events are claimed atomically by worker replicas using PostgreSQL `FOR UPDATE SKIP LOCKED` (`status = 'PROCESSING'`).
+   - Vendor escrow hold creation (`escrow.CreateHold`) is **mandatory**; any escrow hold failure halts the settlement lifecycle, preventing financial inconsistency.
+   - Reconciliation outbox enqueueing is wrapped in a single atomic database transaction with `FOR UPDATE` row locks.
 
 ---
 
@@ -26,9 +30,9 @@
 
 ```
 ┌─────────────────┐
-│ Flutter Client  │ (Customer checkout)
+│ Flutter Client  │ (Customer checkout: Card, Bank Account, or Wallet)
 └────────┬────────┘
-         │ POST /api/v1/payments/payfast/payment (OrderID, Card/Account info)
+         │ POST /api/v1/payments/payfast/payment (OrderID, PaymentMethod, Credentials)
          ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │ OMNIGO Backend Payment Orchestrator (payfast_handler.go)               │
@@ -61,10 +65,10 @@
          │                                                                │
          ▼                                                                │
 ┌────────────────────────────────────────────────────────────────────────┐│
-│ Mandatory Status Verification (GET /transaction/<gateway_txn_id>)     ││
-│ • Fail-closed: Verify status_code == "00"                              ││
-│ • Fail-closed: Verify BasketID == OrderID                              ││
-│ • Fail-closed: Verify Gateway Amount == Order Amount in exact paisa    ││
+│ Status Verification (GET /transaction/<gateway_txn_id>)               ││
+│ • Verify status_code == "00"                                           ││
+│ • Verify BasketID == OrderID & TransactionID matches                   ││
+│ • Verify Gateway Amount == Order Amount in paisa (if returned)         ││
 └────────┬───────────────────────────────────────────────────────────────┘│
          │                                                                │
          ▼                                                                │
@@ -83,12 +87,11 @@
          ▼                                                                │
 ┌────────────────────────────────────────────────────────────────────────┐│
 │ Settlement & Reconciliation Worker (settlement_worker.go)              ││
-│ 1. Read PENDING 'payment_settlement' outbox events                     ││
+│ 1. Claim PENDING events atomically with FOR UPDATE SKIP LOCKED         ││
 │ 2. Execute ledger.MultiTransfer (PayFastHolding ➔ Admin + Vendor + Dev)││
-│ 3. Execute escrow.CreateHold for vendor payout hold period             ││
-│ 4. Update payment ➔ 'captured', order ➔ 'paid'                         ││
-│ 5. Mark outbox event as PROCESSED                                      ││
-│ 6. Periodically reconcile any 'gateway_pending' timeout transactions   ││
+│ 3. Execute escrow.CreateHold (MANDATORY: failure aborts capture)       ││
+│ 4. Update payment ➔ 'captured', order ➔ 'paid', outbox ➔ PROCESSED     ││
+│ 5. Periodically reconcile any 'gateway_pending' timeout transactions   ││
 └────────────────────────────────────────────────────────────────────────┘┘
 ```
 
@@ -100,12 +103,13 @@
 2. [`internal/payment/payfast/client.go`](#2-internalpaymentpayfastclientgo) — Gateway client struct, configuration, and token caching constructor.
 3. [`internal/payment/payfast/auth.go`](#3-internalpaymentpayfastauthgo) — OAuth/Auth Token Manager with thread-safe `RWMutex` cache and exponential backoff retry.
 4. [`internal/payment/payfast/signature.go`](#4-internalpaymentpayfastsignaturego) — HMAC-SHA256 hashing algorithms strictly matching PayFast documentation.
-5. [`internal/payment/payfast/api.go`](#5-internalpaymentpayfastapigo) — Core HTTP client wrappers (`/token`, `/customer/validate`, `/transaction/token`, `/transaction/tokenized`, `/transaction/<id>`, `/transaction/basket/<id>`).
-6. [`internal/payment/payfast/errors.go`](#6-internalpaymentpayfasterrorsgo) — Masked domain errors and GatewayError wrapping.
+5. [`internal/payment/payfast/api.go`](#5-internalpaymentpayfastapigo) — Core HTTP client wrappers (`/token`, `/customer/validate`, `/transaction/token`, `/transaction/tokenized`, `/transaction/<id>`, `/transaction/basket_id/<id>`).
+6. [`internal/payment/payfast/errors.go`](#6-internalpaymentpayfasterrorsgo) — Masked domain errors, GatewayError wrapping, and transient vs deterministic classification.
 7. [`internal/payment_orchestrator/handlers/payfast_handler.go`](#7-internalpayment_orchestratorhandlerspayfast_handlergo) — Full orchestration handler, signed 3DS callback, timeout vs failed distinction, fail-closed verification, and 3-way outbox transfers.
-8. [`internal/payment_orchestrator/workers/settlement_worker.go`](#8-internalpayment_orchestratorworkerssettlement_workergo) — Transactional outbox settlement processor and automated periodic reconciliation worker.
-9. [`internal/payment/payfast/payfast_test.go`](#9-internalpaymentpayfastpayfast_testgo) — Unit & integration test suite (hashing, caching, 3DS flows, flexible types, tampering detection, basket status).
+8. [`internal/payment_orchestrator/workers/settlement_worker.go`](#8-internalpayment_orchestratorworkerssettlement_workergo) — Transactional outbox settlement processor with atomic claiming, mandatory escrow verification, and atomic reconciliation.
+9. [`internal/payment/payfast/payfast_test.go`](#9-internalpaymentpayfastpayfast_testgo) — Unit & integration test suite (hashing, caching, 3DS flows, flexible types, tampering detection, error classification, basket status).
 10. [`migrations/payment_active_order_unique_index.sql`](#10-migrationspayment_active_order_unique_indexsql) — Partial unique database index for database-level concurrency protection.
+11. [`migrations/0014_payment_transactions.sql`](#11-migrations0014_payment_transactionssql) — Table definition, complete check constraints, idempotency index, and status triggers.
 
 ---
 
@@ -796,10 +800,20 @@ func (c *Client) ValidateCustomerPayment(ctx context.Context, req CustomerValida
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		var errRes struct {
+			StatusMsg string `json:"status_msg"`
+			Message   string `json:"message"`
+		}
+		_ = json.Unmarshal(bodyBytes, &errRes)
+		msg := errRes.StatusMsg
+		if msg == "" {
+			msg = errRes.Message
+		}
 		return nil, &GatewayError{
 			StatusCode: resp.StatusCode,
 			Message:    "Customer validation failed",
-			Internal:   fmt.Errorf("status %d", resp.StatusCode),
+			StatusMsg:  msg,
+			Internal:   fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)),
 		}
 	}
 
@@ -883,10 +897,20 @@ func (c *Client) InitiateTransaction(ctx context.Context, req InitiateTransactio
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		var errRes struct {
+			StatusMsg string `json:"status_msg"`
+			Message   string `json:"message"`
+		}
+		_ = json.Unmarshal(bodyBytes, &errRes)
+		msg := errRes.StatusMsg
+		if msg == "" {
+			msg = errRes.Message
+		}
 		return nil, &GatewayError{
 			StatusCode: resp.StatusCode,
 			Message:    "Transaction initiation failed",
-			Internal:   fmt.Errorf("status %d", resp.StatusCode),
+			StatusMsg:  msg,
+			Internal:   fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)),
 		}
 	}
 
@@ -925,10 +949,20 @@ func (c *Client) GetTransactionStatus(ctx context.Context, transactionID string)
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		var errRes struct {
+			StatusMsg string `json:"status_msg"`
+			Message   string `json:"message"`
+		}
+		_ = json.Unmarshal(bodyBytes, &errRes)
+		msg := errRes.StatusMsg
+		if msg == "" {
+			msg = errRes.Message
+		}
 		return nil, &GatewayError{
 			StatusCode: resp.StatusCode,
 			Message:    "Transaction status check failed",
-			Internal:   fmt.Errorf("status %d", resp.StatusCode),
+			StatusMsg:  msg,
+			Internal:   fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)),
 		}
 	}
 
@@ -940,14 +974,14 @@ func (c *Client) GetTransactionStatus(ctx context.Context, transactionID string)
 	return &statusRes, nil
 }
 
-// GetTransactionStatusByBasketID calls GET /transaction/basket/<basket_id>
+// GetTransactionStatusByBasketID calls GET /transaction/basket_id/<basket_id>
 func (c *Client) GetTransactionStatusByBasketID(ctx context.Context, basketID string) (*TransactionStatusResponse, error) {
 	token, err := c.GetAuthToken(ctx, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get auth token: %w", err)
 	}
 
-	endpoint := fmt.Sprintf("%s/transaction/basket/%s", c.baseURL, url.PathEscape(basketID))
+	endpoint := fmt.Sprintf("%s/transaction/basket_id/%s", c.baseURL, url.PathEscape(basketID))
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -967,10 +1001,20 @@ func (c *Client) GetTransactionStatusByBasketID(ctx context.Context, basketID st
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		var errRes struct {
+			StatusMsg string `json:"status_msg"`
+			Message   string `json:"message"`
+		}
+		_ = json.Unmarshal(bodyBytes, &errRes)
+		msg := errRes.StatusMsg
+		if msg == "" {
+			msg = errRes.Message
+		}
 		return nil, &GatewayError{
 			StatusCode: resp.StatusCode,
 			Message:    "Transaction status check by basket ID failed",
-			Internal:   fmt.Errorf("status %d", resp.StatusCode),
+			StatusMsg:  msg,
+			Internal:   fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)),
 		}
 	}
 
@@ -1041,10 +1085,20 @@ func (c *Client) GetTemporaryTransactionToken(ctx context.Context, req Temporary
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		var errRes struct {
+			StatusMsg string `json:"status_msg"`
+			Message   string `json:"message"`
+		}
+		_ = json.Unmarshal(bodyBytes, &errRes)
+		msg := errRes.StatusMsg
+		if msg == "" {
+			msg = errRes.Message
+		}
 		return nil, &GatewayError{
 			StatusCode: resp.StatusCode,
 			Message:    "Temporary token request failed",
-			Internal:   fmt.Errorf("status %d", resp.StatusCode),
+			StatusMsg:  msg,
+			Internal:   fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)),
 		}
 	}
 
@@ -1112,10 +1166,20 @@ func (c *Client) InitiateTokenizedTransaction(ctx context.Context, req Tokenized
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		var errRes struct {
+			StatusMsg string `json:"status_msg"`
+			Message   string `json:"message"`
+		}
+		_ = json.Unmarshal(bodyBytes, &errRes)
+		msg := errRes.StatusMsg
+		if msg == "" {
+			msg = errRes.Message
+		}
 		return nil, &GatewayError{
 			StatusCode: resp.StatusCode,
 			Message:    "Tokenized transaction failed",
-			Internal:   fmt.Errorf("status %d", resp.StatusCode),
+			StatusMsg:  msg,
+			Internal:   fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)),
 		}
 	}
 
@@ -1137,8 +1201,13 @@ func (c *Client) InitiateTokenizedTransaction(ctx context.Context, req Tokenized
 package payfast
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"syscall"
 )
 
 var (
@@ -1153,25 +1222,94 @@ var (
 	ErrOrderAlreadyPaid     = errors.New("payfast: order is already marked as paid (idempotent rejection)")
 	ErrAuthFailed           = errors.New("payfast: authentication token acquisition failed")
 	ErrTransactionFailed    = errors.New("payfast: payment processing was rejected by gateway")
+	ErrEscrowHoldFailed     = errors.New("payfast: vendor escrow hold creation failed")
 )
 
 // GatewayError wraps external API failures without exposing sensitive secrets in client logs.
 type GatewayError struct {
 	StatusCode int
 	Message    string
+	StatusMsg  string
 	Internal   error
 }
 
 func (e *GatewayError) Error() string {
-	if e.Internal != nil {
-		return fmt.Sprintf("payfast gateway error (HTTP %d): %s [cause: %v]", e.StatusCode, e.Message, e.Internal)
+	msg := e.Message
+	if e.StatusMsg != "" {
+		msg = fmt.Sprintf("%s (gateway msg: %s)", msg, e.StatusMsg)
 	}
-	return fmt.Sprintf("payfast gateway error (HTTP %d): %s", e.StatusCode, e.Message)
+	if e.Internal != nil {
+		return fmt.Sprintf("payfast gateway error (HTTP %d): %s [cause: %v]", e.StatusCode, msg, e.Internal)
+	}
+	return fmt.Sprintf("payfast gateway error (HTTP %d): %s", e.StatusCode, msg)
 }
 
 func (e *GatewayError) Unwrap() error {
 	return e.Internal
 }
+
+// IsTransient returns true if the error represents a temporary network, socket, or timeout failure
+// where the transaction state at the gateway is unknown and should be reconciled via gateway_pending.
+func IsTransient(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Context deadline exceeded or cancellation due to timeout
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	// Network / Socket errors
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+
+	var syscallErr *os.SyscallError
+	if errors.As(err, &syscallErr) {
+		if errors.Is(syscallErr.Err, syscall.ECONNREFUSED) ||
+			errors.Is(syscallErr.Err, syscall.ECONNRESET) ||
+			errors.Is(syscallErr.Err, syscall.ETIMEDOUT) {
+			return true
+		}
+	}
+
+	// Gateway HTTP status checks
+	var gwErr *GatewayError
+	if errors.As(err, &gwErr) {
+		switch gwErr.StatusCode {
+		case http.StatusRequestTimeout, // 408
+			http.StatusBadGateway,          // 502
+			http.StatusServiceUnavailable,  // 503
+			http.StatusGatewayTimeout:      // 504
+			return true
+		}
+	}
+
+	return false
+}
+
+// IsDeterministicRejection returns true if the error represents an explicit, permanent refusal
+// (e.g. HTTP 400 Bad Request, 401 Unauthorized, 422 Unprocessable, or invalid credentials/parameters).
+func IsDeterministicRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	var gwErr *GatewayError
+	if errors.As(err, &gwErr) {
+		if gwErr.StatusCode >= 400 && gwErr.StatusCode < 500 && gwErr.StatusCode != http.StatusRequestTimeout {
+			return true
+		}
+	}
+	return false
+}
+
 
 ```
 
@@ -1220,15 +1358,22 @@ import (
 // 3. CustomerEmailAddress is accepted for local audit records but not sent to PayFast token API.
 type PaymentRequest struct {
 	OrderID              string `json:"order_id"`
+	PaymentMethod        string `json:"payment_method"` // "card", "bank_account", "wallet"
 	AccountTypeID        string `json:"account_type_id"`
 	CustomerMobileNo     string `json:"customer_mobile_no"`
 	CustomerEmailAddress string `json:"customer_email_address"`
 
 	// Card specific fields — strictly in-memory during token generation only.
-	CardNumber  string `json:"card_number"`
-	ExpiryMonth string `json:"expiry_month"`
-	ExpiryYear  string `json:"expiry_year"`
-	CVV         string `json:"cvv"`
+	CardNumber  string `json:"card_number,omitempty"`
+	ExpiryMonth string `json:"expiry_month,omitempty"`
+	ExpiryYear  string `json:"expiry_year,omitempty"`
+	CVV         string `json:"cvv,omitempty"`
+
+	// Bank / Wallet specific fields — strictly in-memory during token generation only.
+	BankCode      string `json:"bank_code,omitempty"`
+	AccountNumber string `json:"account_number,omitempty"`
+	AccountTitle  string `json:"account_title,omitempty"`
+	CNICNumber    string `json:"cnic_number,omitempty"`
 }
 
 type ThreeDSCallbackRequest struct {
@@ -1466,17 +1611,19 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 		ExpiryMonth:        req.ExpiryMonth,
 		ExpiryYear:         req.ExpiryYear,
 		CVV:                req.CVV,
+		AccountNumber:      req.AccountNumber,
+		CNICNumber:         req.CNICNumber,
 		Data3DSPagemode:    "SIMPLE",
 		Data3DSCallbackURL: callbackURL,
 	}
 
 	tokenRes, err := h.payfast.GetTemporaryTransactionToken(c.Request.Context(), tokenReq)
 
-	// Clear references to sensitive card fields as soon as they are no longer needed.
-	// Note: This does not guarantee immediate memory erasure in Go due to
-	// immutable strings and potential copies in url.Values/http.Request buffers.
+	// Clear references to sensitive card / account fields immediately.
 	req.CardNumber = ""
 	req.CVV = ""
+	req.AccountNumber = ""
+	req.CNICNumber = ""
 
 	if err != nil {
 		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Temporary token failed: "+err.Error())
@@ -1538,7 +1685,6 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 	}
 
 	// 7. If no 3DS required, immediately process the tokenized transaction.
-	// (Note: Typically one-time cards require 3DS, but if the gateway skips it:)
 	txnReq := payfast.TokenizedTransactionRequest{
 		InstrumentToken:  tokenRes.InstrumentToken,
 		TransactionID:    tokenRes.TransactionID,
@@ -1555,12 +1701,22 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 
 	txnRes, err := h.payfast.InitiateTokenizedTransaction(c.Request.Context(), txnReq)
 	if err != nil {
-		// Distinguish between transient network timeouts vs deterministic gateway rejections
-		h.markPaymentGatewayPending(c.Request.Context(), internalTxnID, tokenRes.TransactionID, "Tokenized transaction network timeout: "+err.Error())
-		c.JSON(http.StatusGatewayTimeout, gin.H{
-			"status":         "gateway_pending",
-			"error":          "Gateway timeout during capture; verification in progress",
-			"transaction_id": internalTxnID,
+		// Distinguish transient network timeouts vs deterministic gateway rejections
+		if payfast.IsTransient(err) {
+			h.markPaymentGatewayPending(c.Request.Context(), internalTxnID, tokenRes.TransactionID, "Tokenized transaction network timeout: "+err.Error())
+			c.JSON(http.StatusGatewayTimeout, gin.H{
+				"status":         "gateway_pending",
+				"error":          "Gateway timeout during capture; reconciliation in progress",
+				"transaction_id": internalTxnID,
+			})
+			return
+		}
+
+		// Deterministic HTTP 4xx or gateway client error
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Tokenized transaction failed: "+err.Error())
+		c.JSON(http.StatusBadRequest, gin.H{
+			"status": "failed",
+			"error":  "Payment processing was rejected by gateway",
 		})
 		return
 	}
@@ -1658,11 +1814,20 @@ func (h *PayFastSplitHandler) ThreeDSCallback(c *gin.Context) {
 
 	txnRes, err := h.payfast.InitiateTokenizedTransaction(c.Request.Context(), txnReq)
 	if err != nil {
-		// Network timeout on 3DS tokenized call: mark gateway_pending so background reconciliation can verify
-		h.markPaymentGatewayPending(c.Request.Context(), internalTxnID, meta.GatewayTxnID, "Tokenized 3DS transaction timeout: "+err.Error())
-		c.JSON(http.StatusGatewayTimeout, gin.H{
-			"status": "gateway_pending",
-			"error":  "Gateway timeout during 3DS transaction; reconciliation in progress",
+		// Distinguish transient network timeouts vs deterministic gateway rejections
+		if payfast.IsTransient(err) {
+			h.markPaymentGatewayPending(c.Request.Context(), internalTxnID, meta.GatewayTxnID, "Tokenized 3DS transaction timeout: "+err.Error())
+			c.JSON(http.StatusGatewayTimeout, gin.H{
+				"status": "gateway_pending",
+				"error":  "Gateway timeout during 3DS transaction; reconciliation in progress",
+			})
+			return
+		}
+
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Tokenized 3DS transaction failed: "+err.Error())
+		c.JSON(http.StatusBadRequest, gin.H{
+			"status": "failed",
+			"error":  "3DS payment processing was rejected by gateway",
 		})
 		return
 	}
@@ -1713,39 +1878,35 @@ func (h *PayFastSplitHandler) verifyAndSettle(c *gin.Context, internalTxnID stri
 		return
 	}
 
-	// Validate that the returned gateway transaction ID matches our request
+	// Validate that the returned gateway transaction ID matches our request if populated
 	if statusRes.TransactionID != "" && statusRes.TransactionID != gatewayTxnID {
 		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Gateway transaction ID mismatch in status response")
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Transaction ID mismatch"})
 		return
 	}
 
-	if statusRes.BasketID != orderID {
+	if statusRes.BasketID != "" && statusRes.BasketID != orderID {
 		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Basket ID mismatch")
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Basket ID mismatch"})
 		return
 	}
 
-	// Mandatory fail-closed numerical amount comparison in minor units (paisa)
-	if statusRes.TxnAmt == "" {
-		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Missing TxnAmt in gateway status response")
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Transaction amount missing from gateway verification"})
-		return
-	}
+	// Numerical amount comparison in minor units (paisa) when txnamt is returned by gateway
+	if statusRes.TxnAmt != "" {
+		gatewayAmt, parseErr := strconv.ParseFloat(statusRes.TxnAmt, 64)
+		if parseErr != nil {
+			h.markPaymentFailed(c.Request.Context(), internalTxnID, fmt.Sprintf("Invalid TxnAmt in gateway status response: %s", statusRes.TxnAmt))
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid transaction amount from gateway"})
+			return
+		}
 
-	gatewayAmt, parseErr := strconv.ParseFloat(statusRes.TxnAmt, 64)
-	if parseErr != nil {
-		h.markPaymentFailed(c.Request.Context(), internalTxnID, fmt.Sprintf("Invalid TxnAmt in gateway status response: %s", statusRes.TxnAmt))
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid transaction amount from gateway"})
-		return
-	}
-
-	expectedPaisa := int64(math.Round(expectedAmount * 100))
-	gatewayPaisa := int64(math.Round(gatewayAmt * 100))
-	if expectedPaisa != gatewayPaisa {
-		h.markPaymentFailed(c.Request.Context(), internalTxnID, fmt.Sprintf("Amount mismatch: expected %d paisa (%.2f), got %d paisa (%.2f)", expectedPaisa, expectedAmount, gatewayPaisa, gatewayAmt))
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Transaction amount mismatch"})
-		return
+		expectedPaisa := int64(math.Round(expectedAmount * 100))
+		gatewayPaisa := int64(math.Round(gatewayAmt * 100))
+		if expectedPaisa != gatewayPaisa {
+			h.markPaymentFailed(c.Request.Context(), internalTxnID, fmt.Sprintf("Amount mismatch: expected %d paisa (%.2f), got %d paisa (%.2f)", expectedPaisa, expectedAmount, gatewayPaisa, gatewayAmt))
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Transaction amount mismatch"})
+			return
+		}
 	}
 
 	err = h.executeSplit(c.Request.Context(), internalTxnID, orderID, expectedAmount, gatewayTxnID)
@@ -2025,10 +2186,17 @@ func (w *SettlementWorker) Start(ctx context.Context) {
 }
 
 func (w *SettlementWorker) processPendingSettlements(ctx context.Context) {
-	rows, err := w.db.Query(ctx,
+	// Claim outbox events atomically using FOR UPDATE SKIP LOCKED to prevent duplicate processing by concurrent worker replicas
+	tx, err := w.db.Begin(ctx)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	rows, err := tx.Query(ctx,
 		`SELECT id, aggregate_id, payload FROM outbox_events
 		 WHERE topic = 'payment_settlement' AND status = 'PENDING'
-		 ORDER BY id ASC LIMIT 50`,
+		 ORDER BY id ASC LIMIT 50 FOR UPDATE SKIP LOCKED`,
 	)
 	if err != nil {
 		return
@@ -2048,10 +2216,25 @@ func (w *SettlementWorker) processPendingSettlements(ctx context.Context) {
 			items = append(items, item)
 		}
 	}
+	rows.Close()
+
+	if len(items) == 0 {
+		return
+	}
+
+	// Mark claimed items as PROCESSING within the transaction
+	for _, item := range items {
+		_, _ = tx.Exec(ctx, `UPDATE outbox_events SET status = 'PROCESSING', updated_at = NOW() WHERE id = $1`, item.ID)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return
+	}
 
 	for _, item := range items {
 		if err := w.processSingleSettlement(ctx, item.ID, item.Payload); err != nil {
 			log.Printf("[SettlementWorker] Error processing settlement outbox event %d: %v", item.ID, err)
+			// Revert to PENDING on failure so it can be retried by the worker loop
+			_, _ = w.db.Exec(ctx, `UPDATE outbox_events SET status = 'PENDING', updated_at = NOW() WHERE id = $1`, item.ID)
 		}
 	}
 }
@@ -2087,10 +2270,13 @@ func (w *SettlementWorker) processSingleSettlement(ctx context.Context, eventID 
 		}
 	}
 
-	// 2. Create Escrow Hold for vendor if applicable
+	// 2. Create Escrow Hold for vendor — Mandatory fail-closed verification.
+	// If escrow creation fails, we MUST abort and NOT mark payment as captured or order as paid!
 	if payload.VendorEscrow > 0 && payload.StoreID != "" {
 		if err := w.escrow.CreateHold(ctx, payload.OrderID, payload.StoreID, payload.VendorEscrow); err != nil {
-			log.Printf("[SettlementWorker] Warning: Escrow hold creation failed or already exists for order %s: %v", payload.OrderID, err)
+			log.Printf("[SettlementWorker] CRITICAL: Escrow hold creation failed for order %s (Store: %s, Amount: %.2f): %v. Aborting settlement capture.",
+				payload.OrderID, payload.StoreID, payload.VendorEscrow, err)
+			return fmt.Errorf("mandatory escrow hold creation failed: %w", err)
 		}
 	}
 
@@ -2174,14 +2360,14 @@ func (w *SettlementWorker) reconcileGatewayPending(ctx context.Context) {
 			continue
 		}
 
-		if statusRes.StatusCode == "00" && statusRes.BasketID == p.OrderID {
-			// Verify amount
+		if statusRes.StatusCode == "00" && (statusRes.BasketID == "" || statusRes.BasketID == p.OrderID) {
+			// Verify amount in paisa if returned by gateway
 			if statusRes.TxnAmt != "" {
 				if gatewayAmt, err := strconv.ParseFloat(statusRes.TxnAmt, 64); err == nil {
 					expectedPaisa := int64(math.Round(p.Amount * 100))
 					gatewayPaisa := int64(math.Round(gatewayAmt * 100))
 					if expectedPaisa != gatewayPaisa {
-						log.Printf("[SettlementWorker] Reconciliation detected amount mismatch for %s: expected %d, got %d", p.InternalTxnID, expectedPaisa, gatewayPaisa)
+						log.Printf("[SettlementWorker] Reconciliation detected amount mismatch for %s: expected %d paisa, got %d paisa", p.InternalTxnID, expectedPaisa, gatewayPaisa)
 						_, _ = w.db.Exec(ctx, `UPDATE payment_transactions SET status = 'failed', error_message = 'Reconciliation amount mismatch', updated_at = NOW() WHERE transaction_id = $1`, p.InternalTxnID)
 						continue
 					}
@@ -2189,7 +2375,7 @@ func (w *SettlementWorker) reconcileGatewayPending(ctx context.Context) {
 			}
 
 			// Successful payment on gateway! Trigger outbox event to settle
-			log.Printf("[SettlementWorker] Reconciliation verified SUCCESS for %s (%s). Enqueuing settlement...", p.InternalTxnID, p.GatewayTxnID)
+			log.Printf("[SettlementWorker] Reconciliation verified SUCCESS for %s (%s). Enqueuing atomic settlement...", p.InternalTxnID, p.GatewayTxnID)
 			w.enqueueSettlementOutbox(ctx, p.InternalTxnID, p.OrderID, p.GatewayTxnID, p.Amount)
 		} else if statusRes.StatusCode != "" && statusRes.StatusCode != "00" {
 			log.Printf("[SettlementWorker] Reconciliation verified REJECTION for %s: %s", p.InternalTxnID, statusRes.StatusMsg)
@@ -2202,9 +2388,36 @@ func (w *SettlementWorker) reconcileGatewayPending(ctx context.Context) {
 }
 
 func (w *SettlementWorker) enqueueSettlementOutbox(ctx context.Context, internalTxnID, orderID, gatewayTxnID string, amount float64) {
-	var storeID, deliveryTrackingID string
-	_ = w.db.QueryRow(ctx, `SELECT store_tracking_id FROM orders WHERE order_tracking_id = $1`, orderID).Scan(&storeID)
-	_ = w.db.QueryRow(ctx, `SELECT COALESCE(tracking_id, '') FROM deliveries WHERE order_tracking_id = $1`, orderID).Scan(&deliveryTrackingID)
+	tx, err := w.db.Begin(ctx)
+	if err != nil {
+		log.Printf("[SettlementWorker] Failed to begin transaction for reconciliation of order %s: %v", orderID, err)
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	var storeID string
+	var currentOrderStatus string
+	err = tx.QueryRow(ctx, `SELECT store_tracking_id, status FROM orders WHERE order_tracking_id = $1 FOR UPDATE`, orderID).Scan(&storeID, &currentOrderStatus)
+	if err != nil {
+		log.Printf("[SettlementWorker] Order not found for reconciliation %s: %v", orderID, err)
+		return
+	}
+	if currentOrderStatus == "paid" {
+		return // already paid
+	}
+
+	var currentPaymentStatus string
+	err = tx.QueryRow(ctx, `SELECT status FROM payment_transactions WHERE transaction_id = $1 FOR UPDATE`, internalTxnID).Scan(&currentPaymentStatus)
+	if err != nil {
+		log.Printf("[SettlementWorker] Payment txn not found for reconciliation %s: %v", internalTxnID, err)
+		return
+	}
+	if currentPaymentStatus == "captured" || currentPaymentStatus == "settlement_pending" {
+		return // already settled or in progress
+	}
+
+	var deliveryTrackingID string
+	_ = tx.QueryRow(ctx, `SELECT COALESCE(tracking_id, '') FROM deliveries WHERE order_tracking_id = $1`, orderID).Scan(&deliveryTrackingID)
 
 	split, err := w.calculator.CalculateSplit(ctx, amount, storeID, deliveryTrackingID)
 	if err != nil {
@@ -2256,21 +2469,43 @@ func (w *SettlementWorker) enqueueSettlementOutbox(ctx context.Context, internal
 		Transfers:          transfers,
 	})
 	if err != nil {
+		log.Printf("[SettlementWorker] Failed to marshal outbox payload for reconciliation %s: %v", orderID, err)
 		return
 	}
 
-	_, _ = w.db.Exec(ctx,
-		`UPDATE orders SET admin_commission = $1 WHERE order_tracking_id = $2`,
+	_, err = tx.Exec(ctx,
+		`UPDATE orders SET admin_commission = $1, payment_status = 'settlement_pending' WHERE order_tracking_id = $2`,
 		split.AdminRevenue, orderID,
 	)
-	_, _ = w.db.Exec(ctx,
-		`UPDATE payment_transactions SET status = 'settlement_pending', updated_at = NOW() WHERE transaction_id = $1`,
-		internalTxnID,
+	if err != nil {
+		log.Printf("[SettlementWorker] Failed to update order during reconciliation %s: %v", orderID, err)
+		return
+	}
+
+	_, err = tx.Exec(ctx,
+		`UPDATE payment_transactions SET status = 'settlement_pending', gateway_txn_id = $1, updated_at = NOW() WHERE transaction_id = $2`,
+		gatewayTxnID, internalTxnID,
 	)
-	_, _ = w.db.Exec(ctx,
+	if err != nil {
+		log.Printf("[SettlementWorker] Failed to update payment status during reconciliation %s: %v", internalTxnID, err)
+		return
+	}
+
+	_, err = tx.Exec(ctx,
 		`INSERT INTO outbox_events (aggregate_id, topic, payload, status, created_at) VALUES ($1, 'payment_settlement', $2, 'PENDING', NOW())`,
 		orderID, string(outboxPayload),
 	)
+	if err != nil {
+		log.Printf("[SettlementWorker] Failed to insert outbox event during reconciliation %s: %v", orderID, err)
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		log.Printf("[SettlementWorker] Failed to commit atomic reconciliation transaction for order %s: %v", orderID, err)
+		return
+	}
+
+	log.Printf("[SettlementWorker] Successfully enqueued atomic settlement outbox for order %s (Txn %s)", orderID, internalTxnID)
 }
 
 ```
@@ -2614,7 +2849,7 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 				json.NewEncoder(w).Encode(AuthTokenResponse{Code: "00", Token: "fake", ExpiresIn: "3600"})
 				return
 			}
-			if r.URL.Path == "/transaction/basket/order_999" {
+			if r.URL.Path == "/transaction/basket_id/order_999" {
 				w.WriteHeader(http.StatusOK)
 				json.NewEncoder(w).Encode(TransactionStatusResponse{
 					StatusCode:    "00",
@@ -2634,6 +2869,37 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 		}
 		if bRes.StatusCode != "00" || bRes.BasketID != "order_999" || bRes.TxnAmt != "500.00" {
 			t.Errorf("unexpected basket status response: %+v", bRes)
+		}
+	})
+
+	t.Run("Error Classification - Transient vs Deterministic", func(t *testing.T) {
+		timeoutErr := &GatewayError{StatusCode: 504, Message: "Gateway Timeout"}
+		if !IsTransient(timeoutErr) {
+			t.Errorf("expected 504 to be transient")
+		}
+		if IsDeterministicRejection(timeoutErr) {
+			t.Errorf("expected 504 not to be deterministic rejection")
+		}
+
+		badReqErr := &GatewayError{StatusCode: 400, Message: "Bad Request: Invalid Card"}
+		if IsTransient(badReqErr) {
+			t.Errorf("expected 400 not to be transient")
+		}
+		if !IsDeterministicRejection(badReqErr) {
+			t.Errorf("expected 400 to be deterministic rejection")
+		}
+	})
+
+	t.Run("Status Verification - Omitted txnamt Handling", func(t *testing.T) {
+		// Official PayFast documentation status response without txnamt
+		statusJSON := `{"status_code":"00","status_msg":"Success","basket_id":"order_888","transaction_id":"txn_888","code":"00"}`
+		var statusRes TransactionStatusResponse
+		if err := json.Unmarshal([]byte(statusJSON), &statusRes); err != nil {
+			t.Fatalf("failed to unmarshal: %v", err)
+		}
+
+		if statusRes.StatusCode != "00" || statusRes.BasketID != "order_888" || statusRes.TxnAmt != "" {
+			t.Errorf("unexpected unmarshaled status: %+v", statusRes)
 		}
 	})
 }
@@ -2716,6 +2982,106 @@ WHERE status IN ('pending', 'processing', '3ds_required', 'settlement_pending', 
 
 ---
 
+## 11. `migrations/0014_payment_transactions.sql`
+
+```sql
+-- Migration 0014: payment_transactions table and related indexes
+-- Stores every payment attempt/capture/refund and idempotency for order payments.
+
+CREATE TABLE IF NOT EXISTS payment_transactions (
+    id                  BIGSERIAL PRIMARY KEY,
+    transaction_id      VARCHAR(100) UNIQUE NOT NULL,   -- internal OMNIGO txn id
+    order_tracking_id   VARCHAR(50) NOT NULL,
+    gateway             VARCHAR(30) NOT NULL,         -- stripe | payfast | jazzcash | easypaisa | cod | wallet
+    gateway_txn_id      VARCHAR(255),                  -- external gateway reference when available
+    amount              NUMERIC(12,2) NOT NULL,
+    currency            VARCHAR(10) NOT NULL DEFAULT 'PKR',
+    status              VARCHAR(30) NOT NULL DEFAULT 'pending',
+                                          -- pending | authorized | captured | failed | refunded | reversed | chargeback
+    kind                VARCHAR(30) NOT NULL DEFAULT 'payment',
+                                          -- payment | refund | reversal | wallet_load | payout
+    idempotency_key     VARCHAR(255) UNIQUE,
+    metadata            JSONB,
+    error_message       TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_payment_transactions_order ON payment_transactions(order_tracking_id);
+CREATE INDEX IF NOT EXISTS idx_payment_transactions_gateway_txn ON payment_transactions(gateway_txn_id);
+CREATE INDEX IF NOT EXISTS idx_payment_transactions_status ON payment_transactions(status);
+CREATE INDEX IF NOT EXISTS idx_payment_transactions_idempotency ON payment_transactions(idempotency_key);
+CREATE INDEX IF NOT EXISTS idx_payment_transactions_created_at ON payment_transactions(created_at DESC);
+
+-- Soft constraint to help catch obvious bad statuses without breaking future gateways.
+ALTER TABLE payment_transactions
+    DROP CONSTRAINT IF EXISTS chk_payment_transactions_status;
+ALTER TABLE payment_transactions
+    ADD CONSTRAINT chk_payment_transactions_status
+    CHECK (status IN ('pending', 'processing', '3ds_required', 'authorized', 'captured', 'settlement_pending', 'gateway_pending', 'failed', 'refunded', 'reversed', 'chargeback'));
+
+-- Concurrency protection: only one active payment attempt per order at any time
+CREATE UNIQUE INDEX IF NOT EXISTS ux_payment_active_order
+ON payment_transactions(order_tracking_id)
+WHERE status IN ('pending', 'processing', '3ds_required', 'settlement_pending', 'gateway_pending');
+
+-- Helper for idempotency: if a caller re-uses an idempotency key, return existing record.
+-- This is enforced by the UNIQUE index on idempotency_key above.
+
+-- Update orders.payment_status automatically when a payment transaction is captured or refunded.
+CREATE OR REPLACE FUNCTION update_order_payment_status()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.status = 'captured' THEN
+        UPDATE orders SET payment_status = 'paid', updated_at = NOW()
+        WHERE order_tracking_id = NEW.order_tracking_id AND payment_status <> 'paid';
+    ELSIF NEW.status = 'refunded' OR NEW.status = 'reversed' OR NEW.status = 'chargeback' THEN
+        UPDATE orders SET payment_status = 'refunded', updated_at = NOW()
+        WHERE order_tracking_id = NEW.order_tracking_id;
+    ELSIF NEW.status = 'failed' THEN
+        -- Do not overwrite 'paid' from a failed retry; only mark unpaid if currently pending.
+        UPDATE orders SET payment_status = 'unpaid', updated_at = NOW()
+        WHERE order_tracking_id = NEW.order_tracking_id AND payment_status = 'pending';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_payment_transactions_update_order ON payment_transactions;
+CREATE TRIGGER trg_payment_transactions_update_order
+    AFTER INSERT OR UPDATE OF status ON payment_transactions
+    FOR EACH ROW
+    EXECUTE FUNCTION update_order_payment_status();
+
+-- Create payment_idempotency table for explicit key locking during in-flight requests.
+CREATE TABLE IF NOT EXISTS payment_idempotency (
+    key             VARCHAR(255) PRIMARY KEY,
+    request_hash    VARCHAR(64) NOT NULL,   -- sha256 of payload for safety
+    transaction_id  VARCHAR(100),           -- internal txn once known
+    locked_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at      TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '24 hours'
+);
+
+CREATE INDEX IF NOT EXISTS idx_payment_idempotency_expires ON payment_idempotency(expires_at);
+
+-- Lightweight cleanup of expired idempotency locks (optional, can also be done via cron).
+CREATE OR REPLACE FUNCTION cleanup_expired_payment_idempotency()
+RETURNS integer AS $$
+DECLARE
+    deleted_count integer;
+BEGIN
+    DELETE FROM payment_idempotency WHERE expires_at < NOW();
+    GET DIAGNOSTICS deleted_count = ROW_COUNT;
+    RETURN deleted_count;
+END;
+$$ LANGUAGE plpgsql;
+
+```
+
+---
+
+---
+
 ## 📋 Required Environment Variables for Production
 
 | Variable | Example Value | Description |
@@ -2729,3 +3095,4 @@ WHERE status IN ('pending', 'processing', '3ds_required', 'settlement_pending', 
 | `INTERNAL_CALLBACK_SECRET` | `a_very_strong_random_32_byte_secret` | Secret used to HMAC-sign internal transaction IDs (`md`) |
 | `DEFAULT_COMMISSION_RATE` | `2.0` | Default platform store commission percentage |
 | `DEFAULT_CURRENCY` | `PKR` | Base platform currency |
+

@@ -74,10 +74,20 @@ func (c *Client) ValidateCustomerPayment(ctx context.Context, req CustomerValida
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		var errRes struct {
+			StatusMsg string `json:"status_msg"`
+			Message   string `json:"message"`
+		}
+		_ = json.Unmarshal(bodyBytes, &errRes)
+		msg := errRes.StatusMsg
+		if msg == "" {
+			msg = errRes.Message
+		}
 		return nil, &GatewayError{
 			StatusCode: resp.StatusCode,
 			Message:    "Customer validation failed",
-			Internal:   fmt.Errorf("status %d", resp.StatusCode),
+			StatusMsg:  msg,
+			Internal:   fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)),
 		}
 	}
 
@@ -161,10 +171,20 @@ func (c *Client) InitiateTransaction(ctx context.Context, req InitiateTransactio
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		var errRes struct {
+			StatusMsg string `json:"status_msg"`
+			Message   string `json:"message"`
+		}
+		_ = json.Unmarshal(bodyBytes, &errRes)
+		msg := errRes.StatusMsg
+		if msg == "" {
+			msg = errRes.Message
+		}
 		return nil, &GatewayError{
 			StatusCode: resp.StatusCode,
 			Message:    "Transaction initiation failed",
-			Internal:   fmt.Errorf("status %d", resp.StatusCode),
+			StatusMsg:  msg,
+			Internal:   fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)),
 		}
 	}
 
@@ -203,10 +223,20 @@ func (c *Client) GetTransactionStatus(ctx context.Context, transactionID string)
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		var errRes struct {
+			StatusMsg string `json:"status_msg"`
+			Message   string `json:"message"`
+		}
+		_ = json.Unmarshal(bodyBytes, &errRes)
+		msg := errRes.StatusMsg
+		if msg == "" {
+			msg = errRes.Message
+		}
 		return nil, &GatewayError{
 			StatusCode: resp.StatusCode,
 			Message:    "Transaction status check failed",
-			Internal:   fmt.Errorf("status %d", resp.StatusCode),
+			StatusMsg:  msg,
+			Internal:   fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)),
 		}
 	}
 
@@ -218,14 +248,14 @@ func (c *Client) GetTransactionStatus(ctx context.Context, transactionID string)
 	return &statusRes, nil
 }
 
-// GetTransactionStatusByBasketID calls GET /transaction/basket/<basket_id>
+// GetTransactionStatusByBasketID calls GET /transaction/basket_id/<basket_id>
 func (c *Client) GetTransactionStatusByBasketID(ctx context.Context, basketID string) (*TransactionStatusResponse, error) {
 	token, err := c.GetAuthToken(ctx, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get auth token: %w", err)
 	}
 
-	endpoint := fmt.Sprintf("%s/transaction/basket/%s", c.baseURL, url.PathEscape(basketID))
+	endpoint := fmt.Sprintf("%s/transaction/basket_id/%s", c.baseURL, url.PathEscape(basketID))
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -245,10 +275,20 @@ func (c *Client) GetTransactionStatusByBasketID(ctx context.Context, basketID st
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		var errRes struct {
+			StatusMsg string `json:"status_msg"`
+			Message   string `json:"message"`
+		}
+		_ = json.Unmarshal(bodyBytes, &errRes)
+		msg := errRes.StatusMsg
+		if msg == "" {
+			msg = errRes.Message
+		}
 		return nil, &GatewayError{
 			StatusCode: resp.StatusCode,
 			Message:    "Transaction status check by basket ID failed",
-			Internal:   fmt.Errorf("status %d", resp.StatusCode),
+			StatusMsg:  msg,
+			Internal:   fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)),
 		}
 	}
 
@@ -319,10 +359,20 @@ func (c *Client) GetTemporaryTransactionToken(ctx context.Context, req Temporary
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		var errRes struct {
+			StatusMsg string `json:"status_msg"`
+			Message   string `json:"message"`
+		}
+		_ = json.Unmarshal(bodyBytes, &errRes)
+		msg := errRes.StatusMsg
+		if msg == "" {
+			msg = errRes.Message
+		}
 		return nil, &GatewayError{
 			StatusCode: resp.StatusCode,
 			Message:    "Temporary token request failed",
-			Internal:   fmt.Errorf("status %d", resp.StatusCode),
+			StatusMsg:  msg,
+			Internal:   fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)),
 		}
 	}
 
@@ -390,10 +440,20 @@ func (c *Client) InitiateTokenizedTransaction(ctx context.Context, req Tokenized
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		var errRes struct {
+			StatusMsg string `json:"status_msg"`
+			Message   string `json:"message"`
+		}
+		_ = json.Unmarshal(bodyBytes, &errRes)
+		msg := errRes.StatusMsg
+		if msg == "" {
+			msg = errRes.Message
+		}
 		return nil, &GatewayError{
 			StatusCode: resp.StatusCode,
 			Message:    "Tokenized transaction failed",
-			Internal:   fmt.Errorf("status %d", resp.StatusCode),
+			StatusMsg:  msg,
+			Internal:   fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)),
 		}
 	}
 

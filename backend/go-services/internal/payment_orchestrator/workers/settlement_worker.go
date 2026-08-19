@@ -93,10 +93,17 @@ func (w *SettlementWorker) Start(ctx context.Context) {
 }
 
 func (w *SettlementWorker) processPendingSettlements(ctx context.Context) {
-	rows, err := w.db.Query(ctx,
+	// Claim outbox events atomically using FOR UPDATE SKIP LOCKED to prevent duplicate processing by concurrent worker replicas
+	tx, err := w.db.Begin(ctx)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	rows, err := tx.Query(ctx,
 		`SELECT id, aggregate_id, payload FROM outbox_events
 		 WHERE topic = 'payment_settlement' AND status = 'PENDING'
-		 ORDER BY id ASC LIMIT 50`,
+		 ORDER BY id ASC LIMIT 50 FOR UPDATE SKIP LOCKED`,
 	)
 	if err != nil {
 		return
@@ -116,10 +123,25 @@ func (w *SettlementWorker) processPendingSettlements(ctx context.Context) {
 			items = append(items, item)
 		}
 	}
+	rows.Close()
+
+	if len(items) == 0 {
+		return
+	}
+
+	// Mark claimed items as PROCESSING within the transaction
+	for _, item := range items {
+		_, _ = tx.Exec(ctx, `UPDATE outbox_events SET status = 'PROCESSING', updated_at = NOW() WHERE id = $1`, item.ID)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return
+	}
 
 	for _, item := range items {
 		if err := w.processSingleSettlement(ctx, item.ID, item.Payload); err != nil {
 			log.Printf("[SettlementWorker] Error processing settlement outbox event %d: %v", item.ID, err)
+			// Revert to PENDING on failure so it can be retried by the worker loop
+			_, _ = w.db.Exec(ctx, `UPDATE outbox_events SET status = 'PENDING', updated_at = NOW() WHERE id = $1`, item.ID)
 		}
 	}
 }
@@ -155,10 +177,13 @@ func (w *SettlementWorker) processSingleSettlement(ctx context.Context, eventID 
 		}
 	}
 
-	// 2. Create Escrow Hold for vendor if applicable
+	// 2. Create Escrow Hold for vendor — Mandatory fail-closed verification.
+	// If escrow creation fails, we MUST abort and NOT mark payment as captured or order as paid!
 	if payload.VendorEscrow > 0 && payload.StoreID != "" {
 		if err := w.escrow.CreateHold(ctx, payload.OrderID, payload.StoreID, payload.VendorEscrow); err != nil {
-			log.Printf("[SettlementWorker] Warning: Escrow hold creation failed or already exists for order %s: %v", payload.OrderID, err)
+			log.Printf("[SettlementWorker] CRITICAL: Escrow hold creation failed for order %s (Store: %s, Amount: %.2f): %v. Aborting settlement capture.",
+				payload.OrderID, payload.StoreID, payload.VendorEscrow, err)
+			return fmt.Errorf("mandatory escrow hold creation failed: %w", err)
 		}
 	}
 
@@ -242,14 +267,14 @@ func (w *SettlementWorker) reconcileGatewayPending(ctx context.Context) {
 			continue
 		}
 
-		if statusRes.StatusCode == "00" && statusRes.BasketID == p.OrderID {
-			// Verify amount
+		if statusRes.StatusCode == "00" && (statusRes.BasketID == "" || statusRes.BasketID == p.OrderID) {
+			// Verify amount in paisa if returned by gateway
 			if statusRes.TxnAmt != "" {
 				if gatewayAmt, err := strconv.ParseFloat(statusRes.TxnAmt, 64); err == nil {
 					expectedPaisa := int64(math.Round(p.Amount * 100))
 					gatewayPaisa := int64(math.Round(gatewayAmt * 100))
 					if expectedPaisa != gatewayPaisa {
-						log.Printf("[SettlementWorker] Reconciliation detected amount mismatch for %s: expected %d, got %d", p.InternalTxnID, expectedPaisa, gatewayPaisa)
+						log.Printf("[SettlementWorker] Reconciliation detected amount mismatch for %s: expected %d paisa, got %d paisa", p.InternalTxnID, expectedPaisa, gatewayPaisa)
 						_, _ = w.db.Exec(ctx, `UPDATE payment_transactions SET status = 'failed', error_message = 'Reconciliation amount mismatch', updated_at = NOW() WHERE transaction_id = $1`, p.InternalTxnID)
 						continue
 					}
@@ -257,7 +282,7 @@ func (w *SettlementWorker) reconcileGatewayPending(ctx context.Context) {
 			}
 
 			// Successful payment on gateway! Trigger outbox event to settle
-			log.Printf("[SettlementWorker] Reconciliation verified SUCCESS for %s (%s). Enqueuing settlement...", p.InternalTxnID, p.GatewayTxnID)
+			log.Printf("[SettlementWorker] Reconciliation verified SUCCESS for %s (%s). Enqueuing atomic settlement...", p.InternalTxnID, p.GatewayTxnID)
 			w.enqueueSettlementOutbox(ctx, p.InternalTxnID, p.OrderID, p.GatewayTxnID, p.Amount)
 		} else if statusRes.StatusCode != "" && statusRes.StatusCode != "00" {
 			log.Printf("[SettlementWorker] Reconciliation verified REJECTION for %s: %s", p.InternalTxnID, statusRes.StatusMsg)
@@ -270,9 +295,36 @@ func (w *SettlementWorker) reconcileGatewayPending(ctx context.Context) {
 }
 
 func (w *SettlementWorker) enqueueSettlementOutbox(ctx context.Context, internalTxnID, orderID, gatewayTxnID string, amount float64) {
-	var storeID, deliveryTrackingID string
-	_ = w.db.QueryRow(ctx, `SELECT store_tracking_id FROM orders WHERE order_tracking_id = $1`, orderID).Scan(&storeID)
-	_ = w.db.QueryRow(ctx, `SELECT COALESCE(tracking_id, '') FROM deliveries WHERE order_tracking_id = $1`, orderID).Scan(&deliveryTrackingID)
+	tx, err := w.db.Begin(ctx)
+	if err != nil {
+		log.Printf("[SettlementWorker] Failed to begin transaction for reconciliation of order %s: %v", orderID, err)
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	var storeID string
+	var currentOrderStatus string
+	err = tx.QueryRow(ctx, `SELECT store_tracking_id, status FROM orders WHERE order_tracking_id = $1 FOR UPDATE`, orderID).Scan(&storeID, &currentOrderStatus)
+	if err != nil {
+		log.Printf("[SettlementWorker] Order not found for reconciliation %s: %v", orderID, err)
+		return
+	}
+	if currentOrderStatus == "paid" {
+		return // already paid
+	}
+
+	var currentPaymentStatus string
+	err = tx.QueryRow(ctx, `SELECT status FROM payment_transactions WHERE transaction_id = $1 FOR UPDATE`, internalTxnID).Scan(&currentPaymentStatus)
+	if err != nil {
+		log.Printf("[SettlementWorker] Payment txn not found for reconciliation %s: %v", internalTxnID, err)
+		return
+	}
+	if currentPaymentStatus == "captured" || currentPaymentStatus == "settlement_pending" {
+		return // already settled or in progress
+	}
+
+	var deliveryTrackingID string
+	_ = tx.QueryRow(ctx, `SELECT COALESCE(tracking_id, '') FROM deliveries WHERE order_tracking_id = $1`, orderID).Scan(&deliveryTrackingID)
 
 	split, err := w.calculator.CalculateSplit(ctx, amount, storeID, deliveryTrackingID)
 	if err != nil {
@@ -324,19 +376,41 @@ func (w *SettlementWorker) enqueueSettlementOutbox(ctx context.Context, internal
 		Transfers:          transfers,
 	})
 	if err != nil {
+		log.Printf("[SettlementWorker] Failed to marshal outbox payload for reconciliation %s: %v", orderID, err)
 		return
 	}
 
-	_, _ = w.db.Exec(ctx,
-		`UPDATE orders SET admin_commission = $1 WHERE order_tracking_id = $2`,
+	_, err = tx.Exec(ctx,
+		`UPDATE orders SET admin_commission = $1, payment_status = 'settlement_pending' WHERE order_tracking_id = $2`,
 		split.AdminRevenue, orderID,
 	)
-	_, _ = w.db.Exec(ctx,
-		`UPDATE payment_transactions SET status = 'settlement_pending', updated_at = NOW() WHERE transaction_id = $1`,
-		internalTxnID,
+	if err != nil {
+		log.Printf("[SettlementWorker] Failed to update order during reconciliation %s: %v", orderID, err)
+		return
+	}
+
+	_, err = tx.Exec(ctx,
+		`UPDATE payment_transactions SET status = 'settlement_pending', gateway_txn_id = $1, updated_at = NOW() WHERE transaction_id = $2`,
+		gatewayTxnID, internalTxnID,
 	)
-	_, _ = w.db.Exec(ctx,
+	if err != nil {
+		log.Printf("[SettlementWorker] Failed to update payment status during reconciliation %s: %v", internalTxnID, err)
+		return
+	}
+
+	_, err = tx.Exec(ctx,
 		`INSERT INTO outbox_events (aggregate_id, topic, payload, status, created_at) VALUES ($1, 'payment_settlement', $2, 'PENDING', NOW())`,
 		orderID, string(outboxPayload),
 	)
+	if err != nil {
+		log.Printf("[SettlementWorker] Failed to insert outbox event during reconciliation %s: %v", orderID, err)
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		log.Printf("[SettlementWorker] Failed to commit atomic reconciliation transaction for order %s: %v", orderID, err)
+		return
+	}
+
+	log.Printf("[SettlementWorker] Successfully enqueued atomic settlement outbox for order %s (Txn %s)", orderID, internalTxnID)
 }

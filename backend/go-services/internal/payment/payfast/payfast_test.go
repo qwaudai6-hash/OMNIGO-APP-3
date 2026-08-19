@@ -332,7 +332,7 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 				json.NewEncoder(w).Encode(AuthTokenResponse{Code: "00", Token: "fake", ExpiresIn: "3600"})
 				return
 			}
-			if r.URL.Path == "/transaction/basket/order_999" {
+			if r.URL.Path == "/transaction/basket_id/order_999" {
 				w.WriteHeader(http.StatusOK)
 				json.NewEncoder(w).Encode(TransactionStatusResponse{
 					StatusCode:    "00",
@@ -352,6 +352,37 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 		}
 		if bRes.StatusCode != "00" || bRes.BasketID != "order_999" || bRes.TxnAmt != "500.00" {
 			t.Errorf("unexpected basket status response: %+v", bRes)
+		}
+	})
+
+	t.Run("Error Classification - Transient vs Deterministic", func(t *testing.T) {
+		timeoutErr := &GatewayError{StatusCode: 504, Message: "Gateway Timeout"}
+		if !IsTransient(timeoutErr) {
+			t.Errorf("expected 504 to be transient")
+		}
+		if IsDeterministicRejection(timeoutErr) {
+			t.Errorf("expected 504 not to be deterministic rejection")
+		}
+
+		badReqErr := &GatewayError{StatusCode: 400, Message: "Bad Request: Invalid Card"}
+		if IsTransient(badReqErr) {
+			t.Errorf("expected 400 not to be transient")
+		}
+		if !IsDeterministicRejection(badReqErr) {
+			t.Errorf("expected 400 to be deterministic rejection")
+		}
+	})
+
+	t.Run("Status Verification - Omitted txnamt Handling", func(t *testing.T) {
+		// Official PayFast documentation status response without txnamt
+		statusJSON := `{"status_code":"00","status_msg":"Success","basket_id":"order_888","transaction_id":"txn_888","code":"00"}`
+		var statusRes TransactionStatusResponse
+		if err := json.Unmarshal([]byte(statusJSON), &statusRes); err != nil {
+			t.Fatalf("failed to unmarshal: %v", err)
+		}
+
+		if statusRes.StatusCode != "00" || statusRes.BasketID != "order_888" || statusRes.TxnAmt != "" {
+			t.Errorf("unexpected unmarshaled status: %+v", statusRes)
 		}
 	})
 }

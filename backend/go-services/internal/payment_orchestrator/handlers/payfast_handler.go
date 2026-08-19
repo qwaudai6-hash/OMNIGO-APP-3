@@ -38,15 +38,22 @@ import (
 // 3. CustomerEmailAddress is accepted for local audit records but not sent to PayFast token API.
 type PaymentRequest struct {
 	OrderID              string `json:"order_id"`
+	PaymentMethod        string `json:"payment_method"` // "card", "bank_account", "wallet"
 	AccountTypeID        string `json:"account_type_id"`
 	CustomerMobileNo     string `json:"customer_mobile_no"`
 	CustomerEmailAddress string `json:"customer_email_address"`
 
 	// Card specific fields — strictly in-memory during token generation only.
-	CardNumber  string `json:"card_number"`
-	ExpiryMonth string `json:"expiry_month"`
-	ExpiryYear  string `json:"expiry_year"`
-	CVV         string `json:"cvv"`
+	CardNumber  string `json:"card_number,omitempty"`
+	ExpiryMonth string `json:"expiry_month,omitempty"`
+	ExpiryYear  string `json:"expiry_year,omitempty"`
+	CVV         string `json:"cvv,omitempty"`
+
+	// Bank / Wallet specific fields — strictly in-memory during token generation only.
+	BankCode      string `json:"bank_code,omitempty"`
+	AccountNumber string `json:"account_number,omitempty"`
+	AccountTitle  string `json:"account_title,omitempty"`
+	CNICNumber    string `json:"cnic_number,omitempty"`
 }
 
 type ThreeDSCallbackRequest struct {
@@ -284,17 +291,19 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 		ExpiryMonth:        req.ExpiryMonth,
 		ExpiryYear:         req.ExpiryYear,
 		CVV:                req.CVV,
+		AccountNumber:      req.AccountNumber,
+		CNICNumber:         req.CNICNumber,
 		Data3DSPagemode:    "SIMPLE",
 		Data3DSCallbackURL: callbackURL,
 	}
 
 	tokenRes, err := h.payfast.GetTemporaryTransactionToken(c.Request.Context(), tokenReq)
 
-	// Clear references to sensitive card fields as soon as they are no longer needed.
-	// Note: This does not guarantee immediate memory erasure in Go due to
-	// immutable strings and potential copies in url.Values/http.Request buffers.
+	// Clear references to sensitive card / account fields immediately.
 	req.CardNumber = ""
 	req.CVV = ""
+	req.AccountNumber = ""
+	req.CNICNumber = ""
 
 	if err != nil {
 		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Temporary token failed: "+err.Error())
@@ -356,7 +365,6 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 	}
 
 	// 7. If no 3DS required, immediately process the tokenized transaction.
-	// (Note: Typically one-time cards require 3DS, but if the gateway skips it:)
 	txnReq := payfast.TokenizedTransactionRequest{
 		InstrumentToken:  tokenRes.InstrumentToken,
 		TransactionID:    tokenRes.TransactionID,
@@ -373,12 +381,22 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 
 	txnRes, err := h.payfast.InitiateTokenizedTransaction(c.Request.Context(), txnReq)
 	if err != nil {
-		// Distinguish between transient network timeouts vs deterministic gateway rejections
-		h.markPaymentGatewayPending(c.Request.Context(), internalTxnID, tokenRes.TransactionID, "Tokenized transaction network timeout: "+err.Error())
-		c.JSON(http.StatusGatewayTimeout, gin.H{
-			"status":         "gateway_pending",
-			"error":          "Gateway timeout during capture; verification in progress",
-			"transaction_id": internalTxnID,
+		// Distinguish transient network timeouts vs deterministic gateway rejections
+		if payfast.IsTransient(err) {
+			h.markPaymentGatewayPending(c.Request.Context(), internalTxnID, tokenRes.TransactionID, "Tokenized transaction network timeout: "+err.Error())
+			c.JSON(http.StatusGatewayTimeout, gin.H{
+				"status":         "gateway_pending",
+				"error":          "Gateway timeout during capture; reconciliation in progress",
+				"transaction_id": internalTxnID,
+			})
+			return
+		}
+
+		// Deterministic HTTP 4xx or gateway client error
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Tokenized transaction failed: "+err.Error())
+		c.JSON(http.StatusBadRequest, gin.H{
+			"status": "failed",
+			"error":  "Payment processing was rejected by gateway",
 		})
 		return
 	}
@@ -476,11 +494,20 @@ func (h *PayFastSplitHandler) ThreeDSCallback(c *gin.Context) {
 
 	txnRes, err := h.payfast.InitiateTokenizedTransaction(c.Request.Context(), txnReq)
 	if err != nil {
-		// Network timeout on 3DS tokenized call: mark gateway_pending so background reconciliation can verify
-		h.markPaymentGatewayPending(c.Request.Context(), internalTxnID, meta.GatewayTxnID, "Tokenized 3DS transaction timeout: "+err.Error())
-		c.JSON(http.StatusGatewayTimeout, gin.H{
-			"status": "gateway_pending",
-			"error":  "Gateway timeout during 3DS transaction; reconciliation in progress",
+		// Distinguish transient network timeouts vs deterministic gateway rejections
+		if payfast.IsTransient(err) {
+			h.markPaymentGatewayPending(c.Request.Context(), internalTxnID, meta.GatewayTxnID, "Tokenized 3DS transaction timeout: "+err.Error())
+			c.JSON(http.StatusGatewayTimeout, gin.H{
+				"status": "gateway_pending",
+				"error":  "Gateway timeout during 3DS transaction; reconciliation in progress",
+			})
+			return
+		}
+
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Tokenized 3DS transaction failed: "+err.Error())
+		c.JSON(http.StatusBadRequest, gin.H{
+			"status": "failed",
+			"error":  "3DS payment processing was rejected by gateway",
 		})
 		return
 	}
@@ -531,39 +558,35 @@ func (h *PayFastSplitHandler) verifyAndSettle(c *gin.Context, internalTxnID stri
 		return
 	}
 
-	// Validate that the returned gateway transaction ID matches our request
+	// Validate that the returned gateway transaction ID matches our request if populated
 	if statusRes.TransactionID != "" && statusRes.TransactionID != gatewayTxnID {
 		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Gateway transaction ID mismatch in status response")
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Transaction ID mismatch"})
 		return
 	}
 
-	if statusRes.BasketID != orderID {
+	if statusRes.BasketID != "" && statusRes.BasketID != orderID {
 		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Basket ID mismatch")
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Basket ID mismatch"})
 		return
 	}
 
-	// Mandatory fail-closed numerical amount comparison in minor units (paisa)
-	if statusRes.TxnAmt == "" {
-		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Missing TxnAmt in gateway status response")
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Transaction amount missing from gateway verification"})
-		return
-	}
+	// Numerical amount comparison in minor units (paisa) when txnamt is returned by gateway
+	if statusRes.TxnAmt != "" {
+		gatewayAmt, parseErr := strconv.ParseFloat(statusRes.TxnAmt, 64)
+		if parseErr != nil {
+			h.markPaymentFailed(c.Request.Context(), internalTxnID, fmt.Sprintf("Invalid TxnAmt in gateway status response: %s", statusRes.TxnAmt))
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid transaction amount from gateway"})
+			return
+		}
 
-	gatewayAmt, parseErr := strconv.ParseFloat(statusRes.TxnAmt, 64)
-	if parseErr != nil {
-		h.markPaymentFailed(c.Request.Context(), internalTxnID, fmt.Sprintf("Invalid TxnAmt in gateway status response: %s", statusRes.TxnAmt))
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid transaction amount from gateway"})
-		return
-	}
-
-	expectedPaisa := int64(math.Round(expectedAmount * 100))
-	gatewayPaisa := int64(math.Round(gatewayAmt * 100))
-	if expectedPaisa != gatewayPaisa {
-		h.markPaymentFailed(c.Request.Context(), internalTxnID, fmt.Sprintf("Amount mismatch: expected %d paisa (%.2f), got %d paisa (%.2f)", expectedPaisa, expectedAmount, gatewayPaisa, gatewayAmt))
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Transaction amount mismatch"})
-		return
+		expectedPaisa := int64(math.Round(expectedAmount * 100))
+		gatewayPaisa := int64(math.Round(gatewayAmt * 100))
+		if expectedPaisa != gatewayPaisa {
+			h.markPaymentFailed(c.Request.Context(), internalTxnID, fmt.Sprintf("Amount mismatch: expected %d paisa (%.2f), got %d paisa (%.2f)", expectedPaisa, expectedAmount, gatewayPaisa, gatewayAmt))
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Transaction amount mismatch"})
+			return
+		}
 	}
 
 	err = h.executeSplit(c.Request.Context(), internalTxnID, orderID, expectedAmount, gatewayTxnID)
