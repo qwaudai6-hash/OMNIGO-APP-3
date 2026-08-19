@@ -164,12 +164,11 @@ func (s *RideService) CompleteRide(ctx context.Context, trackingID string, req *
 	}
 
 	if s.ledger != nil && ride.FareAmount > 0 {
-		commission := ride.AdminCommission
-		// Defensive: if AdminCommission is zero or larger than the fare,
-		// clamp to commission % so the rider still earns something.
-		if commission <= 0 || commission >= ride.FareAmount {
-			commission = ride.FareAmount * (envFloat("RIDE_COMMISSION_PERCENT", 5.0) / 100.0)
+		commissionRate := ride.AdminCommission
+		if commissionRate <= 0 || commissionRate >= 100 {
+			commissionRate = envFloat("RIDE_COMMISSION_PERCENT", 5.0)
 		}
+		commission := ride.FareAmount * (commissionRate / 100.0)
 		riderEarning := ride.FareAmount - commission
 
 		idempotencyKey := fmt.Sprintf("ride:complete:%s", trackingID)
