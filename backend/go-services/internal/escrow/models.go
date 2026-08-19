@@ -12,6 +12,7 @@ type EscrowStatus string
 const (
 	StatusHeld     EscrowStatus = "held"
 	StatusReleased EscrowStatus = "released"
+	StatusPaidOut  EscrowStatus = "paid_out"
 	StatusDisputed EscrowStatus = "disputed"
 	StatusRefunded EscrowStatus = "refunded"
 )

@@ -128,6 +128,16 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 			continue
 		}
 
+		// Mark the processed escrow holds as 'paid_out' to prevent duplicate payouts in future hourly ticks
+		_, err = w.db.Exec(ctx,
+			`UPDATE escrow_holds SET status = 'paid_out' WHERE vendor_tracking_id = $1 AND status = 'released'`,
+			vendorID,
+		)
+		if err != nil {
+			fmt.Printf("[PayoutWorker] Error marking escrow holds as paid_out for %s: %v\n", vendorID, err)
+			continue
+		}
+
 		// 4. Execute ledger transfer: vendor_withdrawable → vendor's external account
 		idempotencyKey := fmt.Sprintf("payout:%s:%s", payoutID, vendorID)
 		_, err = w.ledger.Transfer(ctx, ledger.TransferRequest{
