@@ -23,3 +23,8 @@ DROP INDEX IF EXISTS ux_payment_active_order;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_payment_active_order
 ON payment_transactions(order_tracking_id)
 WHERE status IN ('processing', '3ds_required', 'settlement_pending', 'gateway_pending');
+
+-- 4. Outbox Event Claiming Composite Index (High Concurrency FOR UPDATE SKIP LOCKED Optimization)
+CREATE INDEX IF NOT EXISTS idx_outbox_events_status_created 
+ON outbox_events(status, created_at);
+

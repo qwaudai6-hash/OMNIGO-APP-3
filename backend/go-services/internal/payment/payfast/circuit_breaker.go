@@ -40,6 +40,7 @@ type CircuitBreaker struct {
 	failureThreshold    int
 	cooldownDuration    time.Duration
 	lastStateChange     time.Time
+	halfOpenProbing     bool
 }
 
 // NewCircuitBreaker initializes a circuit breaker with sensible defaults.
@@ -68,10 +69,18 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 		if now.Sub(cb.lastStateChange) >= cb.cooldownDuration {
 			cb.state = StateHalfOpen
 			cb.lastStateChange = now
+			cb.halfOpenProbing = true
 		} else {
 			cb.mu.Unlock()
 			return ErrCircuitBreakerOpen
 		}
+	} else if cb.state == StateHalfOpen {
+		if cb.halfOpenProbing {
+			// A trial probe is already in flight, fail fast other concurrent callers
+			cb.mu.Unlock()
+			return ErrCircuitBreakerOpen
+		}
+		cb.halfOpenProbing = true
 	}
 	cb.mu.Unlock()
 
@@ -80,6 +89,7 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
+	cb.halfOpenProbing = false
 
 	if err != nil {
 		// Only count transient network/socket/gateway errors towards tripping

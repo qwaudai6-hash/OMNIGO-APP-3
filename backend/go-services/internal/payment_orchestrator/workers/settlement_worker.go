@@ -355,15 +355,15 @@ func (w *SettlementWorker) reconcileStuckPayments(ctx context.Context) {
 	}
 }
 
-// cleanupStalePending marks abandoned 'pending' rows (>10m old) as failed so they don't linger in DB.
+// cleanupStalePending marks abandoned 'pending' and '3ds_required' rows (>15m old) as failed so they don't block subsequent checkouts.
 func (w *SettlementWorker) cleanupStalePending(ctx context.Context) {
 	res, err := w.db.Exec(ctx,
 		`UPDATE payment_transactions 
-		 SET status = 'failed', error_message = 'Payment initiation abandoned/expired', updated_at = NOW()
-		 WHERE status = 'pending' AND created_at < NOW() - INTERVAL '10 minutes'`,
+		 SET status = 'failed', error_message = 'Payment initiation abandoned or 3DS session expired', updated_at = NOW()
+		 WHERE status IN ('pending', '3ds_required') AND created_at < NOW() - INTERVAL '15 minutes'`,
 	)
 	if err == nil && res.RowsAffected() > 0 {
-		log.Printf("[SettlementWorker] Cleaned up %d stale pending payment attempts", res.RowsAffected())
+		log.Printf("[SettlementWorker] Cleaned up %d stale abandoned/3DS payment attempts", res.RowsAffected())
 	}
 }
 

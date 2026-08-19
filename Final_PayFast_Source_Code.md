@@ -524,6 +524,7 @@ type CircuitBreaker struct {
 	failureThreshold    int
 	cooldownDuration    time.Duration
 	lastStateChange     time.Time
+	halfOpenProbing     bool
 }
 
 // NewCircuitBreaker initializes a circuit breaker with sensible defaults.
@@ -552,10 +553,18 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 		if now.Sub(cb.lastStateChange) >= cb.cooldownDuration {
 			cb.state = StateHalfOpen
 			cb.lastStateChange = now
+			cb.halfOpenProbing = true
 		} else {
 			cb.mu.Unlock()
 			return ErrCircuitBreakerOpen
 		}
+	} else if cb.state == StateHalfOpen {
+		if cb.halfOpenProbing {
+			// A trial probe is already in flight, fail fast other concurrent callers
+			cb.mu.Unlock()
+			return ErrCircuitBreakerOpen
+		}
+		cb.halfOpenProbing = true
 	}
 	cb.mu.Unlock()
 
@@ -564,6 +573,7 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
+	cb.halfOpenProbing = false
 
 	if err != nil {
 		// Only count transient network/socket/gateway errors towards tripping
@@ -1809,7 +1819,7 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		}
 	}
 
-	// Pre-calculate Split and assert parity
+	// Pre-calculate Split and assert exact zero-tolerance paisa parity
 	var deliveryTrackingID string
 	_ = tx.QueryRow(ctx, `SELECT COALESCE(tracking_id, '') FROM deliveries WHERE order_tracking_id = $1`, req.OrderID).Scan(&deliveryTrackingID)
 	split, err := s.calculator.CalculateSplit(ctx, expectedAmount, storeID, deliveryTrackingID)
@@ -1817,8 +1827,10 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		return nil, fmt.Errorf("commission split calculation failed: %w", err)
 	}
 	totalCalculated := split.AdminRevenue + split.VendorEscrow + split.DeliveryEscrow
-	if math.Abs(totalCalculated-expectedAmount) > 0.01 {
-		return nil, fmt.Errorf("split parity error: calculated %.2f vs total %.2f", totalCalculated, expectedAmount)
+	expectedPaisa := int64(math.Round(expectedAmount * 100))
+	calculatedPaisa := int64(math.Round(totalCalculated * 100))
+	if expectedPaisa != calculatedPaisa {
+		return nil, fmt.Errorf("split parity error: calculated %d paisa vs total %d paisa", calculatedPaisa, expectedPaisa)
 	}
 
 	splitMeta := map[string]float64{
@@ -1949,8 +1961,8 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		Otp:              req.OTP,
 	}
 
-	// Use detached context so client disconnect does not orphan gateway charge
-	gwCtx, gwCancel := context.WithTimeout(context.Background(), 25*time.Second)
+	// Use detached context preserving request context values
+	gwCtx, gwCancel := context.WithTimeout(context.WithoutCancel(ctx), 25*time.Second)
 	defer gwCancel()
 	txnRes, err := s.payfast.InitiateTokenizedTransaction(gwCtx, txnReq)
 	if err != nil {
@@ -2058,8 +2070,8 @@ func (s *PayFastService) Handle3DSCallback(ctx context.Context, mdParam, paRes, 
 		Data3DSPaRes:     paRes,
 	}
 
-	// Use detached context so client connection drop does not abort gateway charge
-	gwCtx, gwCancel := context.WithTimeout(context.Background(), 25*time.Second)
+	// Use detached context preserving request context values
+	gwCtx, gwCancel := context.WithTimeout(context.WithoutCancel(ctx), 25*time.Second)
 	defer gwCancel()
 	txnRes, err := s.payfast.InitiateTokenizedTransaction(gwCtx, txnReq)
 	if err != nil {
@@ -2132,7 +2144,8 @@ func (s *PayFastService) VerifyAndSettle(ctx context.Context, internalTxnID, ord
 	return s.ExecuteSplit(ctx, internalTxnID, orderID, expectedAmount, gatewayTxnID)
 }
 
-// ExecuteSplit performs atomic double-entry split preparation and outbox event enqueueing.
+// ExecuteSplit creates the outbox event and prepares the transaction for atomic settlement.
+// Global lock ordering policy: ALWAYS lock orders FIRST, then payment_transactions to prevent deadlocks.
 func (s *PayFastService) ExecuteSplit(ctx context.Context, internalTxnID, orderID string, expectedAmount float64, gatewayTxnID string) error {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -2140,17 +2153,7 @@ func (s *PayFastService) ExecuteSplit(ctx context.Context, internalTxnID, orderI
 	}
 	defer tx.Rollback(ctx)
 
-	// Idempotency lock on payment_transactions
-	var currentStatus string
-	err = tx.QueryRow(ctx, `SELECT status FROM payment_transactions WHERE transaction_id = $1 FOR UPDATE`, internalTxnID).Scan(&currentStatus)
-	if err != nil {
-		return fmt.Errorf("payment transaction not found: %w", err)
-	}
-	if currentStatus == "captured" || currentStatus == "settlement_pending" {
-		return nil // Idempotent success
-	}
-
-	// Lock order and re-verify authoritative state
+	// 1. Lock order FIRST (Global lock order: orders -> payment_transactions)
 	var dbAmount float64
 	var storeID string
 	var orderStatus string
@@ -2802,15 +2805,15 @@ func (w *SettlementWorker) reconcileStuckPayments(ctx context.Context) {
 	}
 }
 
-// cleanupStalePending marks abandoned 'pending' rows (>10m old) as failed so they don't linger in DB.
+// cleanupStalePending marks abandoned 'pending' and '3ds_required' rows (>15m old) as failed so they don't block subsequent checkouts.
 func (w *SettlementWorker) cleanupStalePending(ctx context.Context) {
 	res, err := w.db.Exec(ctx,
 		`UPDATE payment_transactions 
-		 SET status = 'failed', error_message = 'Payment initiation abandoned/expired', updated_at = NOW()
-		 WHERE status = 'pending' AND created_at < NOW() - INTERVAL '10 minutes'`,
+		 SET status = 'failed', error_message = 'Payment initiation abandoned or 3DS session expired', updated_at = NOW()
+		 WHERE status IN ('pending', '3ds_required') AND created_at < NOW() - INTERVAL '15 minutes'`,
 	)
 	if err == nil && res.RowsAffected() > 0 {
-		log.Printf("[SettlementWorker] Cleaned up %d stale pending payment attempts", res.RowsAffected())
+		log.Printf("[SettlementWorker] Cleaned up %d stale abandoned/3DS payment attempts", res.RowsAffected())
 	}
 }
 
@@ -3635,6 +3638,11 @@ DROP INDEX IF EXISTS ux_payment_active_order;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_payment_active_order
 ON payment_transactions(order_tracking_id)
 WHERE status IN ('processing', '3ds_required', 'settlement_pending', 'gateway_pending');
+
+-- 4. Outbox Event Claiming Composite Index (High Concurrency FOR UPDATE SKIP LOCKED Optimization)
+CREATE INDEX IF NOT EXISTS idx_outbox_events_status_created 
+ON outbox_events(status, created_at);
+
 
 ```
 

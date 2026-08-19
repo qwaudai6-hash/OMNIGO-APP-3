@@ -122,10 +122,21 @@ func (c *CommissionCalculator) CalculateCODSplit(ctx context.Context, orderTotal
 	codSurcharge := envFloat("COD_SURCHARGE_RATE", 0.5)
 
 	adminRevenue := roundToPaisa(orderTotal * (commissionRate + codSurcharge) / 100.0)
-	vendorEscrow := roundToPaisa(orderTotal - adminRevenue - deliveryFee)
+	deliveryEscrow := roundToPaisa(deliveryFee)
+	var vendorEscrow float64
 
-	if vendorEscrow < 0 {
-		vendorEscrow = 0
+	// Guarantee total COD split never exceeds orderTotal
+	if adminRevenue+deliveryEscrow > orderTotal {
+		if deliveryEscrow >= orderTotal {
+			deliveryEscrow = roundToPaisa(orderTotal)
+			adminRevenue = 0
+			vendorEscrow = 0
+		} else {
+			adminRevenue = roundToPaisa(orderTotal - deliveryEscrow)
+			vendorEscrow = 0
+		}
+	} else {
+		vendorEscrow = roundToPaisa(orderTotal - adminRevenue - deliveryEscrow)
 	}
 
 	return &SplitResult{
