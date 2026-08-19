@@ -37,14 +37,11 @@ type TokenCache struct {
 	ExpiresAt    time.Time
 }
 
-// AccountType represents the type of payment instrument.
-type AccountType int
-
-const (
-	AccountTypeCard   AccountType = 1
-	AccountTypeBank   AccountType = 2
-	AccountTypeWallet AccountType = 3
-)
+// NOTE: PayFast account_type / account_type_id values vary by integration endpoint
+// and issuer. Do NOT hardcode assumptions about which numeric ID maps to card vs bank
+// vs wallet. Use PayFast's /list/instruments API to retrieve the correct mapping for
+// your merchant configuration. The values in PayFast's own documentation examples
+// (e.g., account_type_id=2 for card, =3 for bank) differ from naive 1/2/3 assumptions.
 
 // CustomerValidationRequest contains all fields needed for POST /customer/validate
 type CustomerValidationRequest struct {

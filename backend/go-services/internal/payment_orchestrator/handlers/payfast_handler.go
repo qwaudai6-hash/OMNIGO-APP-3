@@ -27,14 +27,17 @@ import (
 	"github.com/omnigo/backend/internal/shared/middleware"
 )
 
-// PaymentRequest payload from Flutter
+// PaymentRequest payload from Flutter.
+// CustomerEmailAddress is accepted for local audit/receipt purposes but is NOT sent
+// to PayFast's /transaction/token endpoint (the API does not accept it).
 type PaymentRequest struct {
 	OrderID              string `json:"order_id"`
 	AccountTypeID        string `json:"account_type_id"`
 	CustomerMobileNo     string `json:"customer_mobile_no"`
 	CustomerEmailAddress string `json:"customer_email_address"`
 
-	// Card specific (Zero-Persistence Rule)
+	// Card specific — No Cardholder Data Persistence rule applies.
+	// These fields are used only to obtain a temporary token and are never stored.
 	CardNumber  string `json:"card_number"`
 	ExpiryMonth string `json:"expiry_month"`
 	ExpiryYear  string `json:"expiry_year"`
@@ -46,14 +49,14 @@ type ThreeDSCallbackRequest struct {
 	PaRes string `form:"paRes" binding:"required"`
 }
 
-// signMD generates an HMAC signature for the transaction ID
+// generateHMACSHA256 generates a hex-encoded HMAC-SHA256 signature.
 func generateHMACSHA256(data string, secret string) string {
 	h := hmac.New(sha256.New, []byte(secret))
 	h.Write([]byte(data))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// verifyMD validates the HMAC signature in constant time
+// verifyMD validates the HMAC signature in constant time.
 func verifyMD(mdParam string) (string, error) {
 	secret := os.Getenv("INTERNAL_CALLBACK_SECRET")
 	if secret == "" {
@@ -69,7 +72,7 @@ func verifyMD(mdParam string) (string, error) {
 	providedSignature := parts[1]
 
 	expectedSignature := generateHMACSHA256(internalTxnID, secret)
-	
+
 	if subtle.ConstantTimeCompare([]byte(expectedSignature), []byte(providedSignature)) != 1 {
 		return "", fmt.Errorf("signature mismatch")
 	}
@@ -77,7 +80,26 @@ func verifyMD(mdParam string) (string, error) {
 	return internalTxnID, nil
 }
 
-// PaymentMetadata stores non-sensitive token state required for completing Tokenized Transactions.
+// build3DSCallbackURL safely constructs the 3DS callback URL with a signed MD parameter.
+// Uses url.Parse for proper URL construction instead of string concatenation.
+func build3DSCallbackURL(baseURL, internalTxnID, secret string) (string, error) {
+	signedMD := internalTxnID + "." + generateHMACSHA256(internalTxnID, secret)
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid callback base URL: %w", err)
+	}
+	q := u.Query()
+	q.Set("md", signedMD)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+// PaymentMetadata stores non-sensitive PayFast token state required for completing
+// Tokenized Transactions after 3DS authentication.
+//
+// NOTE: No Cardholder Data Persistence — PAN, CVV, and expiry are never stored.
+// The instrument_token and 3DS metadata below are PayFast-issued gateway tokens,
+// not cardholder data, and must be persisted to complete the two-step flow.
 type PaymentMetadata struct {
 	InstrumentToken string `json:"instrument_token"`
 	GatewayTxnID    string `json:"gateway_txn_id"`
@@ -87,7 +109,7 @@ type PaymentMetadata struct {
 	AccountTypeID   string `json:"account_type"`
 }
 
-// PayFastSplitHandler handles synchronous PayFast API payments
+// PayFastSplitHandler handles synchronous PayFast API payments.
 type PayFastSplitHandler struct {
 	redis      redis.UniversalClient
 	kafka      *kgo.Client
@@ -142,7 +164,7 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 	var expectedAmount float64
 	var status string
 	var customerTrackingID string
-	
+
 	// 2. Prevent duplicate active attempts (using FOR UPDATE to serialize requests on the same order)
 	tx, err := h.db.Begin(c.Request.Context())
 	if err != nil {
@@ -171,9 +193,12 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 	customerIP := c.ClientIP()
 	internalTxnID := "pf_" + uuid.New().String()
 
+	// Application-level duplicate check for user-friendly error messages.
+	// The real guard is the database-level unique partial index ux_payment_active_order
+	// which prevents race conditions that this SELECT cannot catch.
 	var activeAttempts int
 	err = tx.QueryRow(c.Request.Context(),
-		`SELECT count(*) FROM payment_transactions WHERE order_tracking_id = $1 AND status IN ('pending', 'processing', '3ds_required')`,
+		`SELECT count(*) FROM payment_transactions WHERE order_tracking_id = $1 AND status IN ('pending', 'processing', '3ds_required', 'settlement_pending')`,
 		req.OrderID,
 	).Scan(&activeAttempts)
 	if err != nil {
@@ -185,7 +210,7 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 		return
 	}
 
-	// Also fetch authoritative mobile number
+	// Also fetch authoritative mobile number from the users table (never trust the frontend)
 	var authoritativeMobile string
 	err = tx.QueryRow(c.Request.Context(), `SELECT phone FROM users WHERE tracking_id = $1`, customerTrackingID).Scan(&authoritativeMobile)
 	if err != nil {
@@ -194,12 +219,19 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 	}
 
 	// 3. Insert Pending Payment Attempt
+	// If a race condition causes a duplicate insert, the unique partial index
+	// ux_payment_active_order will reject it and we handle the error gracefully.
 	_, err = tx.Exec(c.Request.Context(),
 		`INSERT INTO payment_transactions (transaction_id, order_tracking_id, gateway, amount, currency, status, kind)
 		 VALUES ($1, $2, 'payfast', $3, 'PKR', 'pending', 'payment')`,
 		internalTxnID, req.OrderID, expectedAmount,
 	)
 	if err != nil {
+		// Check if it's a unique constraint violation from the partial index
+		if strings.Contains(err.Error(), "ux_payment_active_order") || strings.Contains(err.Error(), "unique constraint") {
+			c.JSON(http.StatusConflict, gin.H{"error": "A payment attempt is already in progress for this order"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create payment attempt"})
 		return
 	}
@@ -209,7 +241,16 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 		return
 	}
 
-	// 3. Get Temporary Transaction Token
+	// 4. Build safe 3DS callback URL with signed MD
+	callbackBaseURL := envStr("PAYFAST_3DS_CALLBACK_URL", "https://api.omnigo.com/api/v1/payments/payfast/3ds_callback")
+	callbackURL, err := build3DSCallbackURL(callbackBaseURL, internalTxnID, os.Getenv("INTERNAL_CALLBACK_SECRET"))
+	if err != nil {
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Failed to build callback URL")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal configuration error"})
+		return
+	}
+
+	// 5. Get Temporary Transaction Token
 	tokenReq := payfast.TemporaryTokenRequest{
 		BasketID:           req.OrderID,
 		TxnAmt:             amountStr,
@@ -224,14 +265,14 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 		ExpiryYear:         req.ExpiryYear,
 		CVV:                req.CVV,
 		Data3DSPagemode:    "SIMPLE",
-		Data3DSCallbackURL: envStr("PAYFAST_3DS_CALLBACK_URL", "https://api.omnigo.com/api/v1/payments/payfast/3ds_callback") + "?md=" + internalTxnID + "." + url.QueryEscape(generateHMACSHA256(internalTxnID, os.Getenv("INTERNAL_CALLBACK_SECRET"))),
+		Data3DSCallbackURL: callbackURL,
 	}
 
-	// WARNING: tokenReq explicitly prevents CardData from being JSON marshaled via json:"-" if implemented,
-	// but it is not printed in logs due to String() override. The zero-persistence rule means it dies here.
 	tokenRes, err := h.payfast.GetTemporaryTransactionToken(c.Request.Context(), tokenReq)
 
-	// Card details are now effectively gone from memory as tokenReq falls out of scope.
+	// Clear references to sensitive card fields as soon as they are no longer needed.
+	// Note: This does not guarantee immediate memory erasure in Go due to
+	// immutable strings and potential copies in url.Values/http.Request buffers.
 	req.CardNumber = ""
 	req.CVV = ""
 
@@ -247,12 +288,12 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 		return
 	}
 
-	// 5. Handle 3DS if required
+	// 6. Handle 3DS if required
 	if tokenRes.Data3DSHTML != "" {
 		// Safely merge metadata to avoid overwriting existing data
 		var existingMetaJSON []byte
 		err := h.db.QueryRow(c.Request.Context(), "SELECT metadata FROM payment_transactions WHERE transaction_id = $1", internalTxnID).Scan(&existingMetaJSON)
-		
+
 		var metaMap map[string]interface{}
 		if err == nil && len(existingMetaJSON) > 0 {
 			if err := json.Unmarshal(existingMetaJSON, &metaMap); err != nil {
@@ -293,7 +334,7 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 		return
 	}
 
-	// 6. If no 3DS required, immediately process the tokenized transaction.
+	// 7. If no 3DS required, immediately process the tokenized transaction.
 	// (Note: Typically one-time cards require 3DS, but if the gateway skips it:)
 	txnReq := payfast.TokenizedTransactionRequest{
 		InstrumentToken:  tokenRes.InstrumentToken,
@@ -316,7 +357,7 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 		return
 	}
 
-	// 6. Check Transaction Status & Settle
+	// 8. Check Transaction Status & Settle
 	h.verifyAndSettle(c, internalTxnID, req.OrderID, txnRes.TransactionID, expectedAmount)
 }
 
@@ -324,7 +365,7 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 func (h *PayFastSplitHandler) ThreeDSCallback(c *gin.Context) {
 	var req ThreeDSCallbackRequest
 	if err := c.ShouldBind(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid form submission"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid 3DS callback payload"})
 		return
 	}
 	internalTxnID, err := verifyMD(req.MD)
@@ -402,7 +443,7 @@ func (h *PayFastSplitHandler) ThreeDSCallback(c *gin.Context) {
 	h.verifyAndSettle(c, internalTxnID, orderID, txnRes.TransactionID, amount)
 }
 
-// verifyAndSettle calls the GET status endpoint and settles the DB transaction atomically
+// verifyAndSettle calls the GET status endpoint and settles the DB transaction atomically.
 func (h *PayFastSplitHandler) verifyAndSettle(c *gin.Context, internalTxnID string, orderID string, gatewayTxnID string, expectedAmount float64) {
 	statusRes, err := h.payfast.GetTransactionStatus(c.Request.Context(), gatewayTxnID)
 	if err != nil {
@@ -411,7 +452,7 @@ func (h *PayFastSplitHandler) verifyAndSettle(c *gin.Context, internalTxnID stri
 		return
 	}
 
-	// 00 = Processed OK
+	// 00 = Processed OK per PayFast documentation
 	if statusRes.StatusCode != "00" {
 		h.markPaymentFailed(c.Request.Context(), internalTxnID, statusRes.StatusMsg)
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -419,6 +460,13 @@ func (h *PayFastSplitHandler) verifyAndSettle(c *gin.Context, internalTxnID stri
 			"code":  statusRes.StatusCode,
 			"msg":   statusRes.StatusMsg,
 		})
+		return
+	}
+
+	// Fix #14: Validate that the returned gateway transaction ID matches our request
+	if statusRes.TransactionID != "" && statusRes.TransactionID != gatewayTxnID {
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Gateway transaction ID mismatch in status response")
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Transaction ID mismatch"})
 		return
 	}
 
@@ -431,25 +479,53 @@ func (h *PayFastSplitHandler) verifyAndSettle(c *gin.Context, internalTxnID stri
 	// We removed strict TxnAmt verification against statusRes here because official
 	// docs do not guarantee txnamt in status response. We instead trust that code 00
 	// for the correct BasketID and TxnID implies our requested expectedAmount was processed.
-	
+
 	err = h.executeSplit(c.Request.Context(), internalTxnID, orderID, expectedAmount, gatewayTxnID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Settlement failed"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"status": "paid", "order_id": orderID})
+	c.JSON(http.StatusOK, gin.H{"status": "settlement_pending", "order_id": orderID})
 }
 
+// markPaymentFailed transitions a payment to 'failed' status.
+// Only allows failure from specific states to prevent overwriting concurrent state changes.
+// Valid failure transitions: pending → failed, 3ds_required → failed, processing → failed.
 func (h *PayFastSplitHandler) markPaymentFailed(ctx context.Context, internalTxnID string, reason string) {
 	_, _ = h.db.Exec(ctx,
-		`UPDATE payment_transactions SET status = 'failed', error_message = $1, updated_at = NOW() WHERE transaction_id = $2 AND status != 'captured'`,
+		`UPDATE payment_transactions SET status = 'failed', error_message = $1, updated_at = NOW()
+		 WHERE transaction_id = $2 AND status IN ('pending', '3ds_required', 'processing')`,
 		reason, internalTxnID,
 	)
 }
 
-// executeSplit performs the atomic local settlement and idempotency checks.
-func (h *PayFastSplitHandler) executeSplit(ctx context.Context, internalTxnID string, orderID string, amount float64, gatewayTxnID string) error {
+// executeSplit performs the DB-atomic settlement preparation.
+//
+// Architecture: This function does NOT call the external ledger service directly.
+// Instead it records the settlement intent in an outbox_events table within the
+// same PostgreSQL transaction. A separate outbox worker (idempotent) will read
+// these events and execute the ledger transfers + escrow holds. This ensures that
+// the DB state and ledger are never inconsistent.
+//
+// Flow:
+//   DB Transaction:
+//     1. Lock payment_transactions row (FOR UPDATE) — idempotency check
+//     2. Lock orders row (FOR UPDATE) — re-read authoritative amount, verify status
+//     3. Verify amount hasn't changed since initial request
+//     4. Calculate commission split
+//     5. Mark payment as 'settlement_pending'
+//     6. Mark order as payment_status = 'settlement_pending'
+//     7. INSERT full settlement details into outbox_events (idempotency key included)
+//     8. COMMIT
+//
+//   Outbox Worker (separate service, not in this handler):
+//     1. Read PENDING outbox events
+//     2. Execute ledger.MultiTransfer (idempotent via idempotency key)
+//     3. Execute escrow.Hold (idempotent)
+//     4. Update payment → 'captured', order → 'paid'
+//     5. Mark outbox event as PROCESSED
+func (h *PayFastSplitHandler) executeSplit(ctx context.Context, internalTxnID string, orderID string, expectedAmount float64, gatewayTxnID string) error {
 	// 1. Begin atomic DB transaction
 	tx, err := h.db.Begin(ctx)
 	if err != nil {
@@ -463,18 +539,19 @@ func (h *PayFastSplitHandler) executeSplit(ctx context.Context, internalTxnID st
 	if err != nil {
 		return fmt.Errorf("payment transaction not found: %w", err)
 	}
-	if currentStatus == "captured" {
-		// Idempotent success
+	if currentStatus == "captured" || currentStatus == "settlement_pending" {
+		// Idempotent success — already processed or in progress
 		return nil
 	}
 
-	// 3. Ensure order is not paid by another transaction
+	// 3. Lock order and re-read authoritative amount (Fix #6)
+	var dbAmount float64
 	var storeID string
 	var deliveryTrackingID string
 	var orderStatus string
 	err = tx.QueryRow(ctx,
-		`SELECT store_tracking_id, status FROM orders WHERE order_tracking_id = $1 FOR UPDATE`, orderID,
-	).Scan(&storeID, &orderStatus)
+		`SELECT total_amount, store_tracking_id, status FROM orders WHERE order_tracking_id = $1 FOR UPDATE`, orderID,
+	).Scan(&dbAmount, &storeID, &orderStatus)
 	if err != nil {
 		return fmt.Errorf("order not found: %w", err)
 	}
@@ -482,11 +559,16 @@ func (h *PayFastSplitHandler) executeSplit(ctx context.Context, internalTxnID st
 		return fmt.Errorf("conflict: order already paid by another transaction")
 	}
 
-	h.db.QueryRow(ctx,
+	// Verify the authoritative amount hasn't changed since the payment was initiated
+	if dbAmount != expectedAmount {
+		return fmt.Errorf("order amount changed during settlement: expected %.2f, got %.2f", expectedAmount, dbAmount)
+	}
+
+	_ = tx.QueryRow(ctx,
 		`SELECT COALESCE(d.tracking_id, '') FROM deliveries d WHERE d.order_tracking_id = $1`, orderID,
 	).Scan(&deliveryTrackingID)
 
-	split, err := h.calculator.CalculateSplit(ctx, amount, storeID, deliveryTrackingID)
+	split, err := h.calculator.CalculateSplit(ctx, dbAmount, storeID, deliveryTrackingID)
 	if err != nil {
 		return fmt.Errorf("split calculation failed: %w", err)
 	}
@@ -494,51 +576,55 @@ func (h *PayFastSplitHandler) executeSplit(ctx context.Context, internalTxnID st
 	currency := envStr("DEFAULT_CURRENCY", "PKR")
 	idempotencyKey := fmt.Sprintf("payfast:split:%s", gatewayTxnID)
 
-	// Since we are decoupling escrow from the synchronous flow to ensure DB atomicity,
-	// we only perform revenue transfers immediately (or just record it in DB).
-	// We'll record outbox events to process ledger transfers asynchronously.
-	transfers := []ledger.TransferRequest{
-		{DebitAccount: ledger.AccountPayFastHolding, CreditAccount: ledger.AccountAdminRevenue, Amount: split.AdminRevenue, Currency: currency, ReferenceID: orderID, IdempotencyKey: idempotencyKey + ":admin"},
-	}
-
-	// Execute only the critical synchronous transfers.
-	_, err = h.ledger.MultiTransfer(ctx, transfers)
-	if err != nil {
-		return fmt.Errorf("atomic ledger split failed: %w", err)
-	}
-
-	// 4. Update order & payment statuses (triggers will also help sync, but we do it explicitly here for the transaction block)
+	// 4. Mark payment as settlement_pending (NOT captured — that happens after ledger)
 	_, err = tx.Exec(ctx,
-		`UPDATE orders SET admin_commission = $1, payment_status = 'paid', status = 'paid' WHERE order_tracking_id = $2`,
-		split.AdminRevenue, orderID,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to update order status for %s: %w", orderID, err)
-	}
-
-	_, err = tx.Exec(ctx,
-		`UPDATE payment_transactions SET status = 'captured', gateway_txn_id = $1, updated_at = NOW() WHERE transaction_id = $2`,
+		`UPDATE payment_transactions SET status = 'settlement_pending', gateway_txn_id = $1, updated_at = NOW() WHERE transaction_id = $2`,
 		gatewayTxnID, internalTxnID,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update payment transaction: %w", err)
 	}
 
-	// 5. Insert Escrow Outbox Event (Atomic)
+	// 5. Mark order as settlement_pending
+	_, err = tx.Exec(ctx,
+		`UPDATE orders SET admin_commission = $1, payment_status = 'settlement_pending' WHERE order_tracking_id = $2`,
+		split.AdminRevenue, orderID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update order status for %s: %w", orderID, err)
+	}
+
+	// 6. Insert Settlement Outbox Event (atomic with DB state changes)
+	// The outbox worker will read this and execute the ledger transfers + escrow holds.
 	outboxPayload, _ := json.Marshal(map[string]interface{}{
-		"order_id": orderID,
-		"store_id": storeID,
-		"vendor_escrow": split.VendorEscrow,
+		"internal_txn_id":      internalTxnID,
+		"order_id":             orderID,
+		"gateway_txn_id":       gatewayTxnID,
+		"store_id":             storeID,
+		"delivery_tracking_id": deliveryTrackingID,
+		"total_amount":         dbAmount,
+		"currency":             currency,
+		"admin_revenue":        split.AdminRevenue,
+		"vendor_escrow":        split.VendorEscrow,
+		"idempotency_key":      idempotencyKey,
+		"transfers": []map[string]interface{}{
+			{
+				"debit_account":  string(ledger.AccountPayFastHolding),
+				"credit_account": string(ledger.AccountAdminRevenue),
+				"amount":         split.AdminRevenue,
+				"idempotency":    idempotencyKey + ":admin",
+			},
+		},
 	})
-	_, err = tx.Exec(ctx, 
-		`INSERT INTO outbox_events (aggregate_id, topic, payload, status, created_at) VALUES ($1, 'escrow_hold', $2, 'PENDING', NOW())`,
+	_, err = tx.Exec(ctx,
+		`INSERT INTO outbox_events (aggregate_id, topic, payload, status, created_at) VALUES ($1, 'payment_settlement', $2, 'PENDING', NOW())`,
 		orderID, string(outboxPayload),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to insert outbox event: %w", err)
 	}
 
-	// 6. Commit DB Transaction
+	// 7. Commit DB Transaction — this is the single atomic boundary
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit settlement: %w", err)
 	}
