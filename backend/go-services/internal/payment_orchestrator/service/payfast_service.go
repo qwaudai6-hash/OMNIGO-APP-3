@@ -212,7 +212,7 @@ func (s *PayFastService) Build3DSCallbackURL(internalTxnID string) (string, erro
 }
 
 // ProcessPayment handles the primary checkout initiation.
-func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, clientIP string, req PaymentRequest) (*PaymentResponse, error) {
+func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, clientIP string, req *PaymentRequest) (*PaymentResponse, error) {
 	// 1. Validate Input Payload
 	if err := req.Validate(); err != nil {
 		return nil, fmt.Errorf("validation error: %w", err)
@@ -324,7 +324,7 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		return nil, fmt.Errorf("failed to commit initial payment attempt: %w", err)
 	}
 
-	// Zero card persistence cleanup
+	// Zero card persistence cleanup on the original caller struct
 	defer func() {
 		req.CardNumber = ""
 		req.CVV = ""
@@ -423,7 +423,10 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		Otp:              req.OTP,
 	}
 
-	txnRes, err := s.payfast.InitiateTokenizedTransaction(ctx, txnReq)
+	// Use detached context so client disconnect does not orphan gateway charge
+	gwCtx, gwCancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer gwCancel()
+	txnRes, err := s.payfast.InitiateTokenizedTransaction(gwCtx, txnReq)
 	if err != nil {
 		if payfast.IsTransient(err) {
 			_ = s.MarkPaymentGatewayPending(ctx, internalTxnID, tokenRes.TransactionID, "Direct tokenized txn timeout: "+err.Error())
@@ -529,7 +532,10 @@ func (s *PayFastService) Handle3DSCallback(ctx context.Context, mdParam, paRes, 
 		Data3DSPaRes:     paRes,
 	}
 
-	txnRes, err := s.payfast.InitiateTokenizedTransaction(ctx, txnReq)
+	// Use detached context so client connection drop does not abort gateway charge
+	gwCtx, gwCancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer gwCancel()
+	txnRes, err := s.payfast.InitiateTokenizedTransaction(gwCtx, txnReq)
 	if err != nil {
 		if payfast.IsTransient(err) {
 			_ = s.MarkPaymentGatewayPending(ctx, internalTxnID, meta.GatewayTxnID, "Tokenized 3DS txn timeout: "+err.Error())
@@ -585,13 +591,15 @@ func (s *PayFastService) VerifyAndSettle(ctx context.Context, internalTxnID, ord
 
 	if statusRes.TxnAmt != "" {
 		gatewayAmt, parseErr := strconv.ParseFloat(statusRes.TxnAmt, 64)
-		if parseErr == nil {
-			expectedPaisa := int64(math.Round(expectedAmount * 100))
-			gatewayPaisa := int64(math.Round(gatewayAmt * 100))
-			if expectedPaisa != gatewayPaisa {
-				_ = s.MarkPaymentFailed(ctx, internalTxnID, fmt.Sprintf("Amount mismatch: expected %d paisa, got %d paisa", expectedPaisa, gatewayPaisa))
-				return errors.New("transaction amount mismatch")
-			}
+		if parseErr != nil {
+			_ = s.MarkPaymentFailed(ctx, internalTxnID, "Invalid amount format in gateway status response")
+			return fmt.Errorf("invalid gateway amount format: %w", parseErr)
+		}
+		expectedPaisa := int64(math.Round(expectedAmount * 100))
+		gatewayPaisa := int64(math.Round(gatewayAmt * 100))
+		if expectedPaisa != gatewayPaisa {
+			_ = s.MarkPaymentFailed(ctx, internalTxnID, fmt.Sprintf("Amount mismatch: expected %d paisa, got %d paisa", expectedPaisa, gatewayPaisa))
+			return errors.New("transaction amount mismatch")
 		}
 	}
 

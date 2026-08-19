@@ -169,7 +169,16 @@ func (w *SettlementWorker) processSingleSettlement(ctx context.Context, eventID 
 		currency = "PKR"
 	}
 
-	// 1. Execute Ledger MultiTransfer (Atomic all-or-nothing double-entry split)
+	// 1. Create Escrow Hold for vendor — Mandatory fail-closed verification.
+	if payload.VendorEscrow > 0 && payload.StoreID != "" {
+		if err := w.escrow.CreateHold(ctx, payload.OrderID, payload.StoreID, payload.VendorEscrow); err != nil {
+			log.Printf("[SettlementWorker] CRITICAL: Escrow hold creation failed for order %s (Store: %s, Amount: %.2f): %v",
+				payload.OrderID, payload.StoreID, payload.VendorEscrow, err)
+			return fmt.Errorf("mandatory escrow hold creation failed: %w", err)
+		}
+	}
+
+	// 2. Execute Ledger MultiTransfer (Atomic all-or-nothing double-entry split)
 	var transferReqs []ledger.TransferRequest
 	for _, tr := range payload.Transfers {
 		if tr.Amount <= 0 {
@@ -190,15 +199,6 @@ func (w *SettlementWorker) processSingleSettlement(ctx context.Context, eventID 
 		_, err := w.ledger.MultiTransfer(ctx, transferReqs)
 		if err != nil {
 			return fmt.Errorf("ledger multi-transfer failed for order %s: %w", payload.OrderID, err)
-		}
-	}
-
-	// 2. Create Escrow Hold for vendor — Mandatory fail-closed verification.
-	if payload.VendorEscrow > 0 && payload.StoreID != "" {
-		if err := w.escrow.CreateHold(ctx, payload.OrderID, payload.StoreID, payload.VendorEscrow); err != nil {
-			log.Printf("[SettlementWorker] CRITICAL: Escrow hold creation failed for order %s (Store: %s, Amount: %.2f): %v",
-				payload.OrderID, payload.StoreID, payload.VendorEscrow, err)
-			return fmt.Errorf("mandatory escrow hold creation failed: %w", err)
 		}
 	}
 
@@ -285,7 +285,12 @@ func (w *SettlementWorker) reconcileStuckPayments(ctx context.Context) {
 		}
 	}
 	rows.Close()
-	_ = tx.Commit(ctx) // release transaction lock so individual reconciliation updates can commit
+
+	// Touch updated_at inside claiming transaction so concurrent pods won't pick up the same rows
+	for _, p := range list {
+		_, _ = tx.Exec(ctx, `UPDATE payment_transactions SET updated_at = NOW() WHERE transaction_id = $1`, p.InternalTxnID)
+	}
+	_ = tx.Commit(ctx)
 
 	for _, p := range list {
 		var statusRes *payfast.TransactionStatusResponse

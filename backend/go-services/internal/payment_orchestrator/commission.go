@@ -73,11 +73,20 @@ func (c *CommissionCalculator) CalculateSplit(ctx context.Context, orderTotal fl
 	// 3. Calculate splits with exact 2-decimal paisa precision
 	adminRevenue := roundToPaisa(orderTotal * commissionRate / 100.0)
 	deliveryEscrow := roundToPaisa(deliveryFee)
-	vendorEscrow := roundToPaisa(orderTotal - adminRevenue - deliveryEscrow)
+	var vendorEscrow float64
 
-	// Ensure vendor escrow is not negative
-	if vendorEscrow < 0 {
-		vendorEscrow = 0
+	// Guarantee that total split never exceeds orderTotal
+	if adminRevenue+deliveryEscrow > orderTotal {
+		if deliveryEscrow >= orderTotal {
+			deliveryEscrow = roundToPaisa(orderTotal)
+			adminRevenue = 0
+			vendorEscrow = 0
+		} else {
+			adminRevenue = roundToPaisa(orderTotal - deliveryEscrow)
+			vendorEscrow = 0
+		}
+	} else {
+		vendorEscrow = roundToPaisa(orderTotal - adminRevenue - deliveryEscrow)
 	}
 
 	return &SplitResult{

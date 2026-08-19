@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"os"
 	"sync"
 
@@ -168,7 +169,7 @@ func (s *Service) Transfer(ctx context.Context, req TransferRequest) (uuid.UUID,
 				ID:              tbID,
 				DebitAccountID:  AccountToUint128(req.DebitAccount),
 				CreditAccountID: AccountToUint128(req.CreditAccount),
-				Amount:          tb.ToUint128(uint64(req.Amount * 100)), // Store as cents
+				Amount:          tb.ToUint128(uint64(math.Round(req.Amount * 100))), // Store as cents
 				Ledger:          1,
 				Code:            1,
 			}
@@ -284,7 +285,7 @@ func (s *Service) MultiTransfer(ctx context.Context, reqs []TransferRequest) (uu
 					ID:              tb.BytesToUint128(u),
 					DebitAccountID:  AccountToUint128(r.DebitAccount),
 					CreditAccountID: AccountToUint128(r.CreditAccount),
-					Amount:          tb.ToUint128(uint64(r.Amount * 100)),
+					Amount:          tb.ToUint128(uint64(math.Round(r.Amount * 100))),
 					Ledger:          1,
 					Code:            1,
 				})

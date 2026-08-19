@@ -35,23 +35,6 @@ func (h *PayFastSplitHandler) RegisterRoutes(r gin.IRoutes) {
 	r.GET("/api/v1/payments/payfast/3ds_callback", h.ThreeDSCallback)
 }
 
-// getClientIP extracts real customer IP safely taking reverse proxies into account.
-func getClientIP(c *gin.Context) string {
-	if xff := c.GetHeader("X-Forwarded-For"); xff != "" {
-		ips := strings.Split(xff, ",")
-		if len(ips) > 0 {
-			ip := strings.TrimSpace(ips[0])
-			if ip != "" {
-				return ip
-			}
-		}
-	}
-	if xRealIP := c.GetHeader("X-Real-IP"); xRealIP != "" {
-		return strings.TrimSpace(xRealIP)
-	}
-	return c.ClientIP()
-}
-
 // ProcessPayment handles POST /api/v1/payments/payfast/payment (Option C Token Flow).
 func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 	var req payfastSvc.PaymentRequest
@@ -66,8 +49,8 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 		return
 	}
 
-	clientIP := getClientIP(c)
-	resp, err := h.service.ProcessPayment(c.Request.Context(), merchantUserID, clientIP, req)
+	clientIP := c.ClientIP()
+	resp, err := h.service.ProcessPayment(c.Request.Context(), merchantUserID, clientIP, &req)
 	if err != nil {
 		errMsg := err.Error()
 		if strings.Contains(errMsg, "not found") {
@@ -101,7 +84,7 @@ func (h *PayFastSplitHandler) ThreeDSCallback(c *gin.Context) {
 		return
 	}
 
-	clientIP := getClientIP(c)
+	clientIP := c.ClientIP()
 	orderID, err := h.service.Handle3DSCallback(c.Request.Context(), req.MD, req.PaRes, clientIP)
 	if err != nil {
 		errMsg := err.Error()

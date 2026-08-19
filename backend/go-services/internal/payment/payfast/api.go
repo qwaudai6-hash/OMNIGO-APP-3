@@ -12,188 +12,204 @@ import (
 
 // ValidateCustomerPayment calls POST /customer/validate
 func (c *Client) ValidateCustomerPayment(ctx context.Context, req CustomerValidationRequest) (*CustomerValidationResponse, error) {
-	token, err := c.GetAuthToken(ctx, req.CustomerIP)
+	var validationRes *CustomerValidationResponse
+	err := c.circuitBreaker.Execute(func() error {
+		token, err := c.GetAuthToken(ctx, req.CustomerIP)
+		if err != nil {
+			return fmt.Errorf("failed to get auth token: %w", err)
+		}
+
+		endpoint := c.baseURL + "/customer/validate"
+		formData := url.Values{}
+
+		// Common Parameters
+		formData.Set("basket_id", req.BasketID)
+		formData.Set("txnamt", req.TxnAmt)
+		formData.Set("order_date", req.OrderDate)
+		formData.Set("customer_mobile_no", req.CustomerMobileNo)
+		formData.Set("customer_email_address", req.CustomerEmailAddress)
+		formData.Set("account_type_id", req.AccountTypeID)
+		formData.Set("merCatCode", req.MerCatCode)
+		formData.Set("customer_ip", req.CustomerIP)
+
+		// Calculate and set secured_hash
+		securedHash := CalculateValidationHash(req, c.securedKey)
+		formData.Set("secured_hash", securedHash)
+
+		// Instrument-specific parameters
+		if req.CardNumber != "" {
+			formData.Set("card_number", req.CardNumber)
+			formData.Set("expiry_month", req.ExpiryMonth)
+			formData.Set("expiry_year", req.ExpiryYear)
+			formData.Set("cvv", req.CVV)
+			if req.Data3DSPagemode != "" {
+				formData.Set("data_3ds_pagemode", req.Data3DSPagemode)
+			}
+			if req.Data3DSCallbackURL != "" {
+				formData.Set("data_3ds_callback_url", req.Data3DSCallbackURL)
+			}
+		} else if req.AccountNumber != "" {
+			formData.Set("bank_code", req.BankCode)
+			formData.Set("account_number", req.AccountNumber)
+			formData.Set("cnic_number", req.CNICNumber)
+			if req.AccountTitle != "" {
+				formData.Set("account_title", req.AccountTitle)
+			}
+		}
+
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()))
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := c.httpClient.Do(httpReq)
+		if err != nil {
+			return fmt.Errorf("failed to send request: %w", err)
+		}
+		defer resp.Body.Close()
+
+		bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+		if err != nil {
+			return fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			var errRes struct {
+				StatusMsg string `json:"status_msg"`
+				Message   string `json:"message"`
+			}
+			_ = json.Unmarshal(bodyBytes, &errRes)
+			msg := errRes.StatusMsg
+			if msg == "" {
+				msg = errRes.Message
+			}
+			return &GatewayError{
+				StatusCode: resp.StatusCode,
+				Message:    "Customer validation failed",
+				StatusMsg:  msg,
+				Internal:   fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)),
+			}
+		}
+
+		var res CustomerValidationResponse
+		if err := json.Unmarshal(bodyBytes, &res); err != nil {
+			return fmt.Errorf("failed to parse validation response: %w", err)
+		}
+		validationRes = &res
+		return nil
+	})
+
 	if err != nil {
-		return nil, fmt.Errorf("failed to get auth token: %w", err)
+		return nil, err
 	}
-
-	endpoint := c.baseURL + "/customer/validate"
-	formData := url.Values{}
-
-	// Common Parameters
-	formData.Set("basket_id", req.BasketID)
-	formData.Set("txnamt", req.TxnAmt)
-	formData.Set("order_date", req.OrderDate)
-	formData.Set("customer_mobile_no", req.CustomerMobileNo)
-	formData.Set("customer_email_address", req.CustomerEmailAddress)
-	formData.Set("account_type_id", req.AccountTypeID)
-	formData.Set("merCatCode", req.MerCatCode)
-	formData.Set("customer_ip", req.CustomerIP)
-
-	// Calculate and set secured_hash
-	securedHash := CalculateValidationHash(req, c.securedKey)
-	formData.Set("secured_hash", securedHash)
-
-	// Instrument-specific parameters
-	if req.CardNumber != "" {
-		formData.Set("card_number", req.CardNumber)
-		formData.Set("expiry_month", req.ExpiryMonth)
-		formData.Set("expiry_year", req.ExpiryYear)
-		formData.Set("cvv", req.CVV)
-		if req.Data3DSPagemode != "" {
-			formData.Set("data_3ds_pagemode", req.Data3DSPagemode)
-		}
-		if req.Data3DSCallbackURL != "" {
-			formData.Set("data_3ds_callback_url", req.Data3DSCallbackURL)
-		}
-	} else if req.AccountNumber != "" {
-		formData.Set("bank_code", req.BankCode)
-		formData.Set("account_number", req.AccountNumber)
-		formData.Set("cnic_number", req.CNICNumber)
-		if req.AccountTitle != "" {
-			formData.Set("account_title", req.AccountTitle)
-		}
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	httpReq.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		var errRes struct {
-			StatusMsg string `json:"status_msg"`
-			Message   string `json:"message"`
-		}
-		_ = json.Unmarshal(bodyBytes, &errRes)
-		msg := errRes.StatusMsg
-		if msg == "" {
-			msg = errRes.Message
-		}
-		return nil, &GatewayError{
-			StatusCode: resp.StatusCode,
-			Message:    "Customer validation failed",
-			StatusMsg:  msg,
-			Internal:   fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)),
-		}
-	}
-
-	var validationRes CustomerValidationResponse
-	if err := json.Unmarshal(bodyBytes, &validationRes); err != nil {
-		return nil, fmt.Errorf("failed to parse validation response: %w", err)
-	}
-
-	return &validationRes, nil
+	return validationRes, nil
 }
 
 // InitiateTransaction calls POST /transaction
 func (c *Client) InitiateTransaction(ctx context.Context, req InitiateTransactionRequest, otp string) (*InitiateTransactionResponse, error) {
-	token, err := c.GetAuthToken(ctx, req.CustomerIP)
+	var txnRes *InitiateTransactionResponse
+	err := c.circuitBreaker.Execute(func() error {
+		token, err := c.GetAuthToken(ctx, req.CustomerIP)
+		if err != nil {
+			return fmt.Errorf("failed to get auth token: %w", err)
+		}
+
+		endpoint := c.baseURL + "/transaction"
+		formData := url.Values{}
+
+		formData.Set("basket_id", req.BasketID)
+		formData.Set("txnamt", req.TxnAmt)
+		formData.Set("order_date", req.OrderDate)
+		formData.Set("customer_mobile_no", req.CustomerMobileNo)
+		formData.Set("customer_email_address", req.CustomerEmailAddress)
+		formData.Set("account_type_id", req.AccountTypeID)
+		formData.Set("merCatCode", req.MerCatCode)
+		formData.Set("customer_ip", req.CustomerIP)
+
+		if req.TransactionID != "" {
+			formData.Set("transaction_id", req.TransactionID)
+		}
+		if req.ECI != "" {
+			formData.Set("eci", req.ECI)
+		}
+
+		if otp != "" {
+			formData.Set("otp", otp)
+		}
+
+		securedHash := CalculateTransactionHash(req, otp, c.securedKey)
+		formData.Set("secured_hash", securedHash)
+
+		if req.CardNumber != "" {
+			formData.Set("card_number", req.CardNumber)
+			formData.Set("expiry_month", req.ExpiryMonth)
+			formData.Set("expiry_year", req.ExpiryYear)
+			formData.Set("cvv", req.CVV)
+			if req.Data3DSSecureID != "" {
+				formData.Set("data_3ds_secureid", req.Data3DSSecureID)
+			}
+			if req.Data3DSPaRes != "" {
+				formData.Set("data_3ds_pares", req.Data3DSPaRes)
+			}
+		} else if req.AccountNumber != "" {
+			formData.Set("bank_code", req.BankCode)
+			formData.Set("account_number", req.AccountNumber)
+			formData.Set("cnic_number", req.CNICNumber)
+			if req.AccountTitle != "" {
+				formData.Set("account_title", req.AccountTitle)
+			}
+		}
+
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()))
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := c.httpClient.Do(httpReq)
+		if err != nil {
+			return fmt.Errorf("failed to send request: %w", err)
+		}
+		defer resp.Body.Close()
+
+		bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+		if err != nil {
+			return fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			var errRes struct {
+				StatusMsg string `json:"status_msg"`
+				Message   string `json:"message"`
+			}
+			_ = json.Unmarshal(bodyBytes, &errRes)
+			msg := errRes.StatusMsg
+			if msg == "" {
+				msg = errRes.Message
+			}
+			return &GatewayError{
+				StatusCode: resp.StatusCode,
+				Message:    "Transaction initiation failed",
+				StatusMsg:  msg,
+				Internal:   fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)),
+			}
+		}
+
+		var res InitiateTransactionResponse
+		if err := json.Unmarshal(bodyBytes, &res); err != nil {
+			return fmt.Errorf("failed to parse transaction response: %w", err)
+		}
+		txnRes = &res
+		return nil
+	})
+
 	if err != nil {
-		return nil, fmt.Errorf("failed to get auth token: %w", err)
+		return nil, err
 	}
-
-	endpoint := c.baseURL + "/transaction"
-	formData := url.Values{}
-
-	formData.Set("basket_id", req.BasketID)
-	formData.Set("txnamt", req.TxnAmt)
-	formData.Set("order_date", req.OrderDate)
-	formData.Set("customer_mobile_no", req.CustomerMobileNo)
-	formData.Set("customer_email_address", req.CustomerEmailAddress)
-	formData.Set("account_type_id", req.AccountTypeID)
-	formData.Set("merCatCode", req.MerCatCode)
-	formData.Set("customer_ip", req.CustomerIP)
-
-	if req.TransactionID != "" {
-		formData.Set("transaction_id", req.TransactionID)
-	}
-	if req.ECI != "" {
-		formData.Set("eci", req.ECI)
-	}
-
-	if otp != "" {
-		formData.Set("otp", otp)
-	}
-
-	securedHash := CalculateTransactionHash(req, otp, c.securedKey)
-	formData.Set("secured_hash", securedHash)
-
-	if req.CardNumber != "" {
-		formData.Set("card_number", req.CardNumber)
-		formData.Set("expiry_month", req.ExpiryMonth)
-		formData.Set("expiry_year", req.ExpiryYear)
-		formData.Set("cvv", req.CVV)
-		if req.Data3DSSecureID != "" {
-			formData.Set("data_3ds_secureid", req.Data3DSSecureID)
-		}
-		if req.Data3DSPaRes != "" {
-			formData.Set("data_3ds_pares", req.Data3DSPaRes)
-		}
-	} else if req.AccountNumber != "" {
-		formData.Set("bank_code", req.BankCode)
-		formData.Set("account_number", req.AccountNumber)
-		formData.Set("cnic_number", req.CNICNumber)
-		if req.AccountTitle != "" {
-			formData.Set("account_title", req.AccountTitle)
-		}
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	httpReq.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		var errRes struct {
-			StatusMsg string `json:"status_msg"`
-			Message   string `json:"message"`
-		}
-		_ = json.Unmarshal(bodyBytes, &errRes)
-		msg := errRes.StatusMsg
-		if msg == "" {
-			msg = errRes.Message
-		}
-		return nil, &GatewayError{
-			StatusCode: resp.StatusCode,
-			Message:    "Transaction initiation failed",
-			StatusMsg:  msg,
-			Internal:   fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)),
-		}
-	}
-
-	var txnRes InitiateTransactionResponse
-	if err := json.Unmarshal(bodyBytes, &txnRes); err != nil {
-		return nil, fmt.Errorf("failed to parse transaction response: %w", err)
-	}
-
-	return &txnRes, nil
+	return txnRes, nil
 }
 
 // GetTransactionStatus calls GET /transaction/<transaction_id>

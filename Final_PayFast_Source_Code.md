@@ -893,188 +893,204 @@ import (
 
 // ValidateCustomerPayment calls POST /customer/validate
 func (c *Client) ValidateCustomerPayment(ctx context.Context, req CustomerValidationRequest) (*CustomerValidationResponse, error) {
-	token, err := c.GetAuthToken(ctx, req.CustomerIP)
+	var validationRes *CustomerValidationResponse
+	err := c.circuitBreaker.Execute(func() error {
+		token, err := c.GetAuthToken(ctx, req.CustomerIP)
+		if err != nil {
+			return fmt.Errorf("failed to get auth token: %w", err)
+		}
+
+		endpoint := c.baseURL + "/customer/validate"
+		formData := url.Values{}
+
+		// Common Parameters
+		formData.Set("basket_id", req.BasketID)
+		formData.Set("txnamt", req.TxnAmt)
+		formData.Set("order_date", req.OrderDate)
+		formData.Set("customer_mobile_no", req.CustomerMobileNo)
+		formData.Set("customer_email_address", req.CustomerEmailAddress)
+		formData.Set("account_type_id", req.AccountTypeID)
+		formData.Set("merCatCode", req.MerCatCode)
+		formData.Set("customer_ip", req.CustomerIP)
+
+		// Calculate and set secured_hash
+		securedHash := CalculateValidationHash(req, c.securedKey)
+		formData.Set("secured_hash", securedHash)
+
+		// Instrument-specific parameters
+		if req.CardNumber != "" {
+			formData.Set("card_number", req.CardNumber)
+			formData.Set("expiry_month", req.ExpiryMonth)
+			formData.Set("expiry_year", req.ExpiryYear)
+			formData.Set("cvv", req.CVV)
+			if req.Data3DSPagemode != "" {
+				formData.Set("data_3ds_pagemode", req.Data3DSPagemode)
+			}
+			if req.Data3DSCallbackURL != "" {
+				formData.Set("data_3ds_callback_url", req.Data3DSCallbackURL)
+			}
+		} else if req.AccountNumber != "" {
+			formData.Set("bank_code", req.BankCode)
+			formData.Set("account_number", req.AccountNumber)
+			formData.Set("cnic_number", req.CNICNumber)
+			if req.AccountTitle != "" {
+				formData.Set("account_title", req.AccountTitle)
+			}
+		}
+
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()))
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := c.httpClient.Do(httpReq)
+		if err != nil {
+			return fmt.Errorf("failed to send request: %w", err)
+		}
+		defer resp.Body.Close()
+
+		bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+		if err != nil {
+			return fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			var errRes struct {
+				StatusMsg string `json:"status_msg"`
+				Message   string `json:"message"`
+			}
+			_ = json.Unmarshal(bodyBytes, &errRes)
+			msg := errRes.StatusMsg
+			if msg == "" {
+				msg = errRes.Message
+			}
+			return &GatewayError{
+				StatusCode: resp.StatusCode,
+				Message:    "Customer validation failed",
+				StatusMsg:  msg,
+				Internal:   fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)),
+			}
+		}
+
+		var res CustomerValidationResponse
+		if err := json.Unmarshal(bodyBytes, &res); err != nil {
+			return fmt.Errorf("failed to parse validation response: %w", err)
+		}
+		validationRes = &res
+		return nil
+	})
+
 	if err != nil {
-		return nil, fmt.Errorf("failed to get auth token: %w", err)
+		return nil, err
 	}
-
-	endpoint := c.baseURL + "/customer/validate"
-	formData := url.Values{}
-
-	// Common Parameters
-	formData.Set("basket_id", req.BasketID)
-	formData.Set("txnamt", req.TxnAmt)
-	formData.Set("order_date", req.OrderDate)
-	formData.Set("customer_mobile_no", req.CustomerMobileNo)
-	formData.Set("customer_email_address", req.CustomerEmailAddress)
-	formData.Set("account_type_id", req.AccountTypeID)
-	formData.Set("merCatCode", req.MerCatCode)
-	formData.Set("customer_ip", req.CustomerIP)
-
-	// Calculate and set secured_hash
-	securedHash := CalculateValidationHash(req, c.securedKey)
-	formData.Set("secured_hash", securedHash)
-
-	// Instrument-specific parameters
-	if req.CardNumber != "" {
-		formData.Set("card_number", req.CardNumber)
-		formData.Set("expiry_month", req.ExpiryMonth)
-		formData.Set("expiry_year", req.ExpiryYear)
-		formData.Set("cvv", req.CVV)
-		if req.Data3DSPagemode != "" {
-			formData.Set("data_3ds_pagemode", req.Data3DSPagemode)
-		}
-		if req.Data3DSCallbackURL != "" {
-			formData.Set("data_3ds_callback_url", req.Data3DSCallbackURL)
-		}
-	} else if req.AccountNumber != "" {
-		formData.Set("bank_code", req.BankCode)
-		formData.Set("account_number", req.AccountNumber)
-		formData.Set("cnic_number", req.CNICNumber)
-		if req.AccountTitle != "" {
-			formData.Set("account_title", req.AccountTitle)
-		}
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	httpReq.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		var errRes struct {
-			StatusMsg string `json:"status_msg"`
-			Message   string `json:"message"`
-		}
-		_ = json.Unmarshal(bodyBytes, &errRes)
-		msg := errRes.StatusMsg
-		if msg == "" {
-			msg = errRes.Message
-		}
-		return nil, &GatewayError{
-			StatusCode: resp.StatusCode,
-			Message:    "Customer validation failed",
-			StatusMsg:  msg,
-			Internal:   fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)),
-		}
-	}
-
-	var validationRes CustomerValidationResponse
-	if err := json.Unmarshal(bodyBytes, &validationRes); err != nil {
-		return nil, fmt.Errorf("failed to parse validation response: %w", err)
-	}
-
-	return &validationRes, nil
+	return validationRes, nil
 }
 
 // InitiateTransaction calls POST /transaction
 func (c *Client) InitiateTransaction(ctx context.Context, req InitiateTransactionRequest, otp string) (*InitiateTransactionResponse, error) {
-	token, err := c.GetAuthToken(ctx, req.CustomerIP)
+	var txnRes *InitiateTransactionResponse
+	err := c.circuitBreaker.Execute(func() error {
+		token, err := c.GetAuthToken(ctx, req.CustomerIP)
+		if err != nil {
+			return fmt.Errorf("failed to get auth token: %w", err)
+		}
+
+		endpoint := c.baseURL + "/transaction"
+		formData := url.Values{}
+
+		formData.Set("basket_id", req.BasketID)
+		formData.Set("txnamt", req.TxnAmt)
+		formData.Set("order_date", req.OrderDate)
+		formData.Set("customer_mobile_no", req.CustomerMobileNo)
+		formData.Set("customer_email_address", req.CustomerEmailAddress)
+		formData.Set("account_type_id", req.AccountTypeID)
+		formData.Set("merCatCode", req.MerCatCode)
+		formData.Set("customer_ip", req.CustomerIP)
+
+		if req.TransactionID != "" {
+			formData.Set("transaction_id", req.TransactionID)
+		}
+		if req.ECI != "" {
+			formData.Set("eci", req.ECI)
+		}
+
+		if otp != "" {
+			formData.Set("otp", otp)
+		}
+
+		securedHash := CalculateTransactionHash(req, otp, c.securedKey)
+		formData.Set("secured_hash", securedHash)
+
+		if req.CardNumber != "" {
+			formData.Set("card_number", req.CardNumber)
+			formData.Set("expiry_month", req.ExpiryMonth)
+			formData.Set("expiry_year", req.ExpiryYear)
+			formData.Set("cvv", req.CVV)
+			if req.Data3DSSecureID != "" {
+				formData.Set("data_3ds_secureid", req.Data3DSSecureID)
+			}
+			if req.Data3DSPaRes != "" {
+				formData.Set("data_3ds_pares", req.Data3DSPaRes)
+			}
+		} else if req.AccountNumber != "" {
+			formData.Set("bank_code", req.BankCode)
+			formData.Set("account_number", req.AccountNumber)
+			formData.Set("cnic_number", req.CNICNumber)
+			if req.AccountTitle != "" {
+				formData.Set("account_title", req.AccountTitle)
+			}
+		}
+
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()))
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := c.httpClient.Do(httpReq)
+		if err != nil {
+			return fmt.Errorf("failed to send request: %w", err)
+		}
+		defer resp.Body.Close()
+
+		bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+		if err != nil {
+			return fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			var errRes struct {
+				StatusMsg string `json:"status_msg"`
+				Message   string `json:"message"`
+			}
+			_ = json.Unmarshal(bodyBytes, &errRes)
+			msg := errRes.StatusMsg
+			if msg == "" {
+				msg = errRes.Message
+			}
+			return &GatewayError{
+				StatusCode: resp.StatusCode,
+				Message:    "Transaction initiation failed",
+				StatusMsg:  msg,
+				Internal:   fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)),
+			}
+		}
+
+		var res InitiateTransactionResponse
+		if err := json.Unmarshal(bodyBytes, &res); err != nil {
+			return fmt.Errorf("failed to parse transaction response: %w", err)
+		}
+		txnRes = &res
+		return nil
+	})
+
 	if err != nil {
-		return nil, fmt.Errorf("failed to get auth token: %w", err)
+		return nil, err
 	}
-
-	endpoint := c.baseURL + "/transaction"
-	formData := url.Values{}
-
-	formData.Set("basket_id", req.BasketID)
-	formData.Set("txnamt", req.TxnAmt)
-	formData.Set("order_date", req.OrderDate)
-	formData.Set("customer_mobile_no", req.CustomerMobileNo)
-	formData.Set("customer_email_address", req.CustomerEmailAddress)
-	formData.Set("account_type_id", req.AccountTypeID)
-	formData.Set("merCatCode", req.MerCatCode)
-	formData.Set("customer_ip", req.CustomerIP)
-
-	if req.TransactionID != "" {
-		formData.Set("transaction_id", req.TransactionID)
-	}
-	if req.ECI != "" {
-		formData.Set("eci", req.ECI)
-	}
-
-	if otp != "" {
-		formData.Set("otp", otp)
-	}
-
-	securedHash := CalculateTransactionHash(req, otp, c.securedKey)
-	formData.Set("secured_hash", securedHash)
-
-	if req.CardNumber != "" {
-		formData.Set("card_number", req.CardNumber)
-		formData.Set("expiry_month", req.ExpiryMonth)
-		formData.Set("expiry_year", req.ExpiryYear)
-		formData.Set("cvv", req.CVV)
-		if req.Data3DSSecureID != "" {
-			formData.Set("data_3ds_secureid", req.Data3DSSecureID)
-		}
-		if req.Data3DSPaRes != "" {
-			formData.Set("data_3ds_pares", req.Data3DSPaRes)
-		}
-	} else if req.AccountNumber != "" {
-		formData.Set("bank_code", req.BankCode)
-		formData.Set("account_number", req.AccountNumber)
-		formData.Set("cnic_number", req.CNICNumber)
-		if req.AccountTitle != "" {
-			formData.Set("account_title", req.AccountTitle)
-		}
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	httpReq.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		var errRes struct {
-			StatusMsg string `json:"status_msg"`
-			Message   string `json:"message"`
-		}
-		_ = json.Unmarshal(bodyBytes, &errRes)
-		msg := errRes.StatusMsg
-		if msg == "" {
-			msg = errRes.Message
-		}
-		return nil, &GatewayError{
-			StatusCode: resp.StatusCode,
-			Message:    "Transaction initiation failed",
-			StatusMsg:  msg,
-			Internal:   fmt.Errorf("status %d: %s", resp.StatusCode, string(bodyBytes)),
-		}
-	}
-
-	var txnRes InitiateTransactionResponse
-	if err := json.Unmarshal(bodyBytes, &txnRes); err != nil {
-		return nil, fmt.Errorf("failed to parse transaction response: %w", err)
-	}
-
-	return &txnRes, nil
+	return txnRes, nil
 }
 
 // GetTransactionStatus calls GET /transaction/<transaction_id>
@@ -1722,7 +1738,7 @@ func (s *PayFastService) Build3DSCallbackURL(internalTxnID string) (string, erro
 }
 
 // ProcessPayment handles the primary checkout initiation.
-func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, clientIP string, req PaymentRequest) (*PaymentResponse, error) {
+func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, clientIP string, req *PaymentRequest) (*PaymentResponse, error) {
 	// 1. Validate Input Payload
 	if err := req.Validate(); err != nil {
 		return nil, fmt.Errorf("validation error: %w", err)
@@ -1834,7 +1850,7 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		return nil, fmt.Errorf("failed to commit initial payment attempt: %w", err)
 	}
 
-	// Zero card persistence cleanup
+	// Zero card persistence cleanup on the original caller struct
 	defer func() {
 		req.CardNumber = ""
 		req.CVV = ""
@@ -1933,7 +1949,10 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		Otp:              req.OTP,
 	}
 
-	txnRes, err := s.payfast.InitiateTokenizedTransaction(ctx, txnReq)
+	// Use detached context so client disconnect does not orphan gateway charge
+	gwCtx, gwCancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer gwCancel()
+	txnRes, err := s.payfast.InitiateTokenizedTransaction(gwCtx, txnReq)
 	if err != nil {
 		if payfast.IsTransient(err) {
 			_ = s.MarkPaymentGatewayPending(ctx, internalTxnID, tokenRes.TransactionID, "Direct tokenized txn timeout: "+err.Error())
@@ -2039,7 +2058,10 @@ func (s *PayFastService) Handle3DSCallback(ctx context.Context, mdParam, paRes, 
 		Data3DSPaRes:     paRes,
 	}
 
-	txnRes, err := s.payfast.InitiateTokenizedTransaction(ctx, txnReq)
+	// Use detached context so client connection drop does not abort gateway charge
+	gwCtx, gwCancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer gwCancel()
+	txnRes, err := s.payfast.InitiateTokenizedTransaction(gwCtx, txnReq)
 	if err != nil {
 		if payfast.IsTransient(err) {
 			_ = s.MarkPaymentGatewayPending(ctx, internalTxnID, meta.GatewayTxnID, "Tokenized 3DS txn timeout: "+err.Error())
@@ -2095,13 +2117,15 @@ func (s *PayFastService) VerifyAndSettle(ctx context.Context, internalTxnID, ord
 
 	if statusRes.TxnAmt != "" {
 		gatewayAmt, parseErr := strconv.ParseFloat(statusRes.TxnAmt, 64)
-		if parseErr == nil {
-			expectedPaisa := int64(math.Round(expectedAmount * 100))
-			gatewayPaisa := int64(math.Round(gatewayAmt * 100))
-			if expectedPaisa != gatewayPaisa {
-				_ = s.MarkPaymentFailed(ctx, internalTxnID, fmt.Sprintf("Amount mismatch: expected %d paisa, got %d paisa", expectedPaisa, gatewayPaisa))
-				return errors.New("transaction amount mismatch")
-			}
+		if parseErr != nil {
+			_ = s.MarkPaymentFailed(ctx, internalTxnID, "Invalid amount format in gateway status response")
+			return fmt.Errorf("invalid gateway amount format: %w", parseErr)
+		}
+		expectedPaisa := int64(math.Round(expectedAmount * 100))
+		gatewayPaisa := int64(math.Round(gatewayAmt * 100))
+		if expectedPaisa != gatewayPaisa {
+			_ = s.MarkPaymentFailed(ctx, internalTxnID, fmt.Sprintf("Amount mismatch: expected %d paisa, got %d paisa", expectedPaisa, gatewayPaisa))
+			return errors.New("transaction amount mismatch")
 		}
 	}
 
@@ -2308,23 +2332,6 @@ func (h *PayFastSplitHandler) RegisterRoutes(r gin.IRoutes) {
 	r.GET("/api/v1/payments/payfast/3ds_callback", h.ThreeDSCallback)
 }
 
-// getClientIP extracts real customer IP safely taking reverse proxies into account.
-func getClientIP(c *gin.Context) string {
-	if xff := c.GetHeader("X-Forwarded-For"); xff != "" {
-		ips := strings.Split(xff, ",")
-		if len(ips) > 0 {
-			ip := strings.TrimSpace(ips[0])
-			if ip != "" {
-				return ip
-			}
-		}
-	}
-	if xRealIP := c.GetHeader("X-Real-IP"); xRealIP != "" {
-		return strings.TrimSpace(xRealIP)
-	}
-	return c.ClientIP()
-}
-
 // ProcessPayment handles POST /api/v1/payments/payfast/payment (Option C Token Flow).
 func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 	var req payfastSvc.PaymentRequest
@@ -2339,8 +2346,8 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 		return
 	}
 
-	clientIP := getClientIP(c)
-	resp, err := h.service.ProcessPayment(c.Request.Context(), merchantUserID, clientIP, req)
+	clientIP := c.ClientIP()
+	resp, err := h.service.ProcessPayment(c.Request.Context(), merchantUserID, clientIP, &req)
 	if err != nil {
 		errMsg := err.Error()
 		if strings.Contains(errMsg, "not found") {
@@ -2374,7 +2381,7 @@ func (h *PayFastSplitHandler) ThreeDSCallback(c *gin.Context) {
 		return
 	}
 
-	clientIP := getClientIP(c)
+	clientIP := c.ClientIP()
 	orderID, err := h.service.Handle3DSCallback(c.Request.Context(), req.MD, req.PaRes, clientIP)
 	if err != nil {
 		errMsg := err.Error()
@@ -2609,7 +2616,16 @@ func (w *SettlementWorker) processSingleSettlement(ctx context.Context, eventID 
 		currency = "PKR"
 	}
 
-	// 1. Execute Ledger MultiTransfer (Atomic all-or-nothing double-entry split)
+	// 1. Create Escrow Hold for vendor — Mandatory fail-closed verification.
+	if payload.VendorEscrow > 0 && payload.StoreID != "" {
+		if err := w.escrow.CreateHold(ctx, payload.OrderID, payload.StoreID, payload.VendorEscrow); err != nil {
+			log.Printf("[SettlementWorker] CRITICAL: Escrow hold creation failed for order %s (Store: %s, Amount: %.2f): %v",
+				payload.OrderID, payload.StoreID, payload.VendorEscrow, err)
+			return fmt.Errorf("mandatory escrow hold creation failed: %w", err)
+		}
+	}
+
+	// 2. Execute Ledger MultiTransfer (Atomic all-or-nothing double-entry split)
 	var transferReqs []ledger.TransferRequest
 	for _, tr := range payload.Transfers {
 		if tr.Amount <= 0 {
@@ -2630,15 +2646,6 @@ func (w *SettlementWorker) processSingleSettlement(ctx context.Context, eventID 
 		_, err := w.ledger.MultiTransfer(ctx, transferReqs)
 		if err != nil {
 			return fmt.Errorf("ledger multi-transfer failed for order %s: %w", payload.OrderID, err)
-		}
-	}
-
-	// 2. Create Escrow Hold for vendor — Mandatory fail-closed verification.
-	if payload.VendorEscrow > 0 && payload.StoreID != "" {
-		if err := w.escrow.CreateHold(ctx, payload.OrderID, payload.StoreID, payload.VendorEscrow); err != nil {
-			log.Printf("[SettlementWorker] CRITICAL: Escrow hold creation failed for order %s (Store: %s, Amount: %.2f): %v",
-				payload.OrderID, payload.StoreID, payload.VendorEscrow, err)
-			return fmt.Errorf("mandatory escrow hold creation failed: %w", err)
 		}
 	}
 
@@ -2725,7 +2732,12 @@ func (w *SettlementWorker) reconcileStuckPayments(ctx context.Context) {
 		}
 	}
 	rows.Close()
-	_ = tx.Commit(ctx) // release transaction lock so individual reconciliation updates can commit
+
+	// Touch updated_at inside claiming transaction so concurrent pods won't pick up the same rows
+	for _, p := range list {
+		_, _ = tx.Exec(ctx, `UPDATE payment_transactions SET updated_at = NOW() WHERE transaction_id = $1`, p.InternalTxnID)
+	}
+	_ = tx.Commit(ctx)
 
 	for _, p := range list {
 		var statusRes *payfast.TransactionStatusResponse
