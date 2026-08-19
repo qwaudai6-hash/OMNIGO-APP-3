@@ -218,7 +218,7 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 	// which prevents race conditions that this SELECT cannot catch.
 	var activeAttempts int
 	err = tx.QueryRow(c.Request.Context(),
-		`SELECT count(*) FROM payment_transactions WHERE order_tracking_id = $1 AND status IN ('pending', 'processing', '3ds_required', 'settlement_pending')`,
+		`SELECT count(*) FROM payment_transactions WHERE order_tracking_id = $1 AND status IN ('pending', 'processing', '3ds_required', 'settlement_pending', 'gateway_pending')`,
 		req.OrderID,
 	).Scan(&activeAttempts)
 	if err != nil {

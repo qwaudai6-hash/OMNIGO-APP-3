@@ -1400,7 +1400,7 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 	// which prevents race conditions that this SELECT cannot catch.
 	var activeAttempts int
 	err = tx.QueryRow(c.Request.Context(),
-		`SELECT count(*) FROM payment_transactions WHERE order_tracking_id = $1 AND status IN ('pending', 'processing', '3ds_required', 'settlement_pending')`,
+		`SELECT count(*) FROM payment_transactions WHERE order_tracking_id = $1 AND status IN ('pending', 'processing', '3ds_required', 'settlement_pending', 'gateway_pending')`,
 		req.OrderID,
 	).Scan(&activeAttempts)
 	if err != nil {
@@ -1948,6 +1948,7 @@ import (
 	"github.com/omnigo/backend/internal/escrow"
 	"github.com/omnigo/backend/internal/ledger"
 	"github.com/omnigo/backend/internal/payment/payfast"
+	"github.com/omnigo/backend/internal/payment_orchestrator"
 )
 
 type SettlementPayload struct {
@@ -1974,26 +1975,29 @@ type SettlementTransferItem struct {
 
 // SettlementWorker polls and processes 'payment_settlement' outbox events and reconciles gateway_pending payments.
 type SettlementWorker struct {
-	db      *pgxpool.Pool
-	ledger  *ledger.Service
-	escrow  *escrow.Service
-	payfast *payfast.Client
-	redis   redis.UniversalClient
+	db         *pgxpool.Pool
+	ledger     *ledger.Service
+	escrow     *escrow.Service
+	calculator *payment_orchestrator.CommissionCalculator
+	payfast    *payfast.Client
+	redis      redis.UniversalClient
 }
 
 func NewSettlementWorker(
 	db *pgxpool.Pool,
 	ledgerSvc *ledger.Service,
 	escrowSvc *escrow.Service,
+	calc *payment_orchestrator.CommissionCalculator,
 	payfastClient *payfast.Client,
 	rdb redis.UniversalClient,
 ) *SettlementWorker {
 	return &SettlementWorker{
-		db:      db,
-		ledger:  ledgerSvc,
-		escrow:  escrowSvc,
-		payfast: payfastClient,
-		redis:   rdb,
+		db:         db,
+		ledger:     ledgerSvc,
+		escrow:     escrowSvc,
+		calculator: calc,
+		payfast:    payfastClient,
+		redis:      rdb,
 	}
 }
 
@@ -2202,34 +2206,39 @@ func (w *SettlementWorker) enqueueSettlementOutbox(ctx context.Context, internal
 	_ = w.db.QueryRow(ctx, `SELECT store_tracking_id FROM orders WHERE order_tracking_id = $1`, orderID).Scan(&storeID)
 	_ = w.db.QueryRow(ctx, `SELECT COALESCE(tracking_id, '') FROM deliveries WHERE order_tracking_id = $1`, orderID).Scan(&deliveryTrackingID)
 
+	split, err := w.calculator.CalculateSplit(ctx, amount, storeID, deliveryTrackingID)
+	if err != nil {
+		log.Printf("[SettlementWorker] Error calculating split for order %s: %v", orderID, err)
+		return
+	}
+
 	idempotencyKey := fmt.Sprintf("payfast:split:%s", gatewayTxnID)
 	currency := os.Getenv("DEFAULT_CURRENCY")
 	if currency == "" {
 		currency = "PKR"
 	}
 
-	adminRate := 2.0
-	if v := os.Getenv("DEFAULT_COMMISSION_RATE"); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			adminRate = f
-		}
-	}
-	adminRevenue := amount * (adminRate / 100.0)
-	vendorEscrow := amount - adminRevenue
-
 	transfers := []SettlementTransferItem{
 		{
 			DebitAccount:  string(ledger.AccountPayFastHolding),
 			CreditAccount: string(ledger.AccountAdminRevenue),
-			Amount:        adminRevenue,
+			Amount:        split.AdminRevenue,
 			Idempotency:   idempotencyKey + ":admin",
 		},
 		{
 			DebitAccount:  string(ledger.AccountPayFastHolding),
 			CreditAccount: string(ledger.AccountVendorLockedEscrow),
-			Amount:        vendorEscrow,
+			Amount:        split.VendorEscrow,
 			Idempotency:   idempotencyKey + ":vendor",
 		},
+	}
+	if split.DeliveryEscrow > 0 {
+		transfers = append(transfers, SettlementTransferItem{
+			DebitAccount:  string(ledger.AccountPayFastHolding),
+			CreditAccount: string(ledger.AccountCentralEscrow),
+			Amount:        split.DeliveryEscrow,
+			Idempotency:   idempotencyKey + ":delivery",
+		})
 	}
 
 	outboxPayload, err := json.Marshal(SettlementPayload{
@@ -2240,8 +2249,9 @@ func (w *SettlementWorker) enqueueSettlementOutbox(ctx context.Context, internal
 		DeliveryTrackingID: deliveryTrackingID,
 		TotalAmount:        amount,
 		Currency:           currency,
-		AdminRevenue:       adminRevenue,
-		VendorEscrow:       vendorEscrow,
+		AdminRevenue:       split.AdminRevenue,
+		VendorEscrow:       split.VendorEscrow,
+		DeliveryEscrow:     split.DeliveryEscrow,
 		IdempotencyKey:     idempotencyKey,
 		Transfers:          transfers,
 	})
@@ -2249,6 +2259,10 @@ func (w *SettlementWorker) enqueueSettlementOutbox(ctx context.Context, internal
 		return
 	}
 
+	_, _ = w.db.Exec(ctx,
+		`UPDATE orders SET admin_commission = $1 WHERE order_tracking_id = $2`,
+		split.AdminRevenue, orderID,
+	)
 	_, _ = w.db.Exec(ctx,
 		`UPDATE payment_transactions SET status = 'settlement_pending', updated_at = NOW() WHERE transaction_id = $1`,
 		internalTxnID,
@@ -2696,7 +2710,7 @@ func TestFlexibleTypes(t *testing.T) {
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_payment_active_order
 ON payment_transactions(order_tracking_id)
-WHERE status IN ('pending', 'processing', '3ds_required', 'settlement_pending');
+WHERE status IN ('pending', 'processing', '3ds_required', 'settlement_pending', 'gateway_pending');
 
 ```
 

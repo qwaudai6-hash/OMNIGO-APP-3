@@ -6,4 +6,4 @@
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_payment_active_order
 ON payment_transactions(order_tracking_id)
-WHERE status IN ('pending', 'processing', '3ds_required', 'settlement_pending');
+WHERE status IN ('pending', 'processing', '3ds_required', 'settlement_pending', 'gateway_pending');
