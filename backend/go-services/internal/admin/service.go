@@ -317,11 +317,11 @@ func (s *AdminSurveillanceService) GetRecentPayments(ctx context.Context, limit 
 	query := `
 		SELECT 
 			o.order_tracking_id, 
-			COALESCE(u.full_name, 'Unknown Customer'), 
+			COALESCE(u.full_name, 'Customer'), 
 			o.total_amount, 
-			o.payment_gateway, 
-			o.status, 
-			o.created_at
+			COALESCE(o.payment_gateway, 'payfast'), 
+			COALESCE(o.payment_status, o.status), 
+			to_char(o.created_at, 'YYYY-MM-DD HH24:MI:SS')
 		FROM orders o
 		LEFT JOIN users u ON o.customer_tracking_id = u.tracking_id
 		ORDER BY o.created_at DESC

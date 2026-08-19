@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/omnigo/backend/internal/ledger"
+	"github.com/omnigo/backend/internal/shared/messaging"
 )
 
 // CustomerWalletResponse is the wallet overview returned to the customer.
@@ -116,6 +117,12 @@ func (s *CustomerWalletService) CreditFunds(ctx context.Context, customerTrackin
 			fmt.Printf("[CustomerWallet] Warning: ledger transfer failed for reference %s: %v\n", referenceID, err)
 		}
 	}
+
+	messaging.EmitFinancialNotification(
+		ctx, customerTrackingID, "customer", "wallet_credited",
+		"Wallet Credited", fmt.Sprintf("Aapke Omnigo Wallet mein Rs. %.2f credit ho gaye hain.", amount),
+		amount, referenceID,
+	)
 
 	return nil
 }
