@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS users (
     verification_status VARCHAR(30) DEFAULT 'pending',
     verification_reason TEXT,
     risk_score      REAL DEFAULT 0.0,
+    email_verified  BOOLEAN NOT NULL DEFAULT false,
+    two_factor_enabled BOOLEAN NOT NULL DEFAULT false,
     submitted_at    TIMESTAMPTZ,
     verified_at     TIMESTAMPTZ,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -81,6 +83,7 @@ CREATE TABLE IF NOT EXISTS stores (
     banner_url          TEXT,
     latitude            DOUBLE PRECISION,
     longitude           DOUBLE PRECISION,
+    commission_rate     NUMERIC(5,2) DEFAULT 2.00,
     is_active           BOOLEAN DEFAULT true,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -122,6 +125,7 @@ CREATE TABLE IF NOT EXISTS orders (
     status                VARCHAR(30) NOT NULL DEFAULT 'pending',
     delivery_type         VARCHAR(30),
     total_amount          NUMERIC(12,2) NOT NULL DEFAULT 0,
+    admin_commission      NUMERIC(12,2) DEFAULT 0.00,
     currency              VARCHAR(10) NOT NULL DEFAULT 'PKR',
     payment_gateway       VARCHAR(30) DEFAULT 'cod',
     payment_status        VARCHAR(30) DEFAULT 'pending',
@@ -473,3 +477,70 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 CREATE INDEX IF NOT EXISTS idx_chat_messages_order_id ON chat_messages(order_id);
 CREATE INDEX IF NOT EXISTS idx_chat_messages_sender_id ON chat_messages(sender_id);
 CREATE INDEX IF NOT EXISTS idx_chat_messages_receiver_id ON chat_messages(receiver_id);
+
+-- ── Payment Transactions ──────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS payment_transactions (
+    id                  BIGSERIAL PRIMARY KEY,
+    transaction_id      VARCHAR(100) UNIQUE NOT NULL,
+    order_tracking_id   VARCHAR(50) NOT NULL,
+    gateway             VARCHAR(30) NOT NULL,
+    gateway_txn_id      VARCHAR(255),
+    amount              NUMERIC(12,2) NOT NULL,
+    currency            VARCHAR(10) NOT NULL DEFAULT 'PKR',
+    status              VARCHAR(30) NOT NULL DEFAULT 'pending',
+    kind                VARCHAR(30) NOT NULL DEFAULT 'payment',
+    idempotency_key     VARCHAR(255) UNIQUE,
+    metadata            JSONB,
+    error_message       TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_payment_transactions_order ON payment_transactions(order_tracking_id);
+CREATE INDEX IF NOT EXISTS idx_payment_transactions_gateway_txn ON payment_transactions(gateway_txn_id);
+CREATE INDEX IF NOT EXISTS idx_payment_transactions_status ON payment_transactions(status);
+CREATE INDEX IF NOT EXISTS idx_payment_transactions_idempotency ON payment_transactions(idempotency_key);
+CREATE INDEX IF NOT EXISTS idx_payment_transactions_created_at ON payment_transactions(created_at DESC);
+
+ALTER TABLE payment_transactions
+    DROP CONSTRAINT IF EXISTS chk_payment_transactions_status;
+ALTER TABLE payment_transactions
+    ADD CONSTRAINT chk_payment_transactions_status
+    CHECK (status IN ('pending', 'processing', '3ds_required', 'authorized', 'captured', 'settlement_pending', 'gateway_pending', 'failed', 'refunded', 'reversed', 'chargeback'));
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_payment_active_order
+ON payment_transactions(order_tracking_id)
+WHERE status IN ('pending', 'processing', '3ds_required', 'settlement_pending', 'gateway_pending');
+
+-- ── Auth Flow Tables ──────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id                BIGSERIAL PRIMARY KEY,
+    user_tracking_id  VARCHAR(50) NOT NULL,
+    token_hash        VARCHAR(128) NOT NULL,
+    expires_at        TIMESTAMPTZ NOT NULL,
+    used_at           TIMESTAMPTZ,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (token_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_pwd_reset_user ON password_reset_tokens(user_tracking_id);
+CREATE INDEX IF NOT EXISTS idx_pwd_reset_expires ON password_reset_tokens(expires_at);
+
+CREATE TABLE IF NOT EXISTS email_verification_tokens (
+    id                BIGSERIAL PRIMARY KEY,
+    user_tracking_id  VARCHAR(50) NOT NULL,
+    email             VARCHAR(255) NOT NULL,
+    token_hash        VARCHAR(128) NOT NULL,
+    expires_at        TIMESTAMPTZ NOT NULL,
+    verified_at       TIMESTAMPTZ,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (token_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_email_verify_user ON email_verification_tokens(user_tracking_id);
+CREATE INDEX IF NOT EXISTS idx_email_verify_expires ON email_verification_tokens(expires_at);
+
+CREATE TABLE IF NOT EXISTS user_2fa_secrets (
+    user_tracking_id  VARCHAR(50) PRIMARY KEY,
+    secret_encrypted  TEXT NOT NULL,
+    enabled           BOOLEAN NOT NULL DEFAULT false,
+    enrolled_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_used_at      TIMESTAMPTZ
+);

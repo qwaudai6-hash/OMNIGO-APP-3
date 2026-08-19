@@ -31,7 +31,12 @@ ALTER TABLE payment_transactions
     DROP CONSTRAINT IF EXISTS chk_payment_transactions_status;
 ALTER TABLE payment_transactions
     ADD CONSTRAINT chk_payment_transactions_status
-    CHECK (status IN ('pending','authorized','captured','failed','refunded','reversed','chargeback'));
+    CHECK (status IN ('pending', 'processing', '3ds_required', 'authorized', 'captured', 'settlement_pending', 'gateway_pending', 'failed', 'refunded', 'reversed', 'chargeback'));
+
+-- Concurrency protection: only one active payment attempt per order at any time
+CREATE UNIQUE INDEX IF NOT EXISTS ux_payment_active_order
+ON payment_transactions(order_tracking_id)
+WHERE status IN ('pending', 'processing', '3ds_required', 'settlement_pending', 'gateway_pending');
 
 -- Helper for idempotency: if a caller re-uses an idempotency key, return existing record.
 -- This is enforced by the UNIQUE index on idempotency_key above.
