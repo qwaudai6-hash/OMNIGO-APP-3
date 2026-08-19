@@ -50,9 +50,9 @@ pgPool.on('error', (err) => {
 
 async function fetchOrderDetails(orderTrackingId) {
   const orderResult = await pgPool.query(
-    `SELECT tracking_id, customer_tracking_id, vendor_store_tracking_id,
+    `SELECT order_tracking_id AS tracking_id, user_tracking_id AS customer_tracking_id, store_tracking_id AS vendor_store_tracking_id,
             total_amount, currency, status, created_at
-     FROM orders WHERE tracking_id = $1`,
+     FROM orders WHERE order_tracking_id = $1`,
     [orderTrackingId]
   );
   if (orderResult.rows.length === 0) return null;

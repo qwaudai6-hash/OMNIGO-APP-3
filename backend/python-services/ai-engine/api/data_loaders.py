@@ -29,10 +29,10 @@ async def load_fraud_graph_data(pool: asyncpg.Pool, num_users: int = 5000) -> tu
                 u.tracking_id AS user_id,
                 u.risk_score,
                 u.verification_status,
-                dt.token AS device_id
+                dt.fcm_token AS device_id
             FROM users u
-            LEFT JOIN device_tokens dt ON dt.user_id = u.id
-            WHERE dt.token IS NOT NULL
+            LEFT JOIN device_tokens dt ON dt.user_tracking_id = u.tracking_id
+            WHERE dt.fcm_token IS NOT NULL
             ORDER BY u.id
             LIMIT $1
         """, num_users)

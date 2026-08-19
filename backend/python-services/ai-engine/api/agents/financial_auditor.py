@@ -9,19 +9,14 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("FinancialAuditor")
 
-# Constants — REQUIRED env vars, no insecure fallback
-HMAC_SECRET = os.getenv("LEDGER_HMAC_SECRET") or os.getenv("HMAC_SECRET")
-DB_DSN = os.getenv("DATABASE_URL")
-if not HMAC_SECRET:
-    raise RuntimeError("FATAL: LEDGER_HMAC_SECRET (or HMAC_SECRET) is required. Refusing to start with insecure fallback.")
-if not DB_DSN:
-    raise RuntimeError("FATAL: DATABASE_URL is required. Refusing to start with localhost fallback.")
+HMAC_SECRET = os.getenv("LEDGER_HMAC_SECRET") or os.getenv("HMAC_SECRET") or ""
+DB_DSN = os.getenv("DATABASE_URL") or os.getenv("DB_DSN") or ""
 AUDIT_INTERVAL_SECONDS = 300 # 5 minutes
 
 class FinancialAuditor:
     def __init__(self, dsn: str, secret: str):
         self.dsn = dsn
-        self.secret = secret.encode('utf-8')
+        self.secret = secret.encode('utf-8') if secret else b""
         self.is_running = False
 
     def generate_signature(self, transaction_id: str, account: str, amount: float, reference_id: str, idempotency_key: str) -> str:
@@ -107,6 +102,10 @@ class FinancialAuditor:
         logger.warning("Self-Healing Protocol execution completed.")
 
     def start(self):
+        if not self.dsn or not self.secret:
+            logger.warning("[FinancialAuditor] DATABASE_URL or LEDGER_HMAC_SECRET not set — auditor running in passive mode")
+            return
+        self.is_running = True
         asyncio.create_task(self.run_loop())
 
     def stop(self):
@@ -115,5 +114,5 @@ class FinancialAuditor:
 # Global instance
 auditor = FinancialAuditor(DB_DSN, HMAC_SECRET)
 
-def start_auditor():
+async def start_auditor():
     auditor.start()

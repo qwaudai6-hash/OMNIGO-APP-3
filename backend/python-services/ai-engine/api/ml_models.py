@@ -346,6 +346,32 @@ async def get_co_bought_recommendations(product_tracking_id: str, top_k: int = 4
 
 
 # ═══════════════════════════════════════════════════════════════
+# 4. ETA PREDICTION (Spatio-Temporal Model)
+# ═══════════════════════════════════════════════════════════════
+def predict_eta(distance_km: float, vehicle_type: int, current_hour: int) -> float:
+    """
+    Predicts travel ETA in minutes based on distance, vehicle type, and rush hour patterns.
+    vehicle_type: 0=bike (28 km/h), 1=truck/rickshaw (22 km/h), 2=car (25 km/h)
+    """
+    speeds = {0: 28.0, 1: 22.0, 2: 25.0}
+    speed = speeds.get(vehicle_type, 25.0)
+
+    # Traffic congestion factor by hour
+    traffic_factor = 1.0
+    if 8 <= current_hour <= 10 or 17 <= current_hour <= 20:
+        traffic_factor = 1.35  # Peak rush hour
+    elif 23 <= current_hour or current_hour <= 5:
+        traffic_factor = 0.85  # Night time free flow
+
+    travel_hours = (distance_km / speed) * traffic_factor
+    travel_minutes = travel_hours * 60.0
+
+    # Fixed pickup, order packing, and handover buffer (3.5 mins)
+    total_minutes = travel_minutes + 3.5
+    return max(total_minutes, 4.0)
+
+
+# ═══════════════════════════════════════════════════════════════
 # MASTER INIT — called from main.py startup
 # ═══════════════════════════════════════════════════════════════
 async def train_all_models():

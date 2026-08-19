@@ -1,7 +1,7 @@
 import sys
 import os
 
-sys.path.append("/run/media/phatan/New Volume/OMNIGO E COMMERCE APP/backend/python-services/ai-engine")
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from api.agents.concierge_agent import run_agent
 
