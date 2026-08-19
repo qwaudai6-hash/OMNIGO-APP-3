@@ -2284,12 +2284,13 @@ func (w *SettlementWorker) processSingleSettlement(ctx context.Context, eventID 
 		currency = "PKR"
 	}
 
-	// 1. Execute Ledger Transfers
+	// 1. Execute Ledger MultiTransfer (Atomic all-or-nothing double-entry split)
+	var transferReqs []ledger.TransferRequest
 	for _, tr := range payload.Transfers {
 		if tr.Amount <= 0 {
 			continue
 		}
-		_, err := w.ledger.Transfer(ctx, ledger.TransferRequest{
+		transferReqs = append(transferReqs, ledger.TransferRequest{
 			DebitAccount:   ledger.Account(tr.DebitAccount),
 			CreditAccount:  ledger.Account(tr.CreditAccount),
 			Amount:         tr.Amount,
@@ -2299,8 +2300,11 @@ func (w *SettlementWorker) processSingleSettlement(ctx context.Context, eventID 
 			Description:    fmt.Sprintf("Payment settlement for order %s", payload.OrderID),
 			IdempotencyKey: tr.Idempotency,
 		})
+	}
+	if len(transferReqs) > 0 {
+		_, err := w.ledger.MultiTransfer(ctx, transferReqs)
 		if err != nil {
-			return fmt.Errorf("ledger transfer failed (%s -> %s, %.2f): %w", tr.DebitAccount, tr.CreditAccount, tr.Amount, err)
+			return fmt.Errorf("ledger multi-transfer failed for order %s: %w", payload.OrderID, err)
 		}
 	}
 

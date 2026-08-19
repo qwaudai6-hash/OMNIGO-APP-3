@@ -31,7 +31,7 @@ func validateHoldParents(ctx context.Context, q rowQuerier, hold *EscrowHold) er
 		query string
 	}{
 		{hold.OrderTrackingID, "order", "SELECT 1 FROM orders WHERE order_tracking_id = $1"},
-		{hold.VendorTrackingID, "user", "SELECT 1 FROM users WHERE tracking_id = $1"},
+		{hold.VendorTrackingID, "vendor/store", "SELECT 1 FROM users WHERE tracking_id = $1 UNION SELECT 1 FROM stores WHERE store_tracking_id = $1 OR vendor_tracking_id = $1"},
 	}
 	for _, c := range checks {
 		ok, err := database.Exists(ctx, q, c.query, c.id)

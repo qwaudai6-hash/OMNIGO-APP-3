@@ -4,11 +4,16 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"strconv"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func roundToPaisa(val float64) float64 {
+	return math.Round(val*100.0) / 100.0
+}
 
 // SplitResult contains the calculated payment split for an order.
 type SplitResult struct {
@@ -65,10 +70,10 @@ func (c *CommissionCalculator) CalculateSplit(ctx context.Context, orderTotal fl
 		}
 	}
 
-	// 3. Calculate splits
-	adminRevenue := orderTotal * commissionRate / 100.0
-	deliveryEscrow := deliveryFee
-	vendorEscrow := orderTotal - adminRevenue - deliveryEscrow
+	// 3. Calculate splits with exact 2-decimal paisa precision
+	adminRevenue := roundToPaisa(orderTotal * commissionRate / 100.0)
+	deliveryEscrow := roundToPaisa(deliveryFee)
+	vendorEscrow := roundToPaisa(orderTotal - adminRevenue - deliveryEscrow)
 
 	// Ensure vendor escrow is not negative
 	if vendorEscrow < 0 {
@@ -76,8 +81,8 @@ func (c *CommissionCalculator) CalculateSplit(ctx context.Context, orderTotal fl
 	}
 
 	return &SplitResult{
-		OrderTotal:     orderTotal,
-		DeliveryFee:    deliveryFee,
+		OrderTotal:     roundToPaisa(orderTotal),
+		DeliveryFee:    deliveryEscrow,
 		AdminRevenue:   adminRevenue,
 		VendorEscrow:   vendorEscrow,
 		DeliveryEscrow: deliveryEscrow,
@@ -107,19 +112,19 @@ func (c *CommissionCalculator) CalculateCODSplit(ctx context.Context, orderTotal
 
 	codSurcharge := envFloat("COD_SURCHARGE_RATE", 0.5)
 
-	adminRevenue := orderTotal * (commissionRate + codSurcharge) / 100.0
-	vendorEscrow := orderTotal - adminRevenue - deliveryFee
+	adminRevenue := roundToPaisa(orderTotal * (commissionRate + codSurcharge) / 100.0)
+	vendorEscrow := roundToPaisa(orderTotal - adminRevenue - deliveryFee)
 
 	if vendorEscrow < 0 {
 		vendorEscrow = 0
 	}
 
 	return &SplitResult{
-		OrderTotal:     orderTotal,
-		DeliveryFee:    deliveryFee,
+		OrderTotal:     roundToPaisa(orderTotal),
+		DeliveryFee:    roundToPaisa(deliveryFee),
 		AdminRevenue:   adminRevenue,
 		VendorEscrow:   vendorEscrow,
-		DeliveryEscrow: deliveryFee,
+		DeliveryEscrow: roundToPaisa(deliveryFee),
 		CommissionRate: commissionRate,
 	}, nil
 }
@@ -136,10 +141,10 @@ func (c *CommissionCalculator) CalculateRiderDeliveryCredit(ctx context.Context,
 		return 0, 0, fmt.Errorf("failed to read delivery gig: %w", err)
 	}
 
-	riderEarning = deliveryFee - adminCommission
+	riderEarning = roundToPaisa(deliveryFee - adminCommission)
 	if riderEarning < 0 {
 		riderEarning = 0
 	}
 
-	return riderEarning, adminCommission, nil
+	return riderEarning, roundToPaisa(adminCommission), nil
 }

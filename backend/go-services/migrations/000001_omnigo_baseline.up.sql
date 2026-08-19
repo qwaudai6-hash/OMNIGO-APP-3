@@ -400,11 +400,15 @@ CREATE TABLE IF NOT EXISTS outbox_events (
     aggregate_id    VARCHAR(50) NOT NULL,
     topic           VARCHAR(100) NOT NULL,
     payload         JSONB NOT NULL,
-    status          VARCHAR(20) NOT NULL DEFAULT 'pending',
+    status          VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+    retry_count     INT NOT NULL DEFAULT 0,
+    error_message   TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     processed_at    TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_events_status ON outbox_events(status);
+CREATE INDEX IF NOT EXISTS idx_outbox_events_topic_status ON outbox_events(topic, status);
 CREATE INDEX IF NOT EXISTS idx_outbox_events_created_at ON outbox_events(created_at);
 
 -- ── Payment API Keys (encrypted at rest) ──────────────────────────────────
