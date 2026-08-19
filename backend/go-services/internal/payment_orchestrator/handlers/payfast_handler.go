@@ -8,9 +8,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,16 +30,19 @@ import (
 )
 
 // PaymentRequest payload from Flutter.
-// CustomerEmailAddress is accepted for local audit/receipt purposes but is NOT sent
-// to PayFast's /transaction/token endpoint (the API does not accept it).
+//
+// SECURITY & PCI-DSS COMPLIANCE:
+// 1. No Cardholder Data Persistence: CardNumber, Expiry, and CVV are never stored in DB or Redis.
+// 2. Logging Hardening: Ensure reverse proxy (Nginx/Traefik), Gin middleware, and APM tracing
+//    have request-body logging DISABLED for all /api/v1/payments/* endpoints.
+// 3. CustomerEmailAddress is accepted for local audit records but not sent to PayFast token API.
 type PaymentRequest struct {
 	OrderID              string `json:"order_id"`
 	AccountTypeID        string `json:"account_type_id"`
 	CustomerMobileNo     string `json:"customer_mobile_no"`
 	CustomerEmailAddress string `json:"customer_email_address"`
 
-	// Card specific — No Cardholder Data Persistence rule applies.
-	// These fields are used only to obtain a temporary token and are never stored.
+	// Card specific fields — strictly in-memory during token generation only.
 	CardNumber  string `json:"card_number"`
 	ExpiryMonth string `json:"expiry_month"`
 	ExpiryYear  string `json:"expiry_year"`
@@ -56,11 +61,22 @@ func generateHMACSHA256(data string, secret string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// signMD generates an HMAC signature for the internal transaction ID.
+// Fails closed if INTERNAL_CALLBACK_SECRET is missing.
+func signMD(internalTxnID string) (string, error) {
+	secret := os.Getenv("INTERNAL_CALLBACK_SECRET")
+	if secret == "" {
+		return "", fmt.Errorf("INTERNAL_CALLBACK_SECRET is not configured")
+	}
+	return internalTxnID + "." + generateHMACSHA256(internalTxnID, secret), nil
+}
+
 // verifyMD validates the HMAC signature in constant time.
+// Fails closed if INTERNAL_CALLBACK_SECRET is missing.
 func verifyMD(mdParam string) (string, error) {
 	secret := os.Getenv("INTERNAL_CALLBACK_SECRET")
 	if secret == "" {
-		return "", fmt.Errorf("missing internal secret")
+		return "", fmt.Errorf("INTERNAL_CALLBACK_SECRET is not configured")
 	}
 
 	parts := strings.Split(mdParam, ".")
@@ -82,8 +98,11 @@ func verifyMD(mdParam string) (string, error) {
 
 // build3DSCallbackURL safely constructs the 3DS callback URL with a signed MD parameter.
 // Uses url.Parse for proper URL construction instead of string concatenation.
-func build3DSCallbackURL(baseURL, internalTxnID, secret string) (string, error) {
-	signedMD := internalTxnID + "." + generateHMACSHA256(internalTxnID, secret)
+func build3DSCallbackURL(baseURL, internalTxnID string) (string, error) {
+	signedMD, err := signMD(internalTxnID)
+	if err != nil {
+		return "", err
+	}
 	u, err := url.Parse(baseURL)
 	if err != nil {
 		return "", fmt.Errorf("invalid callback base URL: %w", err)
@@ -98,7 +117,7 @@ func build3DSCallbackURL(baseURL, internalTxnID, secret string) (string, error) 
 // Tokenized Transactions after 3DS authentication.
 //
 // NOTE: No Cardholder Data Persistence — PAN, CVV, and expiry are never stored.
-// The instrument_token and 3DS metadata below are PayFast-issued gateway tokens,
+// The instrument_token, customer_ip, and 3DS metadata below are PayFast-issued gateway tokens,
 // not cardholder data, and must be persisted to complete the two-step flow.
 type PaymentMetadata struct {
 	InstrumentToken string `json:"instrument_token"`
@@ -107,6 +126,7 @@ type PaymentMetadata struct {
 	ECI             string `json:"eci"`
 	CustomerMobile  string `json:"customer_mobile"`
 	AccountTypeID   string `json:"account_type"`
+	CustomerIP      string `json:"customer_ip"`
 }
 
 // PayFastSplitHandler handles synchronous PayFast API payments.
@@ -243,9 +263,9 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 
 	// 4. Build safe 3DS callback URL with signed MD
 	callbackBaseURL := envStr("PAYFAST_3DS_CALLBACK_URL", "https://api.omnigo.com/api/v1/payments/payfast/3ds_callback")
-	callbackURL, err := build3DSCallbackURL(callbackBaseURL, internalTxnID, os.Getenv("INTERNAL_CALLBACK_SECRET"))
+	callbackURL, err := build3DSCallbackURL(callbackBaseURL, internalTxnID)
 	if err != nil {
-		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Failed to build callback URL")
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Failed to build callback URL: "+err.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal configuration error"})
 		return
 	}
@@ -277,7 +297,7 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 	req.CVV = ""
 
 	if err != nil {
-		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Temporary token failed")
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Temporary token failed: "+err.Error())
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Payment token generation failed"})
 		return
 	}
@@ -309,6 +329,7 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 		metaMap["eci"] = tokenRes.ECI
 		metaMap["customer_mobile"] = authoritativeMobile
 		metaMap["account_type"] = req.AccountTypeID
+		metaMap["customer_ip"] = customerIP // Preserve original customer IP for 3DS tokenized call
 
 		metaBytes, err := json.Marshal(metaMap)
 		if err != nil {
@@ -352,8 +373,20 @@ func (h *PayFastSplitHandler) ProcessPayment(c *gin.Context) {
 
 	txnRes, err := h.payfast.InitiateTokenizedTransaction(c.Request.Context(), txnReq)
 	if err != nil {
-		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Tokenized transaction failed")
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Tokenized transaction failed: "+err.Error())
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Transaction processing failed"})
+		return
+	}
+
+	// Validate gateway transaction response before status inquiry
+	if txnRes == nil || txnRes.TransactionID == "" {
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Gateway returned empty transaction ID")
+		c.JSON(http.StatusBadGateway, gin.H{"error": "Invalid gateway response"})
+		return
+	}
+	if txnRes.StatusCode != "00" && txnRes.StatusCode != "" {
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, txnRes.StatusMsg)
+		c.JSON(http.StatusBadRequest, gin.H{"error": txnRes.StatusMsg, "code": txnRes.StatusCode})
 		return
 	}
 
@@ -378,8 +411,6 @@ func (h *PayFastSplitHandler) ThreeDSCallback(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing MD correlator"})
 		return
 	}
-
-	customerIP := c.ClientIP()
 
 	// 1. Find the 3DS required payment attempt
 	var orderID string
@@ -415,6 +446,12 @@ func (h *PayFastSplitHandler) ThreeDSCallback(c *gin.Context) {
 		return
 	}
 
+	// Use original customer IP preserved during initial request, fallback to client IP
+	origCustomerIP := meta.CustomerIP
+	if origCustomerIP == "" {
+		origCustomerIP = c.ClientIP()
+	}
+
 	// 3. Initiate Tokenized Transaction using the saved Token + paRes
 	txnReq := payfast.TokenizedTransactionRequest{
 		InstrumentToken:  meta.InstrumentToken,
@@ -425,7 +462,7 @@ func (h *PayFastSplitHandler) ThreeDSCallback(c *gin.Context) {
 		OrderDate:        time.Now().Format("2006-01-02 15:04:05"),
 		TxnDesc:          "OmniGo Order " + orderID,
 		TxnAmt:           fmt.Sprintf("%.2f", amount),
-		CustomerIP:       customerIP,
+		CustomerIP:       origCustomerIP,
 		MerCatCode:       os.Getenv("PAYFAST_MERCHANT_CATEGORY"),
 		ECI:              meta.ECI,
 		Data3DSSecureID:  meta.Data3DSSecureID,
@@ -434,8 +471,20 @@ func (h *PayFastSplitHandler) ThreeDSCallback(c *gin.Context) {
 
 	txnRes, err := h.payfast.InitiateTokenizedTransaction(c.Request.Context(), txnReq)
 	if err != nil {
-		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Tokenized 3DS transaction failed")
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Tokenized 3DS transaction failed: "+err.Error())
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Transaction processing failed"})
+		return
+	}
+
+	// Validate gateway transaction response
+	if txnRes == nil || txnRes.TransactionID == "" {
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Gateway returned empty transaction ID after 3DS")
+		c.JSON(http.StatusBadGateway, gin.H{"error": "Invalid gateway response"})
+		return
+	}
+	if txnRes.StatusCode != "00" && txnRes.StatusCode != "" {
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, txnRes.StatusMsg)
+		c.JSON(http.StatusBadRequest, gin.H{"error": txnRes.StatusMsg, "code": txnRes.StatusCode})
 		return
 	}
 
@@ -445,9 +494,15 @@ func (h *PayFastSplitHandler) ThreeDSCallback(c *gin.Context) {
 
 // verifyAndSettle calls the GET status endpoint and settles the DB transaction atomically.
 func (h *PayFastSplitHandler) verifyAndSettle(c *gin.Context, internalTxnID string, orderID string, gatewayTxnID string, expectedAmount float64) {
+	if gatewayTxnID == "" {
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Missing gateway transaction ID for status verification")
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid gateway transaction ID"})
+		return
+	}
+
 	statusRes, err := h.payfast.GetTransactionStatus(c.Request.Context(), gatewayTxnID)
 	if err != nil {
-		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Status check failed")
+		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Status check failed: "+err.Error())
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to verify transaction status"})
 		return
 	}
@@ -463,7 +518,7 @@ func (h *PayFastSplitHandler) verifyAndSettle(c *gin.Context, internalTxnID stri
 		return
 	}
 
-	// Fix #14: Validate that the returned gateway transaction ID matches our request
+	// Validate that the returned gateway transaction ID matches our request
 	if statusRes.TransactionID != "" && statusRes.TransactionID != gatewayTxnID {
 		h.markPaymentFailed(c.Request.Context(), internalTxnID, "Gateway transaction ID mismatch in status response")
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Transaction ID mismatch"})
@@ -476,9 +531,19 @@ func (h *PayFastSplitHandler) verifyAndSettle(c *gin.Context, internalTxnID stri
 		return
 	}
 
-	// We removed strict TxnAmt verification against statusRes here because official
-	// docs do not guarantee txnamt in status response. We instead trust that code 00
-	// for the correct BasketID and TxnID implies our requested expectedAmount was processed.
+	// Numerical amount comparison in minor units (paisa) to prevent string formatting/rounding discrepancies
+	if statusRes.TxnAmt != "" {
+		gatewayAmt, parseErr := strconv.ParseFloat(statusRes.TxnAmt, 64)
+		if parseErr == nil {
+			expectedPaisa := int64(math.Round(expectedAmount * 100))
+			gatewayPaisa := int64(math.Round(gatewayAmt * 100))
+			if expectedPaisa != gatewayPaisa {
+				h.markPaymentFailed(c.Request.Context(), internalTxnID, fmt.Sprintf("Amount mismatch: expected %d paisa, got %d paisa", expectedPaisa, gatewayPaisa))
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Transaction amount mismatch"})
+				return
+			}
+		}
+	}
 
 	err = h.executeSplit(c.Request.Context(), internalTxnID, orderID, expectedAmount, gatewayTxnID)
 	if err != nil {
@@ -544,7 +609,7 @@ func (h *PayFastSplitHandler) executeSplit(ctx context.Context, internalTxnID st
 		return nil
 	}
 
-	// 3. Lock order and re-read authoritative amount (Fix #6)
+	// 3. Lock order and re-read authoritative amount
 	var dbAmount float64
 	var storeID string
 	var deliveryTrackingID string
@@ -596,7 +661,7 @@ func (h *PayFastSplitHandler) executeSplit(ctx context.Context, internalTxnID st
 
 	// 6. Insert Settlement Outbox Event (atomic with DB state changes)
 	// The outbox worker will read this and execute the ledger transfers + escrow holds.
-	outboxPayload, _ := json.Marshal(map[string]interface{}{
+	outboxPayload, err := json.Marshal(map[string]interface{}{
 		"internal_txn_id":      internalTxnID,
 		"order_id":             orderID,
 		"gateway_txn_id":       gatewayTxnID,
@@ -616,6 +681,10 @@ func (h *PayFastSplitHandler) executeSplit(ctx context.Context, internalTxnID st
 			},
 		},
 	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal outbox payload: %w", err)
+	}
+
 	_, err = tx.Exec(ctx,
 		`INSERT INTO outbox_events (aggregate_id, topic, payload, status, created_at) VALUES ($1, 'payment_settlement', $2, 'PENDING', NOW())`,
 		orderID, string(outboxPayload),
