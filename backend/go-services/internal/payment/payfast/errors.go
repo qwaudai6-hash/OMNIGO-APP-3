@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"syscall"
 )
 
@@ -110,5 +111,29 @@ func IsDeterministicRejection(err error) bool {
 		}
 	}
 	return false
+}
+
+// MapIssuerResponseCode converts raw 1LINK/bank ISO-8583 response codes into clear, actionable advice for customers.
+func MapIssuerResponseCode(code string) string {
+	switch strings.TrimSpace(code) {
+	case "00":
+		return "Approved"
+	case "05", "51":
+		return "Insufficient balance in your card/account. Please top up and retry."
+	case "14", "54":
+		return "Card expired or invalid expiry date entered."
+	case "57", "58":
+		return "Online e-commerce transactions are not enabled on your card. Please enable online shopping in your bank app and retry."
+	case "61":
+		return "Exceeded transaction amount limit on your card/account."
+	case "65":
+		return "Exceeded transaction frequency limit on your card."
+	case "75":
+		return "Incorrect CVV / OTP entered too many times."
+	case "91", "96":
+		return "Your issuing bank or 1LINK switch is temporarily unavailable. Please retry in a few moments."
+	default:
+		return "Payment was declined by issuing bank."
+	}
 }
 

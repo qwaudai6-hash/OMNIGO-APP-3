@@ -1421,6 +1421,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"syscall"
 )
 
@@ -1526,6 +1527,30 @@ func IsDeterministicRejection(err error) bool {
 	return false
 }
 
+// MapIssuerResponseCode converts raw 1LINK/bank ISO-8583 response codes into clear, actionable advice for customers.
+func MapIssuerResponseCode(code string) string {
+	switch strings.TrimSpace(code) {
+	case "00":
+		return "Approved"
+	case "05", "51":
+		return "Insufficient balance in your card/account. Please top up and retry."
+	case "14", "54":
+		return "Card expired or invalid expiry date entered."
+	case "57", "58":
+		return "Online e-commerce transactions are not enabled on your card. Please enable online shopping in your bank app and retry."
+	case "61":
+		return "Exceeded transaction amount limit on your card/account."
+	case "65":
+		return "Exceeded transaction frequency limit on your card."
+	case "75":
+		return "Incorrect CVV / OTP entered too many times."
+	case "91", "96":
+		return "Your issuing bank or 1LINK switch is temporarily unavailable. Please retry in a few moments."
+	default:
+		return "Payment was declined by issuing bank."
+	}
+}
+
 
 ```
 
@@ -1559,29 +1584,38 @@ import (
 	"github.com/omnigo/backend/internal/ledger"
 	"github.com/omnigo/backend/internal/payment/payfast"
 	"github.com/omnigo/backend/internal/payment_orchestrator"
+	"github.com/omnigo/backend/internal/payment_orchestrator/fraud"
+	"github.com/omnigo/backend/internal/shared/telemetry"
 )
 
 // PaymentRequest contains client checkout parameters.
 type PaymentRequest struct {
-	OrderID          string `json:"order_id" binding:"required"`
-	CustomerMobileNo string `json:"customer_mobile_no"`
-	AccountTypeID    string `json:"account_type_id"`
-	PaymentMethod    string `json:"payment_method"` // card | bank | wallet
-	BankCode         string `json:"bank_code"`
-	AccountNumber    string `json:"account_number"`
-	AccountTitle     string `json:"account_title"`
-	CNICNumber       string `json:"cnic_number"`
-	CardNumber       string `json:"card_number"`
-	ExpiryMonth      string `json:"expiry_month"`
-	ExpiryYear       string `json:"expiry_year"`
-	CVV              string `json:"cvv"`
-	OTP              string `json:"otp"`
+	OrderID           string `json:"order_id" binding:"required"`
+	CustomerMobileNo  string `json:"customer_mobile_no"`
+	AccountTypeID     string `json:"account_type_id"`
+	PaymentMethod     string `json:"payment_method"` // card | bank | wallet | saved_card
+	SavedCardID       string `json:"saved_card_id,omitempty"`
+	SaveCardForFuture bool   `json:"save_card_for_future,omitempty"`
+	BankCode          string `json:"bank_code"`
+	AccountNumber     string `json:"account_number"`
+	AccountTitle      string `json:"account_title"`
+	CNICNumber        string `json:"cnic_number"`
+	CardNumber        string `json:"card_number"`
+	ExpiryMonth       string `json:"expiry_month"`
+	ExpiryYear        string `json:"expiry_year"`
+	CVV               string `json:"cvv"`
+	OTP               string `json:"otp"`
 }
 
 // Validate ensures input parameters meet financial security and card scheme formats.
 func (req *PaymentRequest) Validate() error {
 	if strings.TrimSpace(req.OrderID) == "" {
 		return errors.New("order_id is required")
+	}
+
+	// 1-Click Saved Card Checkout
+	if req.SavedCardID != "" {
+		return nil
 	}
 
 	// Card validation
@@ -1656,6 +1690,8 @@ type PayFastService struct {
 	escrow           *escrow.Service
 	calculator       *payment_orchestrator.CommissionCalculator
 	payfast          *payfast.Client
+	vault            *CardVaultService
+	fraud            *fraud.Detector
 	callbackSecret   string
 	merchantCategory string
 	callbackBaseURL  string
@@ -1697,11 +1733,23 @@ func NewPayFastService(
 		escrow:           escrowSvc,
 		calculator:       calc,
 		payfast:          payfastClient,
+		vault:            NewCardVaultService(db),
+		fraud:            fraud.NewDetector(nil, db),
 		callbackSecret:   secret,
 		merchantCategory: cat,
 		callbackBaseURL:  cbURL,
 		defaultCurrency:  currency,
 	}
+}
+
+// SetVault assigns a custom CardVaultService.
+func (s *PayFastService) SetVault(vault *CardVaultService) {
+	s.vault = vault
+}
+
+// SetFraudDetector assigns a custom FraudDetector.
+func (s *PayFastService) SetFraudDetector(f *fraud.Detector) {
+	s.fraud = f
 }
 
 // generateHMACSHA256 generates a hex-encoded HMAC-SHA256 signature.
@@ -1754,7 +1802,27 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		return nil, fmt.Errorf("validation error: %w", err)
 	}
 
-	// 2. Fetch Authoritative Order Amount & Lock Order Row
+	method := req.PaymentMethod
+	if method == "" {
+		if req.SavedCardID != "" {
+			method = "saved_card"
+		} else if req.CardNumber != "" {
+			method = "card"
+		} else {
+			method = "bank_account"
+		}
+	}
+	telemetry.RecordPaymentAttempt("payfast", method)
+
+	// 2. Run Pre-Authorization Fraud & Velocity Checks
+	if s.fraud != nil {
+		if err := s.fraud.CheckVelocity(ctx, merchantUserID, clientIP); err != nil {
+			telemetry.RecordFraudBlock("velocity_limit_exceeded")
+			return nil, err
+		}
+	}
+
+	// 3. Fetch Authoritative Order Amount & Lock Order Row
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
@@ -1777,6 +1845,12 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 	}
 	if orderStatus != "pending" && orderStatus != "unpaid" {
 		return nil, errors.New("order is not in a payable status")
+	}
+
+	if s.fraud != nil {
+		if err := s.fraud.CheckOrderAnomaly(ctx, merchantUserID, expectedAmount); err != nil {
+			log.Printf("[PayFastService] Anomaly detected: %v", err)
+		}
 	}
 
 	internalTxnID := "pf_" + uuid.New().String()
@@ -1810,7 +1884,7 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 	}
 
 	if req.AccountTypeID == "" {
-		if req.CardNumber != "" {
+		if req.SavedCardID != "" || req.CardNumber != "" {
 			req.AccountTypeID = "2" // Card
 		} else if req.AccountNumber != "" {
 			req.AccountTypeID = "3" // Bank/Wallet
@@ -1845,7 +1919,7 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		CalculatedSplit: splitMeta,
 	})
 
-	// 3. Insert Initial Payment Transaction (idempotency key populated)
+	// 4. Insert Initial Payment Transaction (idempotency key populated)
 	_, err = tx.Exec(ctx,
 		`INSERT INTO payment_transactions (transaction_id, order_tracking_id, gateway, amount, currency, status, kind, idempotency_key, metadata)
 		 VALUES ($1, $2, 'payfast', $3, $4, 'pending', 'payment', $5, $6)`,
@@ -1862,6 +1936,73 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		return nil, fmt.Errorf("failed to commit initial payment attempt: %w", err)
 	}
 
+	// ── Saved Card 1-Click Checkout Flow ───────────────────────────────────
+	if req.SavedCardID != "" && s.vault != nil {
+		savedToken, err := s.vault.GetCardInstrumentToken(ctx, merchantUserID, req.SavedCardID)
+		if err != nil {
+			_ = s.MarkPaymentFailed(ctx, internalTxnID, "Invalid saved card token: "+err.Error())
+			return nil, err
+		}
+
+		_, _ = s.db.Exec(ctx, `UPDATE payment_transactions SET status = 'processing', updated_at = NOW() WHERE transaction_id = $1`, internalTxnID)
+
+		txnReq := payfast.TokenizedTransactionRequest{
+			InstrumentToken:  savedToken,
+			MerchantUserId:   customerTrackingID,
+			CustomerMobileNo: authoritativeMobile,
+			BasketID:         req.OrderID,
+			OrderDate:        time.Now().Format("2006-01-02 15:04:05"),
+			TxnDesc:          "OmniGo Order " + req.OrderID,
+			TxnAmt:           fmt.Sprintf("%.2f", expectedAmount),
+			CustomerIP:       clientIP,
+			MerCatCode:       s.merchantCategory,
+			Otp:              req.OTP,
+		}
+
+		gwCtx, gwCancel := context.WithTimeout(context.WithoutCancel(ctx), 25*time.Second)
+		defer gwCancel()
+		txnRes, err := s.payfast.InitiateTokenizedTransaction(gwCtx, txnReq)
+		if err != nil {
+			if s.fraud != nil {
+				s.fraud.RecordAttempt(ctx, merchantUserID, clientIP, false)
+			}
+			if payfast.IsTransient(err) {
+				_ = s.MarkPaymentGatewayPending(ctx, internalTxnID, "", "Saved card timeout: "+err.Error())
+				return &PaymentResponse{
+					Status:        "gateway_pending",
+					OrderID:       req.OrderID,
+					TransactionID: internalTxnID,
+					Message:       "Payment is processing at gateway; reconciliation in progress",
+				}, nil
+			}
+			_ = s.MarkPaymentFailed(ctx, internalTxnID, "Saved card capture failed: "+err.Error())
+			return nil, fmt.Errorf("saved card payment failed: %w", err)
+		}
+
+		if txnRes.StatusCode != "00" && txnRes.StatusCode != "" {
+			if s.fraud != nil {
+				s.fraud.RecordAttempt(ctx, merchantUserID, clientIP, false)
+			}
+			_ = s.MarkPaymentFailed(ctx, internalTxnID, txnRes.StatusMsg)
+			return nil, fmt.Errorf("gateway error: %s (%s)", txnRes.StatusMsg, payfast.MapIssuerResponseCode(txnRes.StatusCode))
+		}
+
+		if s.fraud != nil {
+			s.fraud.RecordAttempt(ctx, merchantUserID, clientIP, true)
+		}
+
+		if err := s.VerifyAndSettle(ctx, internalTxnID, req.OrderID, txnRes.TransactionID, expectedAmount); err != nil {
+			return nil, err
+		}
+
+		return &PaymentResponse{
+			Status:        "settlement_pending",
+			OrderID:       req.OrderID,
+			TransactionID: internalTxnID,
+			Message:       "Saved card payment verified successfully",
+		}, nil
+	}
+
 	// Zero card persistence cleanup on the original caller struct
 	defer func() {
 		req.CardNumber = ""
@@ -1876,7 +2017,7 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		return nil, err
 	}
 
-	// 4. Request Temporary Transaction Token from PayFast
+	// 5. Request Temporary Transaction Token from PayFast
 	tokenReq := payfast.TemporaryTokenRequest{
 		MerchantUserId:     customerTrackingID,
 		CustomerMobileNo:   authoritativeMobile,
@@ -1896,10 +2037,27 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		Data3DSCallbackURL: callbackURL,
 	}
 
+	// Save card details metadata before zeroing if customer opted into saving card
+	var cardBrand, lastFour string
+	if req.SaveCardForFuture && req.CardNumber != "" {
+		cleanPan := strings.ReplaceAll(req.CardNumber, " ", "")
+		if len(cleanPan) >= 4 {
+			lastFour = cleanPan[len(cleanPan)-4:]
+		}
+		if strings.HasPrefix(cleanPan, "4") {
+			cardBrand = "visa"
+		} else if strings.HasPrefix(cleanPan, "5") {
+			cardBrand = "mastercard"
+		} else {
+			cardBrand = "card"
+		}
+	}
+
 	tokenRes, err := s.payfast.GetTemporaryTransactionToken(ctx, tokenReq)
 	if err != nil {
-		// If initial token acquisition fails before any gateway token exists,
-		// NO charge could possibly have occurred, so fail deterministically.
+		if s.fraud != nil {
+			s.fraud.RecordAttempt(ctx, merchantUserID, clientIP, false)
+		}
 		_ = s.MarkPaymentFailed(ctx, internalTxnID, "Temporary token request failed: "+err.Error())
 		return &PaymentResponse{
 			Status:        "failed",
@@ -1909,7 +2067,15 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		}, err
 	}
 
-	// 5. Evaluate Token Response (3DS Required vs Direct Tokenized Capture)
+	// Auto-save card token in vault if customer opted in
+	if req.SaveCardForFuture && tokenRes.InstrumentToken != "" && s.vault != nil && lastFour != "" {
+		_, _ = s.vault.SaveCard(
+			ctx, customerTrackingID, tokenRes.InstrumentToken,
+			cardBrand, lastFour, req.ExpiryMonth, req.ExpiryYear, req.AccountTitle, false,
+		)
+	}
+
+	// 6. Evaluate Token Response (3DS Required vs Direct Tokenized Capture)
 	if tokenRes.Data3DSHTML != "" {
 		metaBytes, _ = json.Marshal(PaymentMetadata{
 			InstrumentToken: tokenRes.InstrumentToken,
@@ -1938,7 +2104,7 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		}, nil
 	}
 
-	// 6. Direct Tokenized Capture (3DS Not Required)
+	// 7. Direct Tokenized Capture (3DS Not Required)
 	if tokenRes.InstrumentToken == "" {
 		_ = s.MarkPaymentFailed(ctx, internalTxnID, "Gateway returned empty instrument token")
 		return nil, errors.New("invalid gateway token response")
@@ -1966,6 +2132,9 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 	defer gwCancel()
 	txnRes, err := s.payfast.InitiateTokenizedTransaction(gwCtx, txnReq)
 	if err != nil {
+		if s.fraud != nil {
+			s.fraud.RecordAttempt(ctx, merchantUserID, clientIP, false)
+		}
 		if payfast.IsTransient(err) {
 			_ = s.MarkPaymentGatewayPending(ctx, internalTxnID, tokenRes.TransactionID, "Direct tokenized txn timeout: "+err.Error())
 			return &PaymentResponse{
@@ -1990,11 +2159,18 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		return nil, errors.New("invalid gateway transaction response")
 	}
 	if txnRes.StatusCode != "00" && txnRes.StatusCode != "" {
+		if s.fraud != nil {
+			s.fraud.RecordAttempt(ctx, merchantUserID, clientIP, false)
+		}
 		_ = s.MarkPaymentFailed(ctx, internalTxnID, txnRes.StatusMsg)
-		return nil, fmt.Errorf("gateway error: %s (code: %s)", txnRes.StatusMsg, txnRes.StatusCode)
+		return nil, fmt.Errorf("gateway error: %s (%s)", txnRes.StatusMsg, payfast.MapIssuerResponseCode(txnRes.StatusCode))
 	}
 
-	// 7. Verify & Settle
+	if s.fraud != nil {
+		s.fraud.RecordAttempt(ctx, merchantUserID, clientIP, true)
+	}
+
+	// 8. Verify & Settle
 	if err := s.VerifyAndSettle(ctx, internalTxnID, req.OrderID, txnRes.TransactionID, expectedAmount); err != nil {
 		return nil, err
 	}

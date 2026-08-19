@@ -160,6 +160,9 @@ class ApiEndpoints {
   // ── Payments (Order & Payment Orchestrator Service) ──────────────
   static String payfastPayment() => '$paymentBase/payments/payfast/payment';
   static String payfast3DSCallback() => '$paymentBase/payments/payfast/3ds_callback';
+  static String savedCards() => '$paymentBase/payments/cards';
+  static String savedCard(String cardId) => '$paymentBase/payments/cards/$cardId';
+  static String defaultSavedCard() => '$paymentBase/payments/cards/default';
   static String payfastCharge() => '$orderBase/wallet/payfast/charge';
   static String payfastCallback() => '$orderBase/wallet/payfast/callback';
 
