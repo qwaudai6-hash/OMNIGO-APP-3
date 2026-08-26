@@ -277,9 +277,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             duration: Duration(seconds: 6),
           ),
         );
-        Navigator.pushReplacement(
+        await Navigator.pushReplacement(
           context,
-          MaterialPageRoute(builder: (_) => OrderSuccessScreen(trackingId: trackingId, pending: true)),
+          MaterialPageRoute<void>(builder: (_) => OrderSuccessScreen(trackingId: trackingId, pending: true)),
         );
         return;
       }
@@ -565,7 +565,7 @@ Future<bool> _waitForPaymentConfirmation(
 ) async {
   const paidStates = {'paid', 'accepted', 'shipped', 'in_transit', 'delivered', 'completed'};
   for (var i = 0; i < 15; i++) {
-    await Future.delayed(const Duration(seconds: 3));
+    await Future<void>.delayed(const Duration(seconds: 3));
     try {
       final resp = await apiClient.get('/orders/$orderId');
       if (resp is Map<String, dynamic>) {

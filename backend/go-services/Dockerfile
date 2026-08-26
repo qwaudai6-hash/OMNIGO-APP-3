@@ -12,6 +12,8 @@ FROM golang:1.24-alpine AS builder
 
 RUN apk add --no-cache git ca-certificates gcc musl-dev bash
 
+ENV GOTOOLCHAIN=auto
+
 WORKDIR /app
 
 # Cache dependency downloads

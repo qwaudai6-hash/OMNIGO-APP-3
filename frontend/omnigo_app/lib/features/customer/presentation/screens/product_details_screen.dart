@@ -44,10 +44,6 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
   final PageController _imagePageController = PageController();
   List<Product> _recommendations = [];
   bool _isLoadingRecommendations = false;
-  // Frequently Bought Together (separate AI endpoint) — items people
-  // typically add to cart when they buy this product.
-  final List<Product> _coBought = [];
-  final bool _isLoadingCoBought = false;
 
   // ── Vendor store card state ───────────────────────────────────────
   Map<String, dynamic>? _storeInfo;

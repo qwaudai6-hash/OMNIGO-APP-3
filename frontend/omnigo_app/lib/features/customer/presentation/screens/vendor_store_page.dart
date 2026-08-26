@@ -45,7 +45,6 @@ class _VendorStorePageState extends State<VendorStorePage>
   Map<String, dynamic>? _storeData;
   List<Product> _allProducts = [];
   List<Product> _filtered = [];
-  bool _isLoadingStore = true;
   bool _isLoadingProducts = true;
   String _searchQuery = '';
   String _selectedCategory = 'All';
@@ -121,14 +120,9 @@ class _VendorStorePageState extends State<VendorStorePage>
       if (resp.statusCode == 200 && mounted) {
         setState(() {
           _storeData = jsonDecode(resp.body) as Map<String, dynamic>;
-          _isLoadingStore = false;
         });
-      } else if (mounted) {
-        setState(() => _isLoadingStore = false);
       }
-    } catch (_) {
-      if (mounted) setState(() => _isLoadingStore = false);
-    }
+    } catch (_) {}
   }
 
   Future<void> _fetchProducts() async {

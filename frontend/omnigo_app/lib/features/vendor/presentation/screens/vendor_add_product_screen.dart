@@ -72,10 +72,6 @@ class VendorAddProductScreenState extends State<VendorAddProductScreen>
 
   bool get _isEditMode => widget.existing != null;
 
-  /// URL to show in preview: prefer freshly uploaded URL, fall back to existing.
-  String? get _previewImageUrl =>
-      _uploadedImageUrl ?? (widget.existing?.imageUrl.isNotEmpty == true ? widget.existing!.imageUrl : null);
-
   @override
   void initState() {
     super.initState();
