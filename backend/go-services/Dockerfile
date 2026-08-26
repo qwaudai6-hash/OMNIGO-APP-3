@@ -12,6 +12,8 @@ FROM golang:alpine AS builder
 
 RUN apk add --no-cache git ca-certificates gcc musl-dev bash
 
+WORKDIR /app
+
 ENV GOPROXY="https://proxy.golang.org,https://goproxy.io,direct"
 ENV GODEBUG="http2client=0"
 
