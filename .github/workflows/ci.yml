@@ -80,35 +80,6 @@ jobs:
             --dart-define=API_HOST="${API_HOST:-omnigo-app-production.up.railway.app}" \
             --dart-define=STRIPE_PUBLISHABLE_KEY="${STRIPE_KEY:-pk_test_placeholder}"
 
-  # ── Flutter iOS Build (Only on Tags or Manual Dispatch to save 10x macOS credits) ──
-  flutter-build-ios:
-    name: Flutter CI — iOS Build (macOS)
-    runs-on: macos-latest
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
-    defaults:
-      run:
-        working-directory: frontend/omnigo_app
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: 'stable'
-          cache: true
-
-      - name: Install dependencies
-        run: flutter pub get
-
-      - name: Build iOS (no code signing)
-        env:
-          API_HOST: ${{ vars.FLUTTER_API_HOST }}
-          STRIPE_KEY: ${{ vars.STRIPE_PUBLISHABLE_KEY }}
-        run: |
-          flutter build ios --no-codesign \
-            --dart-define=API_HOST="${API_HOST:-omnigo-app-production.up.railway.app}" \
-            --dart-define=STRIPE_PUBLISHABLE_KEY="${STRIPE_KEY:-pk_test_placeholder}"
-
   # ── Security Scan ───────────────────────────────────────────
   security-scan:
     name: Security Scan
