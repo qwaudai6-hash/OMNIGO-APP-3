@@ -362,6 +362,10 @@ class ApiEndpoints {
     return '$mapBase/sprites/$id@2x.$ext';
   }
 
+  /// Turn-by-turn routing via internal OSRM backend proxy
+  static String mapRoute(double originLat, double originLng, double destLat, double destLng, {String profile = 'driving'}) =>
+      '$mapBase/route?origin=$originLng,$originLat&destination=$destLng,$destLat&profile=$profile';
+
   // ── AI Security & Self-Healing Control Center ───────────────────
   static String adminAiAuditOverview() => '$adminBase/admin/ai/audit-overview';
   static String adminAiAutoHeal() => '$adminBase/admin/ai/auto-heal';

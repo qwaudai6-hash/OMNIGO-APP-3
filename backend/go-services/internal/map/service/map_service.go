@@ -17,17 +17,26 @@ import (
 type MapService struct {
 	apiKey      string
 	styleURL    string
+	osrmURL     string
+	photonURL   string
 	httpClient  *http.Client
 	tileSources map[string]string
 }
 
 // NewMapService creates the proxy. In production the style URL can be set
 // via MAPLIBRE_STYLE_URL or TILESERVER_URL to point at self-hosted TileServer GL
-// (e.g. http://omnigo-tileserver:8080/styles/streets/style.json), or fall back to MapTiler.
+// (e.g. http://omnigo-tileserver:8080/styles/streets/style.json), or fall back to MapTiler or DemoTiles.
 func NewMapService(apiKey, styleURL string) *MapService {
 	if styleURL == "" && apiKey != "" {
 		styleURL = fmt.Sprintf("https://api.maptiler.com/maps/streets/style.json?key=%s", apiKey)
 	}
+	if styleURL == "" && apiKey == "" {
+		// Resilient zero-config fallback to OpenMapTiles demo style
+		styleURL = "https://demotiles.maplibre.org/style.json"
+	}
+
+	osrmURL := "http://omnigo-osrm:5000"
+	photonURL := "http://omnigo-photon:2322"
 
 	tileSources := map[string]string{
 		"tiles":           "https://api.maptiler.com/maps/streets/%s?key=" + apiKey,
@@ -53,12 +62,24 @@ func NewMapService(apiKey, styleURL string) *MapService {
 	}
 
 	return &MapService{
-		apiKey:   apiKey,
-		styleURL: styleURL,
+		apiKey:     apiKey,
+		styleURL:   styleURL,
+		osrmURL:    osrmURL,
+		photonURL:  photonURL,
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
 		tileSources: tileSources,
+	}
+}
+
+// SetEndpoints allows overriding OSRM and Photon endpoints dynamically.
+func (s *MapService) SetEndpoints(osrmURL, photonURL string) {
+	if osrmURL != "" {
+		s.osrmURL = osrmURL
+	}
+	if photonURL != "" {
+		s.photonURL = photonURL
 	}
 }
 
@@ -291,4 +312,96 @@ func copyHeader(dst, src http.Header, keys ...string) {
 // IsConfigured reports whether the map service has the minimum config to run.
 func (s *MapService) IsConfigured() bool {
 	return s.styleURL != ""
+}
+
+// GetRoute fetches a turn-by-turn routing payload from OSRM backend.
+func (s *MapService) GetRoute(ctx context.Context, profile, coordinates string) ([]byte, error) {
+	if profile == "" {
+		profile = "driving"
+	}
+	// OSRM URL format: /route/v1/{profile}/{coordinates}?overview=full&geometries=geojson&steps=true
+	targetURL := fmt.Sprintf("%s/route/v1/%s/%s?overview=full&geometries=geojson&steps=true", s.osrmURL, profile, coordinates)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "OMNIGO-MapService/1.0")
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("osrm routing request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("osrm returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
+// SearchGeocode queries Photon/Nominatim for matching addresses and landmarks.
+func (s *MapService) SearchGeocode(ctx context.Context, query string, limit int) ([]byte, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	targetURL := fmt.Sprintf("%s/api?q=%s&limit=%d", s.photonURL, url.QueryEscape(query), limit)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "OMNIGO-MapService/1.0")
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("photon geocode request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("photon returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
+// ReverseGeocode converts GPS lat/lon to address information via Photon/Nominatim.
+func (s *MapService) ReverseGeocode(ctx context.Context, lat, lon float64) ([]byte, error) {
+	targetURL := fmt.Sprintf("%s/reverse?lat=%f&lon=%f", s.photonURL, lat, lon)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "OMNIGO-MapService/1.0")
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("photon reverse geocode request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("photon reverse returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
+// HealthCheck verifies availability of upstream map components.
+func (s *MapService) HealthCheck(ctx context.Context) map[string]interface{} {
+	health := map[string]interface{}{
+		"status":      "ok",
+		"service":     "map-service",
+		"style_url":   s.styleURL,
+		"osrm_url":    s.osrmURL,
+		"photon_url":  s.photonURL,
+		"configured":  s.IsConfigured(),
+	}
+	return health
 }

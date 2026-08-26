@@ -22,9 +22,14 @@ func main() {
 	cfg.Port = config.EnvPort(9010)
 
 	mapSvc := service.NewMapService(cfg.MapLibreAPIKey, cfg.MapLibreStyleURL)
-	if !mapSvc.IsConfigured() {
-		log.Fatalf("FATAL: MAPLIBRE_API_KEY or MAPLIBRE_STYLE_URL must be set")
+	osrmURL := os.Getenv("OSRM_URL")
+	if osrmURL == "" {
+		osrmURL = os.Getenv("OSRM_BASE_URL")
 	}
+	photonURL := os.Getenv("PHOTON_URL")
+	mapSvc.SetEndpoints(osrmURL, photonURL)
+
+	log.Printf("OMNIGO Map Service initialized. Style: %s, OSRM: %s, Photon: %s", cfg.MapLibreStyleURL, osrmURL, photonURL)
 
 	h := handlers.NewMapHandler(mapSvc)
 

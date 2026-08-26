@@ -103,15 +103,97 @@ func (h *MapHandler) ProxySprite(c *gin.Context) {
 	}
 }
 
+// Route proxies OSRM turn-by-turn routing requests.
+func (h *MapHandler) Route(c *gin.Context) {
+	profile := c.DefaultQuery("profile", "driving")
+	coords := c.Query("coordinates")
+	if coords == "" {
+		// Fallback to origin/destination params: ?origin=lat,lng&destination=lat,lng
+		origin := c.Query("origin")
+		dest := c.Query("destination")
+		if origin != "" && dest != "" {
+			coords = fmt.Sprintf("%s;%s", origin, dest)
+		}
+	}
+
+	if coords == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "coordinates parameter required (e.g. lon1,lat1;lon2,lat2)"})
+		return
+	}
+
+	payload, err := h.svc.GetRoute(c.Request.Context(), profile, coords)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.Header("Content-Type", "application/json")
+	c.Data(http.StatusOK, "application/json", payload)
+}
+
+// Search proxies geocoding search queries to Photon/Nominatim.
+func (h *MapHandler) Search(c *gin.Context) {
+	q := c.Query("q")
+	if q == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "query parameter 'q' required"})
+		return
+	}
+
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
+	payload, err := h.svc.SearchGeocode(c.Request.Context(), q, limit)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.Header("Content-Type", "application/json")
+	c.Data(http.StatusOK, "application/json", payload)
+}
+
+// Reverse proxies GPS reverse-geocoding queries to Photon/Nominatim.
+func (h *MapHandler) Reverse(c *gin.Context) {
+	latStr := c.Query("lat")
+	lonStr := c.Query("lon")
+	if latStr == "" || lonStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "both 'lat' and 'lon' parameters required"})
+		return
+	}
+
+	lat, err1 := strconv.ParseFloat(latStr, 64)
+	lon, err2 := strconv.ParseFloat(lonStr, 64)
+	if err1 != nil || err2 != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid lat or lon coordinates"})
+		return
+	}
+
+	payload, err := h.svc.ReverseGeocode(c.Request.Context(), lat, lon)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.Header("Content-Type", "application/json")
+	c.Data(http.StatusOK, "application/json", payload)
+}
+
+// Health returns runtime map proxy diagnostics.
+func (h *MapHandler) Health(c *gin.Context) {
+	c.JSON(http.StatusOK, h.svc.HealthCheck(c.Request.Context()))
+}
+
 // RegisterRoutes attaches the map endpoints to the gin router.
 func (h *MapHandler) RegisterRoutes(router *gin.Engine) {
 	mapGroup := router.Group("/api/v1/map")
 	{
+		mapGroup.GET("/health", h.Health)
 		mapGroup.GET("/style.json", h.StyleJSON)
 		mapGroup.GET("/tiles/:source/:z/:x/:y", h.ProxyTile)
 		mapGroup.GET("/glyphs/:fontstack/:start-:end.pbf", h.ProxyGlyphs)
 		mapGroup.GET("/sprites/:id@2x.:ext", h.ProxySprite)
 		mapGroup.GET("/sprites/:file", h.ProxySprite)
+		mapGroup.GET("/route", h.Route)
+		mapGroup.GET("/search", h.Search)
+		mapGroup.GET("/reverse", h.Reverse)
 	}
 }
 
