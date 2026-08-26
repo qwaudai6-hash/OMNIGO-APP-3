@@ -24,13 +24,22 @@
       "style": "style.json",
       "tilejson": {
         "type": "overlay",
-        "bounds": [60.872, 23.634, 77.84, 37.084]
+        "bounds": [50.0, 22.0, 78.0, 38.0]
       }
     }
   },
   "data": {
     "v3": {
       "mbtiles": "pakistan.mbtiles"
+    },
+    "pakistan": {
+      "mbtiles": "pakistan.mbtiles"
+    },
+    "uae": {
+      "mbtiles": "uae.mbtiles"
+    },
+    "dubai": {
+      "mbtiles": "uae.mbtiles"
     }
   }
 }

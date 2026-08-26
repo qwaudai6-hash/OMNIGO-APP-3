@@ -7,33 +7,38 @@
 set -euo pipefail
 
 MAP_DIR="${MAP_STORAGE_DIR:-/opt/omnigo/map-data}"
-REGION_NAME="${MAP_REGION:-pakistan}"
-OSM_PBF="${MAP_DIR}/osm/${REGION_NAME}.osm.pbf"
-ROUTING_DIR="${MAP_DIR}/routing/${REGION_NAME}"
+REGION_NAME="${MAP_REGION:-all}"
 
-if [[ ! -f "$OSM_PBF" ]]; then
-    echo "[!] OSM PBF file not found at ${OSM_PBF}. Running sync_map_data.sh first..."
-    ./scripts/sync_map_data.sh
+TARGET_REGIONS=("pakistan" "uae")
+if [[ "$REGION_NAME" != "all" ]]; then
+    IFS=',' read -ra TARGET_REGIONS <<< "$REGION_NAME"
 fi
 
-mkdir -p "$ROUTING_DIR"
-cp -u "$OSM_PBF" "${ROUTING_DIR}/${REGION_NAME}.osm.pbf" || true
+for reg in "${TARGET_REGIONS[@]}"; do
+    reg_clean=$(echo "$reg" | tr '[:upper:]' '[:lower:]' | xargs)
+    OSM_PBF="${MAP_DIR}/osm/${reg_clean}.osm.pbf"
+    ROUTING_DIR="${MAP_DIR}/routing/${reg_clean}"
 
-echo "=== [OMNIGO OSRM Processor] Processing Road Graph for ${REGION_NAME} ==="
+    if [[ ! -f "$OSM_PBF" ]]; then
+        echo "[!] OSM PBF file for ${reg_clean} not found. Running sync_map_data.sh..."
+        ./scripts/sync_map_data.sh
+    fi
 
-# 1. Extract road graph
-echo "==> 1/3 Extracting road graph (osrm-extract)..."
-docker run --rm -t -v "${ROUTING_DIR}:/data" ghcr.io/project-osrm/osrm-backend:latest \
-    osrm-extract -p /opt/car.lua "/data/${REGION_NAME}.osm.pbf"
+    mkdir -p "$ROUTING_DIR"
+    cp -u "$OSM_PBF" "${ROUTING_DIR}/${reg_clean}.osm.pbf" || true
 
-# 2. Partition routing cells (Multi-Level Dijkstra)
-echo "==> 2/3 Partitioning graph (osrm-partition)..."
-docker run --rm -t -v "${ROUTING_DIR}:/data" ghcr.io/project-osrm/osrm-backend:latest \
-    osrm-partition "/data/${REGION_NAME}.osrm"
+    echo "=== [OMNIGO OSRM Processor] Compiling Road Graph for ${reg_clean} ==="
 
-# 3. Customize metrics & turn penalties
-echo "==> 3/3 Customizing turn penalties (osrm-customize)..."
-docker run --rm -t -v "${ROUTING_DIR}:/data" ghcr.io/project-osrm/osrm-backend:latest \
-    osrm-customize "/data/${REGION_NAME}.osrm"
+    docker run --rm -t -v "${ROUTING_DIR}:/data" ghcr.io/project-osrm/osrm-backend:latest \
+        osrm-extract -p /opt/car.lua "/data/${reg_clean}.osm.pbf"
 
-echo "=== [SUCCESS] OSRM routing graph compiled at ${ROUTING_DIR} ==="
+    docker run --rm -t -v "${ROUTING_DIR}:/data" ghcr.io/project-osrm/osrm-backend:latest \
+        osrm-partition "/data/${reg_clean}.osrm"
+
+    docker run --rm -t -v "${ROUTING_DIR}:/data" ghcr.io/project-osrm/osrm-backend:latest \
+        osrm-customize "/data/${reg_clean}.osrm"
+
+    echo "[+] OSRM routing graph ready for ${reg_clean} at ${ROUTING_DIR}."
+done
+
+echo "=== [SUCCESS] All regional OSRM routing graphs compiled successfully! ==="
