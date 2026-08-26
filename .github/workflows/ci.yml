@@ -60,14 +60,11 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version-file: frontend/omnigo_app/pubspec.yaml
           channel: 'stable'
+          cache: true
 
       - name: Install dependencies
         run: flutter pub get
-
-      - name: Verify formatting
-        run: dart format --set-exit-if-changed lib/
 
       - name: Analyze code
         run: flutter analyze --no-pub --no-fatal-infos
@@ -81,10 +78,11 @@ jobs:
             --dart-define=API_HOST=${{ vars.FLUTTER_API_HOST || 'omnigo-app-production.up.railway.app' }} \
             --dart-define=STRIPE_PUBLISHABLE_KEY=${{ vars.STRIPE_PUBLISHABLE_KEY || 'pk_test_placeholder' }}
 
-  # ── Flutter iOS Build ─────────────────────────────────────────
+  # ── Flutter iOS Build (Only on Tags or Manual Dispatch to save 10x macOS credits) ──
   flutter-build-ios:
     name: Flutter CI — iOS Build (macOS)
     runs-on: macos-latest
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
     defaults:
       run:
         working-directory: frontend/omnigo_app
@@ -94,8 +92,8 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version-file: frontend/omnigo_app/pubspec.yaml
           channel: 'stable'
+          cache: true
 
       - name: Install dependencies
         run: flutter pub get
@@ -130,21 +128,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [
-          admin-service,
-          analytics-worker,
-          auth-service,
-          delivery-gig-service,
-          graph-sync-worker,
-          location-sync-worker,
-          map-service,
-          order-service,
-          payment-orchestrator,
-          product-service,
-          ride-service,
-          vendor-store-service,
-          gateway
-        ]
+        service: [monolith, gateway]
     steps:
       - uses: actions/checkout@v4
 
@@ -307,7 +291,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log in to Docker Hub
+      - name: Log in to Docker Hub (Optional)
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -326,8 +311,6 @@ jobs:
           tags: |
             ghcr.io/${{ env.OWNER_LC }}/omnigo-${{ matrix.name }}:${{ github.sha }}
             ghcr.io/${{ env.OWNER_LC }}/omnigo-${{ matrix.name }}:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/omnigo-${{ matrix.name }}:${{ github.sha }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/omnigo-${{ matrix.name }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

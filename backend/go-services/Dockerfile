@@ -8,7 +8,7 @@
 # All other services communicate over Railway private networking.
 
 # ═══ Stage 1: Build ═══════════════════════════════════════════
-FROM golang:1.26.5-alpine AS builder
+FROM golang:1.22-alpine AS builder
 
 RUN apk add --no-cache git ca-certificates gcc musl-dev bash
 
