@@ -6,12 +6,12 @@
 # ==============================================================================
 set -euo pipefail
 
-RUNNER_REPO_URL="${1:-https://github.com/itdeveloperlimited-design/OMNIGO-APP-2}"
+RUNNER_REPO_URL="${1:-https://github.com/qwaudai6-hash/OMNIGO-APP-3}"
 RUNNER_TOKEN="${2:-}"
 
 if [[ -z "$RUNNER_TOKEN" ]]; then
     echo "Usage: sudo ./scripts/setup_self_hosted_runner.sh <REPO_URL> <GITHUB_RUNNER_TOKEN>"
-    echo "Example: sudo ./scripts/setup_self_hosted_runner.sh https://github.com/itdeveloperlimited-design/OMNIGO-APP-2 AABC12345XYZ"
+    echo "Example: sudo ./scripts/setup_self_hosted_runner.sh https://github.com/qwaudai6-hash/OMNIGO-APP-3 AABC12345XYZ"
     exit 1
 fi
 
