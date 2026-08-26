@@ -695,7 +695,7 @@ func (s *AdminSurveillanceService) ResolveDispute(ctx context.Context, orderTrac
 		if err != nil {
 			return err
 		}
-		_, _ = s.dbReader.Exec(ctx, "UPDATE disputes SET status = 'resolved', resolution = 'admin_refund', updated_at = NOW() WHERE order_tracking_id = $1 AND status = 'open'", orderTrackingID)
+		_, _ = s.dbReader.Exec(ctx, "UPDATE disputes SET status = 'resolved', resolution = 'admin_refund', resolved_at = NOW(), updated_at = NOW() WHERE order_tracking_id = $1 AND status = 'open'", orderTrackingID)
 
 		// Credit the customer wallet directly so the refund is immediately usable.
 		upsertWallet := `
@@ -732,7 +732,7 @@ func (s *AdminSurveillanceService) ResolveDispute(ctx context.Context, orderTrac
 		if err != nil {
 			return err
 		}
-		_, _ = s.dbReader.Exec(ctx, "UPDATE disputes SET status = 'resolved', resolution = 'admin_customer_guilty', updated_at = NOW() WHERE order_tracking_id = $1 AND status = 'open'", orderTrackingID)
+		_, _ = s.dbReader.Exec(ctx, "UPDATE disputes SET status = 'resolved', resolution = 'admin_customer_guilty', resolved_at = NOW(), updated_at = NOW() WHERE order_tracking_id = $1 AND status = 'open'", orderTrackingID)
 		return nil
 	}
 

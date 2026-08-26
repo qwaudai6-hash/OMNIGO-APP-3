@@ -244,12 +244,13 @@ func (s *APIKeyService) Delete(ctx context.Context, provider, keyName, actorID, 
 	}
 	defer tx.Rollback(ctx)
 
+	var prevID uuid.UUID
 	var prevBlob []byte
 	err = tx.QueryRow(ctx, `
-		SELECT encrypted_value FROM payment_api_keys
+		SELECT id, encrypted_value FROM payment_api_keys
 		WHERE provider = $1 AND key_name = $2
 		FOR UPDATE
-	`, provider, keyName).Scan(&prevBlob)
+	`, provider, keyName).Scan(&prevID, &prevBlob)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil // idempotent
 	}
@@ -266,8 +267,8 @@ func (s *APIKeyService) Delete(ctx context.Context, provider, keyName, actorID, 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO payment_api_key_audit
 		    (payment_key_id, provider, key_name, action, prev_fingerprint, actor_id, actor_ip)
-		VALUES ((SELECT id FROM payment_api_keys WHERE provider = $1 AND key_name = $2), $1, $2, 'delete', $3, $4, $5)
-	`, provider, keyName, fp, actorID, actorIP)
+		VALUES ($1, $2, $3, 'delete', $4, $5, $6)
+	`, prevID, provider, keyName, fp, actorID, actorIP)
 	if err != nil {
 		return "", fmt.Errorf("audit insert: %w", err)
 	}

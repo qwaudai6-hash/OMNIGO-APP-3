@@ -27,6 +27,15 @@ ALTER TABLE disputes ALTER COLUMN id TYPE uuid
     USING (md5(id::text || clock_timestamp()::text))::uuid;
 ALTER TABLE disputes ADD COLUMN IF NOT EXISTS resolved_at   TIMESTAMPTZ;
 ALTER TABLE disputes ADD COLUMN IF NOT EXISTS resolved_by   VARCHAR(50);
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'disputes' AND column_name = 'tracking_id'
+    ) THEN
+        ALTER TABLE disputes ALTER COLUMN tracking_id DROP NOT NULL;
+    END IF;
+END $$;
 
 -- ── 3. vendor_payouts ───────────────────────────────────────────────────
 ALTER TABLE vendor_payouts ALTER COLUMN id DROP DEFAULT;
@@ -84,3 +93,15 @@ CREATE TABLE IF NOT EXISTS payment_idempotency (
     transaction_id TEXT,
     expires_at     TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '24 hours'
 );
+
+-- ── 10. chat_messages ───────────────────────────────────────────────────
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'chat_messages' AND column_name = 'id' AND data_type = 'bigint'
+    ) THEN
+        ALTER TABLE chat_messages ALTER COLUMN id DROP DEFAULT;
+        ALTER TABLE chat_messages ALTER COLUMN id TYPE VARCHAR(64);
+    END IF;
+END $$;

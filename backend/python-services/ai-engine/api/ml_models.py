@@ -350,7 +350,7 @@ async def get_co_bought_recommendations(product_tracking_id: str, top_k: int = 4
                     oi.product_tracking_id,
                     COUNT(DISTINCT oi.order_tracking_id) AS co_occurrence_count
                 FROM order_items oi
-                JOIN target_orders to ON oi.order_tracking_id = to.order_tracking_id
+                JOIN target_orders t_ord ON oi.order_tracking_id = t_ord.order_tracking_id
                 WHERE oi.product_tracking_id != $1
                 GROUP BY oi.product_tracking_id
                 ORDER BY co_occurrence_count DESC

@@ -362,17 +362,17 @@ CREATE INDEX IF NOT EXISTS idx_cod_debts_rider ON cod_debts(rider_tracking_id);
 
 -- ── Disputes ───────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS disputes (
-    id            BIGSERIAL PRIMARY KEY,
-    tracking_id   VARCHAR(50) UNIQUE NOT NULL,
-    order_tracking_id VARCHAR(50),
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_tracking_id VARCHAR(50) NOT NULL,
     filed_by      VARCHAR(50) NOT NULL,
     reason        TEXT NOT NULL,
     status        VARCHAR(30) DEFAULT 'open',
     resolution    TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resolved_at   TIMESTAMPTZ,
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_disputes_tracking_id ON disputes(tracking_id);
+CREATE INDEX IF NOT EXISTS idx_disputes_order_tracking_id ON disputes(order_tracking_id);
 CREATE INDEX IF NOT EXISTS idx_disputes_status ON disputes(status);
 
 -- ── Reviews ─────────────────────────────────────────────────────────────────
