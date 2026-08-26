@@ -309,17 +309,26 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ── Optional: Deploy to Railway (push only) ─────────────────
-  # Requires RAILWAY_TOKEN and RAILWAY_PROJECT_ID secrets.
-  # Uncomment and configure Railway CLI step when ready.
-  # deploy-railway:
-  #   name: Deploy to Railway
-  #   runs-on: ubuntu-latest
-  #   needs: [publish-images]
-  #   if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: railway/cli@v2
-  #       with:
-  #         railway_token: ${{ secrets.RAILWAY_TOKEN }}
-  #     - run: railway up --detach
+  # ── Deploy to Railway (push only) ───────────────────────────
+  deploy-railway:
+    name: Deploy to Railway
+    runs-on: ubuntu-latest
+    needs: [publish-images]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_PUBLIC_URL: ${{ secrets.RAILWAY_PUBLIC_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy Monolith & Microservices via Railway CLI
+        if: env.RAILWAY_TOKEN != ''
+        run: |
+          npm install -g @railway/cli
+          railway up --detach
+
+      - name: Verify Live Endpoints
+        if: env.RAILWAY_PUBLIC_URL != ''
+        run: |
+          chmod +x ./scripts/verify_railway_deployment.sh
+          ./scripts/verify_railway_deployment.sh
