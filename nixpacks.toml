@@ -1,0 +1,10 @@
+[phases.setup]
+nixPkgs = ["go", "gcc", "bash", "wget", "curl"]
+
+[phases.build]
+cmds = [
+  "cd backend/go-services && chmod +x build_all.sh && ./build_all.sh"
+]
+
+[start]
+cmd = "exec backend/go-services/bin/monolith"
