@@ -23,6 +23,9 @@ RUN go mod download
 # Copy source code
 COPY . .
 
+# Ensure go.mod and go.sum are cleanly synced inside builder container
+RUN go mod tidy
+
 # Build all services + gateway. Errors fail the build (no 2>/dev/null).
 RUN chmod +x ./build_all.sh && ./build_all.sh
 
