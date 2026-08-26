@@ -36,7 +36,7 @@ class CustomerDashboardScreen extends StatefulWidget {
 
 class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   int _currentIndex = 0;
-  MaplibreMapController? _mapController;
+  MapLibreMapController? _mapController;
   // Default to Pakistan's centroid (≈ Rahim Yar Khan) — neutral, not
   // Lahore-specific. This is only shown for the few seconds before the
   // first GPS fix arrives, after which _fetchMapCenterFromGPS() replaces

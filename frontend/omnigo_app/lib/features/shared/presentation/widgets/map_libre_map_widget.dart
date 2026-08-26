@@ -34,7 +34,7 @@ class MapLibreMapWidget extends StatefulWidget {
     this.markers = const {},
     this.polylines = const [],
     this.myLocationEnabled = true,
-    this.myLocationTrackingMode = MyLocationTrackingMode.Tracking,
+    this.myLocationTrackingMode = MyLocationTrackingMode.tracking,
     this.onMapCreated,
     this.onStyleLoaded,
     this.onMapClick,
@@ -62,7 +62,7 @@ class MapLibreMapWidget extends StatefulWidget {
   /// Optional override. Defaults to the internal map-service style endpoint.
   final String? styleUrl;
 
-  final void Function(MaplibreMapController controller)? onMapCreated;
+  final void Function(MapLibreMapController controller)? onMapCreated;
   final VoidCallback? onStyleLoaded;
   final void Function(Point<double>, LatLng)? onMapClick;
   final OnUserLocationUpdated? onUserLocationUpdated;
@@ -72,7 +72,7 @@ class MapLibreMapWidget extends StatefulWidget {
 }
 
 class _MapLibreMapWidgetState extends State<MapLibreMapWidget> {
-  MaplibreMapController? _controller;
+  MapLibreMapController? _controller;
   bool _styleLoaded = false;
 
   String get _styleUrl =>
@@ -95,7 +95,7 @@ class _MapLibreMapWidgetState extends State<MapLibreMapWidget> {
     }
   }
 
-  Future<void> _onMapCreated(MaplibreMapController controller) async {
+  Future<void> _onMapCreated(MapLibreMapController controller) async {
     _controller = controller;
     widget.onMapCreated?.call(controller);
     controller.onSymbolTapped.add(_onSymbolTapped);
@@ -207,7 +207,7 @@ class _MapLibreMapWidgetState extends State<MapLibreMapWidget> {
 
   @override
   Widget build(BuildContext context) {
-    return MaplibreMap(
+    return MapLibreMap(
       styleString: _styleUrl,
       initialCameraPosition: CameraPosition(
         target: widget.initialCenter ?? const LatLng(31.5204, 74.3587), // Lahore
@@ -229,7 +229,7 @@ class _MapLibreMapWidgetState extends State<MapLibreMapWidget> {
 
 /// Helper to load a remote PNG icon into the map style at runtime.
 Future<void> addNetworkImageToMap(
-  MaplibreMapController controller,
+  MapLibreMapController controller,
   String name,
   String url,
 ) async {

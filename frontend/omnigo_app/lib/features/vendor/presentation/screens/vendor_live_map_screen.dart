@@ -48,7 +48,7 @@ class VendorLiveMapScreen extends StatefulWidget {
 }
 
 class VendorLiveMapScreenState extends State<VendorLiveMapScreen> {
-  MaplibreMapController? _mapController;
+  MapLibreMapController? _mapController;
   LatLng? _storeLocation; // Set by API/GPS only — no hardcoded default
   // ignore: unused_field
   bool _isLocationLoaded = false;

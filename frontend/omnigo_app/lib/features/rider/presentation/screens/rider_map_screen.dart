@@ -79,7 +79,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
   // ignore: unused_field
   final WebSocketClient _wsClient = sl<WebSocketClient>();
   final ApiClient _apiClient = sl<ApiClient>();
-  MaplibreMapController? _mapController;
+  MapLibreMapController? _mapController;
   List<dynamic> _codDebts = [];
   bool _isLoadingCodDebts = false;
   Map<String, dynamic>? _walletSummary;
