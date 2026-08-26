@@ -5,10 +5,9 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 env:
-  # Prevent accidental remote connections during CI tests.
-  # Real DB/Redis/Neo4j are used only in deployed environments, not CI.
   CI_ENVIRONMENT: true
 
 jobs:
@@ -73,10 +72,13 @@ jobs:
         run: flutter test --no-pub
 
       - name: Build Android APK (smoke)
+        env:
+          API_HOST: ${{ vars.FLUTTER_API_HOST }}
+          STRIPE_KEY: ${{ vars.STRIPE_PUBLISHABLE_KEY }}
         run: |
           flutter build apk --debug \
-            --dart-define=API_HOST=${{ vars.FLUTTER_API_HOST || 'omnigo-app-production.up.railway.app' }} \
-            --dart-define=STRIPE_PUBLISHABLE_KEY=${{ vars.STRIPE_PUBLISHABLE_KEY || 'pk_test_placeholder' }}
+            --dart-define=API_HOST="${API_HOST:-omnigo-app-production.up.railway.app}" \
+            --dart-define=STRIPE_PUBLISHABLE_KEY="${STRIPE_KEY:-pk_test_placeholder}"
 
   # ── Flutter iOS Build (Only on Tags or Manual Dispatch to save 10x macOS credits) ──
   flutter-build-ios:
@@ -99,10 +101,13 @@ jobs:
         run: flutter pub get
 
       - name: Build iOS (no code signing)
+        env:
+          API_HOST: ${{ vars.FLUTTER_API_HOST }}
+          STRIPE_KEY: ${{ vars.STRIPE_PUBLISHABLE_KEY }}
         run: |
           flutter build ios --no-codesign \
-            --dart-define=API_HOST=${{ vars.FLUTTER_API_HOST || 'omnigo-app-production.up.railway.app' }} \
-            --dart-define=STRIPE_PUBLISHABLE_KEY=${{ vars.STRIPE_PUBLISHABLE_KEY || 'pk_test_placeholder' }}
+            --dart-define=API_HOST="${API_HOST:-omnigo-app-production.up.railway.app}" \
+            --dart-define=STRIPE_PUBLISHABLE_KEY="${STRIPE_KEY:-pk_test_placeholder}"
 
   # ── Security Scan ───────────────────────────────────────────
   security-scan:
