@@ -3,7 +3,7 @@
 # ──────────────────────────────────────────────────────────────
 # Standalone open-source OSM geocoder & reverse search engine for Railway.
 
-FROM openjdk:17-jre-slim
+FROM eclipse-temurin:17-jre-jammy
 
 WORKDIR /data
 
