@@ -27,6 +27,7 @@ SERVICES=(
   "graph-sync-worker:cmd/graph-sync-worker/main.go"
   "location-sync-worker:cmd/location-sync-worker/main.go"
   "map-service:cmd/map-service/main.go"
+  "analytics-worker:cmd/analytics-worker/main.go"
   "monolith:cmd/monolith/main.go"
 )
 

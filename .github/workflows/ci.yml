@@ -133,7 +133,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [monolith, gateway]
+        service: [
+          admin-service,
+          analytics-worker,
+          auth-service,
+          delivery-gig-service,
+          gateway,
+          graph-sync-worker,
+          location-sync-worker,
+          map-service,
+          monolith,
+          order-service,
+          payment-orchestrator,
+          product-service,
+          ride-service,
+          vendor-store-service,
+          websocket-gateway
+        ]
     steps:
       - uses: actions/checkout@v4
 
