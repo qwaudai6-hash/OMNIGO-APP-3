@@ -3,6 +3,12 @@ allprojects {
         google()
         mavenCentral()
     }
+    configurations.all {
+        resolutionStrategy {
+            force("androidx.core:core:1.15.0")
+            force("androidx.core:core-ktx:1.15.0")
+        }
+    }
 }
 
 val newBuildDir: Directory =
@@ -17,6 +23,12 @@ subprojects {
 }
 subprojects {
     project.evaluationDependsOn(":app")
+    configurations.all {
+        resolutionStrategy {
+            force("androidx.core:core:1.15.0")
+            force("androidx.core:core-ktx:1.15.0")
+        }
+    }
 }
 
 subprojects {
