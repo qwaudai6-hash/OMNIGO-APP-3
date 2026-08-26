@@ -9,7 +9,7 @@ FROM maptiler/tileserver-gl:latest
 WORKDIR /data
 
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends wget curl ca-certificates bash && rm -rf /var/lib/apt/lists/*
+RUN (apt-get update && apt-get install -y --no-install-recommends wget curl ca-certificates bash && rm -rf /var/lib/apt/lists/*) || true
 
 COPY infrastructure/docker/dockerfiles/tileserver-entrypoint.sh /tileserver-entrypoint.sh
 RUN chmod +x /tileserver-entrypoint.sh

@@ -9,9 +9,12 @@ FROM osrm/osrm-backend:latest
 
 WORKDIR /data
 
-# Install wget & certificates for downloading map data
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends wget ca-certificates bash curl jq && \
+# Configure Debian archive repositories for Stretch EOL and install required tools
+RUN sed -i 's/deb.debian.org/archive.debian.org/g' /etc/apt/sources.list && \
+    sed -i 's|security.debian.org/debian-security|archive.debian.org/debian-security|g' /etc/apt/sources.list && \
+    sed -i '/stretch-updates/d' /etc/apt/sources.list && \
+    apt-get -o Acquire::Check-Valid-Until=false update && \
+    apt-get install -y --no-install-recommends wget curl ca-certificates bash jq && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy the smart entrypoint
