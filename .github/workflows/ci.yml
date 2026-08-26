@@ -259,6 +259,14 @@ jobs:
             file: backend/go-services/Dockerfile
             build_args: SERVICE=gateway
             name: gateway
+          - context: backend/go-services
+            file: backend/go-services/Dockerfile
+            build_args: SERVICE=monolith
+            name: monolith
+          - context: backend/go-services
+            file: backend/go-services/Dockerfile
+            build_args: SERVICE=websocket-gateway
+            name: websocket-gateway
           - context: backend/node-services/notification-service
             file: backend/node-services/notification-service/Dockerfile
             name: notification-service
