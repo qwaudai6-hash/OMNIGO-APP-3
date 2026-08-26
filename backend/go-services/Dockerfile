@@ -12,13 +12,12 @@ FROM golang:alpine AS builder
 
 RUN apk add --no-cache git ca-certificates gcc musl-dev bash
 
-ENV GOTOOLCHAIN=auto
+ENV GOPROXY="https://proxy.golang.org,https://goproxy.io,direct"
+ENV GODEBUG="http2client=0"
 
-WORKDIR /app
-
-# Cache dependency downloads
+# Cache dependency downloads with automatic retry
 COPY go.mod go.sum ./
-RUN go mod download
+RUN for i in 1 2 3 4 5; do go mod download && break || (echo "go mod download retry $i..." && sleep 2); done
 
 # Copy source code
 COPY . .

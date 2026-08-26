@@ -3,11 +3,14 @@ FROM golang:1.23-alpine AS builder
 
 RUN apk add --no-cache git ca-certificates gcc musl-dev bash
 
+ENV GOPROXY="https://proxy.golang.org,https://goproxy.io,direct"
+ENV GODEBUG="http2client=0"
+
 WORKDIR /app/backend/go-services
 
-# Cache Go dependencies
+# Cache Go dependencies with retry
 COPY backend/go-services/go.mod backend/go-services/go.sum ./
-RUN go mod download
+RUN for i in 1 2 3 4 5; do go mod download && break || (echo "go mod download retry $i..." && sleep 2); done
 
 # Copy backend source
 COPY backend/go-services/ .
