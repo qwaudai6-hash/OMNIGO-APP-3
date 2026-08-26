@@ -194,6 +194,50 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Smoke build tigerbeetle
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infrastructure/docker/dockerfiles/tigerbeetle.Dockerfile
+          push: false
+          load: true
+          tags: omnigo/tigerbeetle:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke build osrm-backend
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infrastructure/docker/dockerfiles/osrm.Dockerfile
+          push: false
+          load: true
+          tags: omnigo/osrm-backend:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke build tileserver-gl
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infrastructure/docker/dockerfiles/tileserver.Dockerfile
+          push: false
+          load: true
+          tags: omnigo/tileserver-gl:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke build photon
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infrastructure/docker/dockerfiles/photon.Dockerfile
+          push: false
+          load: true
+          tags: omnigo/photon:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   # ── Publish Images (push only) ──────────────────────────────
   publish-images:
     name: Publish Images
@@ -279,6 +323,18 @@ jobs:
           - context: backend/python-services/ai-engine
             file: backend/python-services/ai-engine/Dockerfile
             name: ai-engine
+          - context: .
+            file: infrastructure/docker/dockerfiles/tigerbeetle.Dockerfile
+            name: tigerbeetle
+          - context: .
+            file: infrastructure/docker/dockerfiles/osrm.Dockerfile
+            name: osrm-backend
+          - context: .
+            file: infrastructure/docker/dockerfiles/tileserver.Dockerfile
+            name: tileserver-gl
+          - context: .
+            file: infrastructure/docker/dockerfiles/photon.Dockerfile
+            name: photon
     steps:
       - uses: actions/checkout@v4
 

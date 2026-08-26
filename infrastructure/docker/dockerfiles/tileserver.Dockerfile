@@ -1,16 +1,19 @@
 # ──────────────────────────────────────────────────────────────
-# OMNIGO PLATFORM — Production TileServer GL Dockerfile (Railway Ready)
+# OMNIGO PLATFORM — Production TileServer GL Dockerfile (Railway Pro Ready)
 # ──────────────────────────────────────────────────────────────
-# This Dockerfile packages TileServer GL with the Pakistan vector
-# tile dataset (MBTiles) and style configuration for 100% self-hosted
-# map rendering on Railway or Kubernetes.
+# Packages TileServer GL with our smart entrypoint.
+# Vector tile data and styles reside on Railway Persistent Volume (/data).
 
 FROM maptiler/tileserver-gl:latest
 
 WORKDIR /data
 
-# Expose standard TileServer port
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends wget curl ca-certificates bash && rm -rf /var/lib/apt/lists/*
+
+COPY infrastructure/docker/dockerfiles/tileserver-entrypoint.sh /tileserver-entrypoint.sh
+RUN chmod +x /tileserver-entrypoint.sh
+
 EXPOSE 8080
 
-# Run TileServer GL with self-hosted config
-CMD ["--config", "/data/config.json", "--port", "8080", "--bind", "0.0.0.0"]
+ENTRYPOINT ["/tileserver-entrypoint.sh"]

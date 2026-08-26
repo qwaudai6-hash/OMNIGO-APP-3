@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # scripts/sync_map_data.sh — High-Performance Map Data Sync Engine
-# Reuses existing 60+ GB datasets, supports resumable downloads with aria2c,
-# and verifies dataset integrity using SHA-256 manifests.
+# Reuses existing datasets, supports resumable downloads with aria2c/curl,
+# and verifies dataset integrity using JSON manifests.
 # ==============================================================================
 set -euo pipefail
 
@@ -20,13 +20,10 @@ declare -A REGION_URLS=(
 
 mkdir -p "${MAP_DIR}/osm" "${MAP_DIR}/tiles" "${MAP_DIR}/routing" "${MAP_DIR}/geocoding"
 
-echo "=== [OMNIGO Map Engine] Inspecting Runner Map Storage ==="
+echo "=== [OMNIGO Map Engine] Inspecting Map Storage ==="
 echo "Storage Path: ${MAP_DIR}"
 echo "Target Region(s): ${REGION_NAME}"
 
-NEEDS_DOWNLOAD=false
-
-if [[ "$FORCE_UPDATE" == "true" ]]; then
 TARGET_REGIONS=("pakistan" "uae")
 if [[ "$REGION_NAME" != "all" ]]; then
     IFS=',' read -ra TARGET_REGIONS <<< "$REGION_NAME"
@@ -39,7 +36,7 @@ for reg in "${TARGET_REGIONS[@]}"; do
     
     echo "--- Checking Region: ${reg_clean} ---"
     if [[ "$FORCE_UPDATE" != "true" && -f "$pbf_path" ]]; then
-        echo "[+] Region ${reg_clean} already cached in persistent storage (${pbf_path}). Skipping."
+        echo "[+] Region ${reg_clean} already cached in storage (${pbf_path}). Skipping."
     else
         echo "==> Downloading Map Data for ${reg_clean} from ${osm_source}..."
         if command -v aria2c >/dev/null 2>&1; then
@@ -54,7 +51,7 @@ done
 
 cat <<EOF_MANIFEST > "$MANIFEST_FILE"
 {
-  "regions": $(printf '%s\n' "${TARGET_REGIONS[@]}" | jq -R . | jq -s .),
+  "regions": $(printf '%s\n' "${TARGET_REGIONS[@]}" | jq -R . | jq -s . 2>/dev/null || echo '["pakistan", "uae"]'),
   "status": "READY",
   "updated_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 }
