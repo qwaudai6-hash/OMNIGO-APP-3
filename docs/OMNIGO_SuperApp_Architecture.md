@@ -64,17 +64,27 @@ graph TD
 
 ## 2. Universal Tracking ID (UTID) Schema
 
-To maintain complete tracking visibility across the multi-vendor, multi-service chain, the database automatically assigns UUID-based tracking IDs to all entities upon registration:
+To maintain complete tracking visibility across the multi-vendor, multi-service chain, the system automatically assigns prefixed tracking IDs to all entities upon registration.
+
+**Format (verified against code — `internal/shared/tracking/tracking.go`):**
+```
+<PREFIX>-<8 hex chars>        e.g. CUST-a1b2c3d4
+```
+The suffix is 8 hexadecimal characters generated from 4 random bytes via `crypto/rand`. If OS entropy ever fails (GW-23), a splitmix-style timestamp churn is used as an emergency fallback so IDs stay unguessable and unique under concurrency.
 
 | UTID Prefix | Entity | Target Database | Description |
 | :--- | :--- | :--- | :--- |
 | `CUST-` | Customer | `users` (Role: customer) | Tracks buyer identity, payment settings, order history. |
 | `RIDR-` | Rider | `users` (Role: rider) | Tracks location, driver license status, deliveries, and ride status. |
 | `VEND-` | Vendor Owner | `users` (Role: vendor) | Tracks merchant profile and payouts. |
+| `ADMN-` | Admin | `users` (Role: admin) | Platform administrator identity (`GenerateForRole`). |
 | `STOR-` | Vendor Storefront | `vendor_stores` | Links products and custom inventory to the owner. |
 | `PROD-` | Product item | `products` | Links each product back to its parent `STOR-` store. |
-| `GIG-` | Broadcasted Delivery | `deliveries` | Active shipment delivery gig on maps. |
+| `ORD-` | Customer Order | `orders` | The purchase transaction linking `CUST-` ➔ `PROD-` ➔ `STOR-`. |
+| `DEL-` | Broadcasted Delivery Gig | `deliveries` | Active shipment delivery gig on maps. Linked to its parent order via `OrderTrackingID`. |
 | `RIDE-` | Uber-style hail request | `rides` | Active ride-hailing tracking ID. |
+
+> **Note:** Earlier drafts of this document used `GIG-` as the delivery prefix. The actual production code (`internal/delivery/service/delivery_service.go`) generates `DEL-` tracking IDs.
 
 ### UTID Lifecycle & Relationship Flowchart
 
@@ -98,11 +108,11 @@ graph TD
     %% Order & Delivery chain
     subgraph Transaction Chain
         CUST_ID -->|1. Purchases product| PROD_ID
-        PROD_ID -->|2. Generates transaction record| ORD_ID[ORD-bbbb]
+        PROD_ID -->|2. Generates transaction record| ORD_ID[ORD-e5f6a7b8]
         STOR_ID -->|3. Vendor accepts & issues| SLIP_ID[Delivery Slip]
-        SLIP_ID -->|4. Broadcasts location gig| GIG_ID[GIG-cccc]
-        GIG_ID -->|5. Binds pickup & delivery routes| Route[Route: STOR-yyyy ➔ CUST-xxxx]
-        RIDR_ID -->|6. Rider accepts Gig| GIG_ID
+        SLIP_ID -->|4. Broadcasts location gig| DEL_ID[DEL-c3d4e5f6]
+        DEL_ID -->|5. Binds pickup & delivery routes| Route[Route: STOR-yyyy ➔ CUST-xxxx]
+        RIDR_ID -->|6. Rider accepts Gig| DEL_ID
     end
 
     %% Complete tracking chain representation
@@ -110,6 +120,62 @@ graph TD
         ORD_ID -->|Admin Dashboard audit trail| UTID_Chain[UTID Chain: CUST-xxxx ➔ STOR-yyyy ➔ RIDR-xxxx]
     end
 ```
+
+### Order Chain Database Schema (Verified Against Migrations)
+
+Source of truth: `backend/go-services/migrations/000001_omnigo_baseline.up.sql` + incremental migrations.
+
+**Chain hub tables & linking columns:**
+
+```
+users (CUST- / VEND- / RIDR- / ADMN- all live here)
+│  tracking_id VARCHAR(50) UNIQUE  +  idx_users_tracking_id
+│
+├─► stores        store_tracking_id UNIQUE, vendor_tracking_id, idx(vendor, tracking_id)
+├─► products      product_tracking_id UNIQUE, vendor_tracking_id + store_tracking_id
+└─► orders ★ CHAIN HUB ★
+      order_tracking_id    VARCHAR(50) UNIQUE NOT NULL
+      customer_tracking_id VARCHAR(50) NOT NULL
+      store_tracking_id / vendor_tracking_id NOT NULL / rider_tracking_id (set on accept)
+      escrow_released, dispute_status, delivered_at   ← 48h escrow gate
+      indexes: customer, vendor, rider, store, status, payment_status, nonce
+```
+
+**Downstream chain tables (all keyed by `order_tracking_id`):**
+
+| Table | Own ID | Parent Links | Notable Constraint |
+| :--- | :--- | :--- | :--- |
+| `order_items` | — | order + product | `CHECK (quantity > 0)` |
+| `deliveries` | `tracking_id UNIQUE` (`DEL-`) | order + store + customer + rider | DB-enforced FSM: `CHECK (status IN ('broadcasting','accepted','picked_up','in_transit','completed','failed'))` |
+| `payment_transactions` | `transaction_id UNIQUE` | order | Partial unique index: only ONE active payment attempt per order |
+| `escrow_holds` | — | order + vendor | `hold_until` gates release |
+| `cod_debts` | — | rider + order | COD cash reconciliation |
+| `disputes` | `tracking_id UNIQUE` | order + filer | blocks escrow auto-release |
+| `ledger_entries` | `transaction_id UUID` | generic `reference_type + reference_id` | HMAC-SHA256 `signature` per entry |
+
+**Key integrity guarantees (database-enforced):**
+
+1. **Order idempotency** — duplicate orders are impossible even if Redis is down:
+```sql
+CONSTRAINT orders_idempotency_unique
+UNIQUE (customer_tracking_id, device_session_nonce);
+```
+
+2. **Single active payment attempt per order** (double-charge protection):
+```sql
+CREATE UNIQUE INDEX ux_payment_active_order
+ON payment_transactions(order_tracking_id)
+WHERE status IN ('processing','3ds_required','settlement_pending','gateway_pending');
+```
+
+3. **Hot-path indexes** (migration `000042`, Session 61 audit): `deliveries(customer_tracking_id)`, `orders(store_tracking_id)`, `cod_debts(order_tracking_id)`.
+
+> **⚠️ Design Note — No SQL Foreign Keys:** The chain is linked by indexed `*_tracking_id` columns, but there are **zero `FOREIGN KEY ... REFERENCES` constraints** in the entire migration set. Referential validation happens at the application layer (e.g. `order_repository.go` runs explicit `EXISTS` checks for STOR-/VEND-/PROD- inside the insert transaction). This is an intentional trade-off common in event-driven architectures:
+>
+> - ✅ Benefit: clean Debezium CDC streaming (no FK ordering/cascade issues), saga-friendly async writes across services.
+> - ⚠️ Risk: the database itself will not reject orphaned rows if application code has a bug; integrity depends on code discipline.
+>
+> If stricter guarantees are ever needed, deferred FK constraints on critical links (e.g. `orders.customer_tracking_id`) can be added incrementally.
 
 ---
 

@@ -27,8 +27,8 @@ func main() {
 	if cfg == nil {
 		cfg = &config.Config{
 			Port:        8080, // Auth Service on Gateway Routing Ingress 8080
-			DBWriterDSN: "postgres://admin:admin123@localhost:5432/omnigo?sslmode=disable",
-			DBReaderDSN: "postgres://admin:admin123@localhost:5432/omnigo?sslmode=disable",
+			DBWriterDSN: "postgres://admin:CHANGEME_ROTATED@localhost:5432/omnigo?sslmode=disable",
+			DBReaderDSN: "postgres://admin:CHANGEME_ROTATED@localhost:5432/omnigo?sslmode=disable",
 		}
 	} else if cfg.Port == 0 {
 		cfg.Port = 8080

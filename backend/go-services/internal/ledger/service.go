@@ -107,8 +107,8 @@ func (s *Service) Transfer(ctx context.Context, req TransferRequest) (uuid.UUID,
 	if req.IdempotencyKey != "" {
 		var existingTxID uuid.UUID
 		err := tx.QueryRow(ctx,
-			`SELECT transaction_id FROM ledger_entries WHERE idempotency_key = $1 LIMIT 1`,
-			req.IdempotencyKey,
+			`SELECT transaction_id FROM ledger_entries WHERE idempotency_key = $1 OR idempotency_key = $2 LIMIT 1`,
+			req.IdempotencyKey, req.IdempotencyKey+":debit",
 		).Scan(&existingTxID)
 		if err == nil {
 			// Idempotent hit — already processed

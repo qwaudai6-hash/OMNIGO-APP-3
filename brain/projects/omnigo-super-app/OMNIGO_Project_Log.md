@@ -534,3 +534,45 @@ Every user gets a prefix-based Tracking ID (UTID) assigned automatically at sign
 - ✅ Self-hosted map stack with Pakistan data acquisition script
 - ✅ Email-service delivers transactional emails
 
+---
+
+## Session 43: PayFast Hardening, Flow Consolidation & De-Hardcoding (August 25, 2026)
+
+**Goal:** Full audit of the PayFast Option C payment pipeline, fix every bug that could block or corrupt payments, consolidate the divergent Buy Now / checkout flows onto one production path, and eliminate all hardcoded deployment values.
+
+**Detailed execution log:** [[session_33_execution_log]]
+
+### Critical fixes
+
+- **Boot-panic elimination**: `NewClientFromEnv()` no longer panics on missing `PAYFAST_BASE_URL` — one env var previously crashed the entire payment orchestrator (Stripe/JazzCash/EasyPaisa/COD included). Graceful degradation to `IsConfigured()==false` + loud startup ERROR.
+- **Env template mismatch fixed**: code accepts both `PAYFAST_BASE_URL` (canonical) and `PAYFAST_API_URL` (legacy alias); `.env.example` files updated. Following the repo's own templates previously guaranteed a dead payment service.
+- **Detached settlement context**: `VerifyAndSettle`/`ExecuteSplit` use `context.WithoutCancel` — captured funds can never be stranded by a client disconnect mid-settlement.
+- **Circuit breaker sees 5xx**: any gateway `>=500` is now transient → breaker trips on real outages instead of hammering a dying upstream.
+- **Saved-card 3DS step-up**: tokenized responses can now carry `data_3ds_html`; saved-card payments route through the same 3DS callback machinery as new cards instead of misfailing.
+- **PCI leak guard**: PAN/CVV/CNIC/OTP/instrument-token are `json:"-"` on all request structs; serialization test enforces it.
+- **IPN retry semantics**: transient → `503` (gateway redelivers), unknown basket → `200 ignored`, validation → `400`.
+- **Idempotency-Key header** end-to-end with stable replay responses; retry-after-failure allowed via derived keys; cross-order key reuse rejected.
+- Legacy `/wallet/payfast/*` silent **sandbox fallback removed** (`503 not configured`) — was sending prod traffic to the sandbox gateway.
+
+### Flow consolidation
+
+- New shared Flutter widget `payfast_card_sheet.dart` (card sheet + 3DS WebView + formatter) used by BOTH checkout and product screens (~270 duplicated lines deleted).
+- Buy Now (`product_details_screen.dart`) migrated from legacy hosted-checkout to Option C orchestrator flow with `Idempotency-Key: buynow-$nonce`. Success lands on OrderSuccessScreen like cart checkout.
+- **Financial correctness:** Buy Now orders now produce fraud checks, audit rows, gateway verification AND the admin/vendor/delivery ledger split — previously marked "paid" with NO split (silent ledger imbalance) and invisible in the Admin PayFast Hub.
+- Legacy endpoints kept alive for old app releases but advertise `Deprecation`/`Sunset` headers + per-call usage logs → data-driven removal later. Wallet top-up flow untouched.
+
+### Zero-hardcoding pass
+
+- Railway URLs, sandbox fallbacks, dummy phone `03000000000`, literal sunset date, timeout magic numbers (20s/25s), and frontend magic `'account_type_id': '2'` — ALL replaced with env config or server-side derivation. New vars: `PAYFAST_WEB_ORIGIN`, `PAYFAST_GATEWAY_TIMEOUT_SECONDS`, `PAYFAST_LEGACY_SUNSET_DATE`, canonical `PAYFAST_BASE_URL`, plus `PAYFAST_HASH_KEY` documented.
+
+### Verification
+
+- `go build ./...` clean · `go vet` clean · full `go test -count=1 ./internal/...` green
+- `dart analyze` clean on touched files
+- Hardcode grep across touched backend files: zero matches
+
+### Deferred follow-ups
+
+- float64 → integer-paisa money refactor (dedicated session required)
+- Sentinel-error pattern rollout to Stripe/COD handlers
+

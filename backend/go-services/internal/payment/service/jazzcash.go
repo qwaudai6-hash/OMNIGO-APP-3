@@ -53,7 +53,12 @@ func (s *JazzCashService) CreateCheckoutSession(ctx context.Context, req Checkou
 		return CheckoutResponse{}, errors.New("jazzcash is not configured")
 	}
 
-	txnRefNo := "JC" + strconv.FormatInt(time.Now().Unix(), 10) + req.OrderID[len(req.OrderID)-4:]
+	txnRefNo := "JC" + strconv.FormatInt(time.Now().Unix(), 10)
+	// JazzCash txn refs are limited in length; append only the last 4 chars
+	// of the order ID and never panic on short IDs.
+	if len(req.OrderID) > 4 {
+		txnRefNo += req.OrderID[len(req.OrderID)-4:]
+	}
 	amountPaisa := fmt.Sprintf("%.0f", req.Amount*100)
 	txnDateTime := time.Now().UTC().Format("20060102150405")
 

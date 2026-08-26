@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/omnigo/backend/internal/shared/middleware"
 )
 
 // VendorHandler handles vendor wallet and payout queries.
@@ -20,6 +21,12 @@ func NewVendorHandler(db *pgxpool.Pool) *VendorHandler {
 // GetWallet handles GET /api/v1/vendor/wallet/:vendor_id
 func (h *VendorHandler) GetWallet(c *gin.Context) {
 	vendorID := c.Param("vendor_id")
+	callerID := middleware.GetTrackingID(c)
+	callerRole := middleware.GetRole(c)
+	if callerRole != "admin" && callerID != "" && callerID != vendorID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "unauthorized access to vendor wallet"})
+		return
+	}
 	ctx := c.Request.Context()
 
 	var balance, lifetimeEarnings, totalPayouts float64
@@ -53,6 +60,12 @@ func (h *VendorHandler) GetWallet(c *gin.Context) {
 // ListPayouts handles GET /api/v1/vendor/payouts/:vendor_id
 func (h *VendorHandler) ListPayouts(c *gin.Context) {
 	vendorID := c.Param("vendor_id")
+	callerID := middleware.GetTrackingID(c)
+	callerRole := middleware.GetRole(c)
+	if callerRole != "admin" && callerID != "" && callerID != vendorID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "unauthorized access to vendor payouts"})
+		return
+	}
 	ctx := c.Request.Context()
 
 	rows, err := h.db.Query(ctx,
@@ -88,7 +101,7 @@ func (h *VendorHandler) ListPayouts(c *gin.Context) {
 }
 
 type WithdrawRequest struct {
-	VendorTrackingID string  `json:"vendor_tracking_id" binding:"required"`
+	VendorTrackingID string  `json:"vendor_tracking_id"`
 	Amount           float64 `json:"amount" binding:"required,gt=0"`
 	Method           string  `json:"method" binding:"required"`
 }
@@ -98,6 +111,15 @@ func (h *VendorHandler) RequestWithdraw(c *gin.Context) {
 	var req WithdrawRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	callerID := middleware.GetTrackingID(c)
+	if callerID != "" {
+		req.VendorTrackingID = callerID
+	}
+	if req.VendorTrackingID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized: missing vendor identity"})
 		return
 	}
 
@@ -157,11 +179,15 @@ func (h *VendorHandler) RequestWithdraw(c *gin.Context) {
 }
 
 // RegisterRoutes registers vendor wallet/payout endpoints.
+// NOTE: these live under /api/v1/payments/vendor so the public gateway
+// (/api/v1/payments → payment-orchestrator) can reach them. Registering under
+// /api/v1/vendor made them unreachable — that prefix is owned by
+// vendor-store-service at the gateway.
 func (h *VendorHandler) RegisterRoutes(router *gin.Engine) {
-	vendor := router.Group("/api/v1/vendor")
+	vendor := router.Group("/api/v1/payments/vendor", middleware.JWTAuth(), middleware.RoleRequired("vendor", "admin"))
 	{
 		vendor.GET("/wallet/:vendor_id", h.GetWallet)
 		vendor.GET("/payouts/:vendor_id", h.ListPayouts)
-		vendor.POST("/withdraw", h.RequestWithdraw)
+		vendor.POST("/withdraw", middleware.RoleRequired("vendor"), h.RequestWithdraw)
 	}
 }

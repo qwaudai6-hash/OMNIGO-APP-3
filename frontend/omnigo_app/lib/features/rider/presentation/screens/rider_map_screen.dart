@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:async';
 import 'dart:math' as math;
 import 'dart:io';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:http/http.dart' as http;
@@ -72,9 +73,9 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
   // package was removed because it is no longer in pubspec.yaml; the Go
   // map-service can be wired in later for native turn-by-turn routing.
   // ignore: unused_field
-  bool _isNavigating = false;
+  final bool _isNavigating = false;
   // ignore: unused_field
-  bool _routeBuilt = false;
+  final bool _routeBuilt = false;
   // ignore: unused_field
   final WebSocketClient _wsClient = sl<WebSocketClient>();
   final ApiClient _apiClient = sl<ApiClient>();
@@ -121,15 +122,23 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
       if (_routePolyline.isNotEmpty) ..._routePolyline else destination,
     ];
     if (points.length >= 2) {
-      _mapController?.animateCamera(
-        CameraUpdate.newLatLngBounds(
-          _latLngBoundsFromPoints(points),
-          left: 80,
-          top: 80,
-          right: 80,
-          bottom: 80,
-        ),
-      );
+      final bounds = _latLngBoundsFromPoints(points);
+      if ((bounds.northeast.latitude - bounds.southwest.latitude).abs() < 1e-6 &&
+          (bounds.northeast.longitude - bounds.southwest.longitude).abs() < 1e-6) {
+        _mapController?.animateCamera(
+          CameraUpdate.newLatLngZoom(destination, 15.0),
+        );
+      } else {
+        _mapController?.animateCamera(
+          CameraUpdate.newLatLngBounds(
+            bounds,
+            left: 80,
+            top: 80,
+            right: 80,
+            bottom: 80,
+          ),
+        );
+      }
     } else {
       _mapController?.animateCamera(
         CameraUpdate.newLatLngZoom(destination, 15.0),
@@ -161,10 +170,15 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
   Future<void> _fetchSurgeHeatmaps() async {
     try {
       final response = await _apiClient.get(ApiEndpoints.deliverySurgeHeatmap());
-      final data = jsonDecode(response as String) as Map<String, dynamic>;
-      if (data['heatmaps'] != null && mounted) {
+      Map<String, dynamic>? data;
+      if (response is String) {
+        data = jsonDecode(response) as Map<String, dynamic>;
+      } else if (response is Map<String, dynamic>) {
+        data = response;
+      }
+      if (data != null && data['heatmaps'] != null && mounted) {
         setState(() {
-          _surgeHeatmaps = data['heatmaps'] as List<dynamic>;
+          _surgeHeatmaps = data!['heatmaps'] as List<dynamic>;
         });
       }
     } catch (e) {
@@ -271,7 +285,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
         } else {
           ScaffoldMessenger.of(context).hideCurrentMaterialBanner();
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Internet Restored'), backgroundColor: Colors.green)
+            const SnackBar(content: Text('Internet Restored'), backgroundColor: Colors.green),
           );
         }
       }
@@ -399,6 +413,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
         return;
       }
 
+      await _positionStream?.cancel();
       _positionStream = Geolocator.getPositionStream(
         locationSettings: const LocationSettings(
           accuracy: LocationAccuracy.high,
@@ -619,8 +634,12 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
     try {
       final uri = Uri.parse('${ApiEndpoints.deliveryBase}/delivery/gig/upload-proof');
       final request = http.MultipartRequest('POST', uri);
+      final token = SessionRegistry.instance.token ?? '';
+      if (token.isNotEmpty) {
+        request.headers['Authorization'] = 'Bearer $token';
+      }
       request.files.add(await http.MultipartFile.fromPath('photo', imageFile.path));
-      final streamedResponse = await request.send();
+      final streamedResponse = await request.send().timeout(const Duration(seconds: 30));
       final response = await http.Response.fromStream(streamedResponse);
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -839,6 +858,19 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
   }
 
   Future<void> _sendGigStatusUpdate(String nextStatus, {String? otp, String? photoUrl}) async {
+    final gigId = (_broadcastedGig?['tracking_id'] as String?) ?? (_broadcastedGig?['order_tracking_id'] as String?);
+    if (gigId == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Cannot update: missing gig id'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+      return;
+    }
+
     if (nextStatus == 'completed' || nextStatus == 'failed') {
       await OfflineGigStorage.clearActiveGig();
     } else {
@@ -859,18 +891,6 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
     }
 
     try {
-      final gigId = (_broadcastedGig!['tracking_id'] as String?) ?? (_broadcastedGig!['order_tracking_id'] as String?);
-      if (gigId == null) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Cannot update: missing gig id'),
-              backgroundColor: Colors.red,
-            ),
-          );
-        }
-        return;
-      }
       final Map<String, dynamic> body = {
         "status": nextStatus,
       };
@@ -1196,10 +1216,10 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                   // Chat button — opens the chat list screen.
                   Container(
                     margin: const EdgeInsets.only(bottom: 12),
-                    decoration: BoxDecoration(
+                    decoration: const BoxDecoration(
                       color: Colors.white,
                       shape: BoxShape.circle,
-                      boxShadow: const [
+                      boxShadow: [
                         BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2)),
                       ],
                     ),
@@ -1238,9 +1258,9 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                 }
 
                 final pos = await Geolocator.getCurrentPosition(
-                  locationSettings: Platform.isAndroid
+                  locationSettings: (!kIsWeb && Platform.isAndroid)
                       ? AndroidSettings(accuracy: LocationAccuracy.high)
-                      : AppleSettings(accuracy: LocationAccuracy.high),
+                      : const LocationSettings(accuracy: LocationAccuracy.high),
                 );
                 if (mounted) {
                   setState(() {
@@ -1610,7 +1630,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
-          color: selectedFile != null ? AppTheme.limeAccent.withOpacity(0.1) : Colors.grey.shade100,
+          color: selectedFile != null ? AppTheme.limeAccent.withValues(alpha: 0.1) : Colors.grey.shade100,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(color: selectedFile != null ? AppTheme.limeAccent : Colors.grey.shade300),
         ),
@@ -1663,7 +1683,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                 children: [
                   CircleAvatar(
                     radius: 30,
-                    backgroundColor: AppTheme.limeAccent.withOpacity(0.1),
+                    backgroundColor: AppTheme.limeAccent.withValues(alpha: 0.1),
                     child: const Icon(Icons.delivery_dining_rounded, color: AppTheme.limeAccent, size: 30),
                   ),
                   const SizedBox(width: 16),
@@ -1681,7 +1701,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                             Container(
                               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                               decoration: BoxDecoration(
-                                color: AppTheme.limeAccent.withOpacity(0.1),
+                                color: AppTheme.limeAccent.withValues(alpha: 0.1),
                                 borderRadius: BorderRadius.circular(6),
                               ),
                               child: Text(
@@ -1779,7 +1799,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
               children: [
                 CircleAvatar(
                   radius: 36,
-                  backgroundColor: AppTheme.limeAccent.withOpacity(0.2),
+                  backgroundColor: AppTheme.limeAccent.withValues(alpha: 0.2),
                   child: const Icon(Icons.two_wheeler_rounded, color: AppTheme.limeAccent, size: 40),
                 ),
                 const SizedBox(height: 12),
@@ -1791,9 +1811,9 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                   decoration: BoxDecoration(
-                    color: AppTheme.limeAccent.withOpacity(0.15),
+                    color: AppTheme.limeAccent.withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: AppTheme.limeAccent.withOpacity(0.3)),
+                    border: Border.all(color: AppTheme.limeAccent.withValues(alpha: 0.3)),
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
@@ -1886,7 +1906,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                     Container(
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.3),
+                        color: Colors.white.withValues(alpha: 0.3),
                         shape: BoxShape.circle,
                       ),
                       child: const Icon(Icons.my_location_rounded, color: AppTheme.blackAccent, size: 28),
@@ -1903,7 +1923,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                           const SizedBox(height: 4),
                           Text(
                             'View real-time progress of your ongoing delivery or ride.',
-                            style: TextStyle(color: AppTheme.blackAccent.withOpacity(0.8), fontSize: 13),
+                            style: TextStyle(color: AppTheme.blackAccent.withValues(alpha: 0.8), fontSize: 13),
                           ),
                         ],
                       ),
@@ -1995,7 +2015,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                             const Text('Lifetime Earned', style: TextStyle(color: AppTheme.blackAccent, fontSize: 12)),
                             const SizedBox(height: 6),
                             Text(
-                              '\$${((_walletSummary?['lifetime_earnings'] as num?) ?? 0).toStringAsFixed(2)}',
+                              'PKR ${((_walletSummary?['lifetime_earnings'] as num?) ?? 0).toStringAsFixed(2)}',
                               style: const TextStyle(color: AppTheme.blackAccent, fontSize: 18, fontWeight: FontWeight.bold),
                             ),
                           ],
@@ -2013,7 +2033,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                             const Text('Available Balance', style: TextStyle(color: AppTheme.blackAccent, fontSize: 12)),
                             const SizedBox(height: 6),
                             Text(
-                              '\$${((_walletSummary?['available_balance'] as num?) ?? 0).toStringAsFixed(2)}',
+                              'PKR ${((_walletSummary?['available_balance'] as num?) ?? 0).toStringAsFixed(2)}',
                               style: const TextStyle(color: AppTheme.blackAccent, fontSize: 18, fontWeight: FontWeight.bold),
                             ),
                           ],
@@ -2035,7 +2055,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                     children: [
                       const Text('Pending COD Debts', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
                       Text(
-                        '\$${_codDebts.fold<double>(0.0, (sum, item) => sum + ((item['amount'] as num?) ?? 0.0)).toStringAsFixed(2)}',
+                        'PKR ${_codDebts.fold<double>(0.0, (sum, item) => sum + ((item['amount'] as num?) ?? 0.0)).toStringAsFixed(2)}',
                         style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 16),
                       ),
                     ],
@@ -2186,7 +2206,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                         child: Container(
                           padding: const EdgeInsets.symmetric(vertical: 12),
                           decoration: BoxDecoration(
-                            color: selectedGateway == 'jazzcash' ? AppTheme.limeAccent.withOpacity(0.2) : Colors.grey.shade100,
+                            color: selectedGateway == 'jazzcash' ? AppTheme.limeAccent.withValues(alpha: 0.2) : Colors.grey.shade100,
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(color: selectedGateway == 'jazzcash' ? AppTheme.blackAccent : Colors.grey.shade300, width: 2),
                           ),
@@ -2207,7 +2227,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                         child: Container(
                           padding: const EdgeInsets.symmetric(vertical: 12),
                           decoration: BoxDecoration(
-                            color: selectedGateway == 'easypaisa' ? AppTheme.limeAccent.withOpacity(0.2) : Colors.grey.shade100,
+                            color: selectedGateway == 'easypaisa' ? AppTheme.limeAccent.withValues(alpha: 0.2) : Colors.grey.shade100,
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(color: selectedGateway == 'easypaisa' ? AppTheme.blackAccent : Colors.grey.shade300, width: 2),
                           ),

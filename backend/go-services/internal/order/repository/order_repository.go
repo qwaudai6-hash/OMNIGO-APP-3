@@ -134,6 +134,31 @@ func (r *OrderRepository) fetchOrderItems(ctx context.Context, orderID string) (
 	return items, nil
 }
 
+// fetchBulkOrderItems retrieves items for multiple orders in a single roundtrip query
+func (r *OrderRepository) fetchBulkOrderItems(ctx context.Context, orderIDs []string) (map[string][]models.OrderItem, error) {
+	itemsByOrder := make(map[string][]models.OrderItem)
+	if len(orderIDs) == 0 {
+		return itemsByOrder, nil
+	}
+
+	query := `SELECT order_tracking_id, product_tracking_id, quantity, price_at_checkout FROM order_items WHERE order_tracking_id = ANY($1)`
+	rows, err := r.reader.Query(ctx, query, orderIDs)
+	if err != nil {
+		return itemsByOrder, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var orderID string
+		var item models.OrderItem
+		if err := rows.Scan(&orderID, &item.ProductTrackingID, &item.Quantity, &item.PriceAtCheckout); err != nil {
+			continue
+		}
+		itemsByOrder[orderID] = append(itemsByOrder[orderID], item)
+	}
+	return itemsByOrder, nil
+}
+
 // GetOrderByTrackingID retrieves an order by its UTID
 func (r *OrderRepository) GetOrderByTrackingID(ctx context.Context, trackingID string) (*models.Order, error) {
 	query := `
@@ -279,13 +304,20 @@ func (r *OrderRepository) GetOrdersByCustomerID(ctx context.Context, customerID 
 		orders = append(orders, &order)
 	}
 
-	// N+1 query issue here natively, but acceptable for this prototype scale.
-	// In production, use an IN clause or JOIN.
-	for _, o := range orders {
-		items, _ := r.fetchOrderItems(ctx, o.TrackingID)
-		o.Items = items
-		if o.Items == nil {
-			o.Items = []models.OrderItem{}
+	if len(orders) > 0 {
+		orderIDs := make([]string, len(orders))
+		for i, o := range orders {
+			orderIDs[i] = o.TrackingID
+		}
+		bulkItems, err := r.fetchBulkOrderItems(ctx, orderIDs)
+		if err == nil {
+			for _, o := range orders {
+				if items, ok := bulkItems[o.TrackingID]; ok {
+					o.Items = items
+				} else {
+					o.Items = []models.OrderItem{}
+				}
+			}
 		}
 	}
 
@@ -376,11 +408,20 @@ func (r *OrderRepository) GetOrdersByVendorID(ctx context.Context, vendorID stri
 		orders = append(orders, &order)
 	}
 
-	for _, o := range orders {
-		items, _ := r.fetchOrderItems(ctx, o.TrackingID)
-		o.Items = items
-		if o.Items == nil {
-			o.Items = []models.OrderItem{}
+	if len(orders) > 0 {
+		orderIDs := make([]string, len(orders))
+		for i, o := range orders {
+			orderIDs[i] = o.TrackingID
+		}
+		bulkItems, err := r.fetchBulkOrderItems(ctx, orderIDs)
+		if err == nil {
+			for _, o := range orders {
+				if items, ok := bulkItems[o.TrackingID]; ok {
+					o.Items = items
+				} else {
+					o.Items = []models.OrderItem{}
+				}
+			}
 		}
 	}
 
@@ -389,20 +430,29 @@ func (r *OrderRepository) GetOrdersByVendorID(ctx context.Context, vendorID stri
 
 // UpdateOrderStatus mutates order status and sets updated_at
 func (r *OrderRepository) UpdateOrderStatus(ctx context.Context, trackingID string, status string) error {
+	// SP-GO-13: guard against silent last-writer-wins overwrites. A status
+	// update only applies if the row is not ALREADY in the target status and
+	// has not moved past it to a terminal state. Terminal states are final.
 	query := `
 		UPDATE orders
 		SET status = $1, updated_at = NOW()
 		WHERE order_tracking_id = $2
+		  AND status <> $1
+		  AND NOT (status IN ('cancelled', 'failed', 'refunded', 'returned') AND $1 <> 'refunded')
 	`
 	res, err := r.writer.Exec(ctx, query, status, trackingID)
 	if err != nil {
 		return err
 	}
 	if res.RowsAffected() == 0 {
-		return errors.New("order not found")
+		return ErrNoStatusChange
 	}
 	return nil
 }
+
+// ErrNoStatusChange indicates the status transition was a no-op (duplicate
+// event) or the order is in a terminal state that cannot be overwritten.
+var ErrNoStatusChange = errors.New("order status unchanged (terminal state or duplicate)")
 
 // MarkOrderDelivered sets status to 'delivered' AND stamps delivered_at
 // in a single transaction. The escrow release cron
@@ -450,39 +500,105 @@ func (r *OrderRepository) RecordVendorHandover(ctx context.Context, orderTrackin
 	return nil
 }
 
-// FetchPendingOutboxEvents retrieves a batch of pending events for publishing
-func (r *OrderRepository) FetchPendingOutboxEvents(ctx context.Context, limit int) ([]models.OutboxEvent, error) {
+// ClaimPendingOutboxEvents atomically claims a batch of pending events using FOR UPDATE SKIP LOCKED
+// and transitions them to 'PROCESSING' in a single database transaction.
+func (r *OrderRepository) ClaimPendingOutboxEvents(ctx context.Context, limit int) ([]models.OutboxEvent, error) {
+	tx, err := r.writer.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
 	query := `
 		SELECT id, aggregate_id, topic, payload, status
 		FROM outbox_events
-		WHERE status = 'PENDING'
+		WHERE status = 'PENDING' AND (topic LIKE 'orders.%' OR topic = 'order_events' OR topic = 'orders')
 		ORDER BY id ASC
 		LIMIT $1
+		FOR UPDATE SKIP LOCKED
 	`
-	rows, err := r.reader.Query(ctx, query, limit)
+	rows, err := tx.Query(ctx, query, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	var events []models.OutboxEvent
+	var eventIDs []int64
 	for rows.Next() {
 		var event models.OutboxEvent
 		if err := rows.Scan(&event.ID, &event.AggregateID, &event.Topic, &event.Payload, &event.Status); err != nil {
 			return nil, err
 		}
 		events = append(events, event)
+		eventIDs = append(eventIDs, event.ID)
 	}
+
+	if len(eventIDs) > 0 {
+		updateQuery := `
+			UPDATE outbox_events
+			SET status = 'PROCESSING', updated_at = NOW()
+			WHERE id = ANY($1)
+		`
+		if _, err := tx.Exec(ctx, updateQuery, eventIDs); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
 	return events, nil
+}
+
+// FetchPendingOutboxEvents retrieves a batch of pending events for publishing (delegates to atomic claim)
+func (r *OrderRepository) FetchPendingOutboxEvents(ctx context.Context, limit int) ([]models.OutboxEvent, error) {
+	return r.ClaimPendingOutboxEvents(ctx, limit)
 }
 
 // MarkOutboxEventProcessed marks an event as processed
 func (r *OrderRepository) MarkOutboxEventProcessed(ctx context.Context, id int64) error {
 	query := `
 		UPDATE outbox_events
-		SET status = 'PROCESSED', processed_at = NOW()
+		SET status = 'PROCESSED', processed_at = NOW(), updated_at = NOW()
 		WHERE id = $1
 	`
 	_, err := r.writer.Exec(ctx, query, id)
 	return err
+}
+
+// MarkOutboxEventFailed marks an event as failed so it can be retried or inspected
+func (r *OrderRepository) MarkOutboxEventFailed(ctx context.Context, id int64) error {
+	query := `
+		UPDATE outbox_events
+		SET status = 'FAILED', updated_at = NOW()
+		WHERE id = $1
+	`
+	_, err := r.writer.Exec(ctx, query, id)
+	return err
+}
+
+// DeliverySummary captures essential delivery tracking metadata for order lineage
+type DeliverySummary struct {
+	TrackingID   string `json:"tracking_id"`
+	RiderTrackID string `json:"rider_tracking_id"`
+	Status       string `json:"status"`
+}
+
+// GetDeliveryByOrderTrackingID fetches active or completed delivery info for an order
+func (r *OrderRepository) GetDeliveryByOrderTrackingID(ctx context.Context, orderTrackingID string) (*DeliverySummary, error) {
+	query := `
+		SELECT tracking_id, COALESCE(rider_tracking_id, ''), status
+		FROM deliveries
+		WHERE order_tracking_id = $1
+		ORDER BY created_at DESC
+		LIMIT 1
+	`
+	var d DeliverySummary
+	err := r.reader.QueryRow(ctx, query, orderTrackingID).Scan(&d.TrackingID, &d.RiderTrackID, &d.Status)
+	if err != nil {
+		return nil, err
+	}
+	return &d, nil
 }

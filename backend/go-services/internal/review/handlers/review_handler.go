@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	middleware "github.com/omnigo/backend/internal/shared/middleware"
 	"github.com/omnigo/backend/internal/review/models"
 	"github.com/omnigo/backend/internal/review/service"
 )
@@ -22,6 +23,15 @@ func (h *ReviewHandler) CreateReview(c *gin.Context) {
 	var req models.CreateReviewRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload: " + err.Error()})
+		return
+	}
+
+	// SECURITY: the review author is the authenticated JWT subject — a
+	// body-supplied customer_tracking_id would allow forging reviews for
+	// arbitrary accounts.
+	req.CustomerTrackingID = middleware.GetTrackingID(c)
+	if req.CustomerTrackingID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing authenticated customer"})
 		return
 	}
 
@@ -83,11 +93,12 @@ func (h *ReviewHandler) GetReviewSummary(c *gin.Context) {
 	c.JSON(http.StatusOK, summary)
 }
 
-// RegisterRoutes registers review endpoints on the Gin engine
+// RegisterRoutes registers review endpoints on the Gin engine.
+// Writes require auth (author = JWT subject); reads stay public.
 func (h *ReviewHandler) RegisterRoutes(router *gin.Engine) {
 	reviews := router.Group("/api/v1/reviews")
 	{
-		reviews.POST("/", h.CreateReview)
+		reviews.POST("/", middleware.JWTAuth(), h.CreateReview)
 		reviews.GET("/:product_id", h.ListReviews)
 		reviews.GET("/:product_id/summary", h.GetReviewSummary)
 	}

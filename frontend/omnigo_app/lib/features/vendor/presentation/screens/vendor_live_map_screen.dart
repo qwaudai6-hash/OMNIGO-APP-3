@@ -58,17 +58,24 @@ class VendorLiveMapScreenState extends State<VendorLiveMapScreen> {
   // Modifying this list will NOT trigger heavy global rebuilds of the underlying MapLibre layer!
   final ValueNotifier<Map<String, MarkerData>> _liveMarkersNotifier =
       ValueNotifier<Map<String, MarkerData>>({});
+  final Map<String, int> _markerTimestamps = {};
 
   // Connected real WebSocket Client querying Port 8087 gateway
   final WebSocketClient _wsClient = WebSocketClient();
   StreamSubscription<dynamic>? _streamSubscription;
   StreamSubscription<WSConnectionState>? _stateSub;
+  Timer? _stalePruneTimer;
 
   @override
   void initState() {
     super.initState();
     _initStoreLocation();
     _initMapOrigin();
+
+    // Proactive timer to evict stale markers every 30 seconds
+    _stalePruneTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      _pruneStaleMarkers();
+    });
 
     // Connect to actual WebSocket gateway using SessionRegistry token
     final token = SessionRegistry.instance.token ?? '';
@@ -233,10 +240,19 @@ class VendorLiveMapScreenState extends State<VendorLiveMapScreen> {
       }
 
       final LatLng riderPosition = LatLng(telemetry.lat, telemetry.lng);
+      final now = DateTime.now().millisecondsSinceEpoch;
+      _markerTimestamps['rider_${telemetry.riderId}'] = now;
 
       // FIXED: Mutating values within the tracker map safely and notifying the single layer listener
       final Map<String, MarkerData> updatedMarkers =
           Map.from(_liveMarkersNotifier.value);
+
+      // Prune stale markers older than 120 seconds (except store marker)
+      updatedMarkers.removeWhere((key, _) {
+        if (key == 'store') return false;
+        final ts = _markerTimestamps[key];
+        return ts == null || (now - ts) > 120000;
+      });
 
       // Add the live rider marker at the streamed coordinates.
       updatedMarkers['rider_${telemetry.riderId}'] = MarkerData(
@@ -250,8 +266,29 @@ class VendorLiveMapScreenState extends State<VendorLiveMapScreen> {
     }
   }
 
+  void _pruneStaleMarkers() {
+    if (!mounted) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final Map<String, MarkerData> updatedMarkers =
+        Map.from(_liveMarkersNotifier.value);
+    bool changed = false;
+
+    updatedMarkers.removeWhere((key, _) {
+      if (key == 'store') return false;
+      final ts = _markerTimestamps[key];
+      final isStale = ts == null || (now - ts) > 120000;
+      if (isStale) changed = true;
+      return isStale;
+    });
+
+    if (changed) {
+      _liveMarkersNotifier.value = updatedMarkers;
+    }
+  }
+
   @override
   void dispose() {
+    _stalePruneTimer?.cancel();
     _streamSubscription?.cancel();
     _stateSub?.cancel();
     _wsClient.disconnect();
@@ -297,7 +334,7 @@ class VendorLiveMapScreenState extends State<VendorLiveMapScreen> {
                 child: Container(
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.85),
+                    color: Colors.black.withValues(alpha: 0.85),
                     borderRadius: BorderRadius.circular(20),
                   ),
                   child: const Row(

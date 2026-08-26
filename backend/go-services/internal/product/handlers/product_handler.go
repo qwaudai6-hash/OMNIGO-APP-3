@@ -82,8 +82,16 @@ func (h *ProductHandler) GetProduct(c *gin.Context) {
 
 	prod, err := h.svc.GetProduct(c.Request.Context(), trackingID)
 	if err != nil {
-		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "product not found"})
-		return
+		// Fallback: internal callers (cart service) pass the numeric DB id.
+		// If the identifier is all digits, retry as a numeric lookup so
+		// cart price verification works against either id form.
+		if id, convErr := strconv.ParseInt(trackingID, 10, 64); convErr == nil {
+			prod, err = h.svc.GetProductByNumericID(c.Request.Context(), id)
+		}
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "product not found"})
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, prod)
@@ -105,11 +113,15 @@ func (h *ProductHandler) ListProducts(c *gin.Context) {
 
 	search := c.Query("search")
 	category := c.Query("category")
+	storeID := c.Query("store_id")
+	if storeID == "" {
+		storeID = c.Query("store_tracking_id")
+	}
 	sort := c.Query("sort")
 	minPrice, _ := strconv.ParseFloat(c.Query("min_price"), 64)
 	maxPrice, _ := strconv.ParseFloat(c.Query("max_price"), 64)
 
-	products, err := h.svc.ListProducts(c.Request.Context(), limit, offset, search, category, sort, minPrice, maxPrice)
+	products, err := h.svc.ListProducts(c.Request.Context(), limit, offset, search, category, storeID, sort, minPrice, maxPrice)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

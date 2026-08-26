@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/omnigo/backend/internal/shared/auth"
+	"github.com/omnigo/backend/internal/shared/middleware"
 	"github.com/omnigo/backend/internal/vendorstore/models"
 	"github.com/omnigo/backend/internal/vendorstore/service"
 )
@@ -19,10 +19,21 @@ func NewVendorHandler(svc *service.VendorService) *VendorHandler {
 
 // CreateStore HTTP handler for POST /stores
 func (h *VendorHandler) CreateStore(c *gin.Context) {
+	callerID := middleware.GetTrackingID(c)
+	callerRole := middleware.GetRole(c)
+	if callerID == "" {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
 	var req models.CreateStoreRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	if callerRole != "admin" {
+		req.VendorTrackingID = callerID
 	}
 
 	store, err := h.svc.CreateStore(c.Request.Context(), &req)
@@ -52,16 +63,10 @@ func (h *VendorHandler) GetStore(c *gin.Context) {
 }
 
 // GetMyStore returns the authenticated vendor's store.
-// Expects a valid vendor JWT (role == "vendor"). The tracking_id claim is used
-// to look up the store row by vendor_tracking_id.
 func (h *VendorHandler) GetMyStore(c *gin.Context) {
-	trackingID, role, err := auth.ParseJWTFromHeader(c.GetHeader("Authorization"))
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
-		return
-	}
-	if role != "vendor" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "vendor access required"})
+	trackingID := middleware.GetTrackingID(c)
+	if trackingID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
 
@@ -78,15 +83,15 @@ func (h *VendorHandler) GetMyStore(c *gin.Context) {
 func (h *VendorHandler) RegisterRoutes(router *gin.Engine) {
 	stores := router.Group("/api/v1/stores")
 	{
-		stores.POST("/", h.CreateStore)
+		stores.POST("/", middleware.JWTAuth(), middleware.RoleRequired("vendor", "admin"), h.CreateStore)
 		stores.GET("/:tracking_id", h.GetStore)
 	}
 
-	vendor := router.Group("/api/v1/vendor")
+	vendor := router.Group("/api/v1/vendor", middleware.JWTAuth(), middleware.RoleRequired("vendor", "admin"))
 	{
 		vendor.GET("/stores/me", h.GetMyStore)
 	}
 
 	metricsH := NewVendorMetricsHandler(h.svc)
-	router.GET("/api/v1/vendor/metrics", metricsH.GetMetrics)
+	router.GET("/api/v1/vendor/metrics", middleware.JWTAuth(), middleware.RoleRequired("vendor", "admin"), metricsH.GetMetrics)
 }

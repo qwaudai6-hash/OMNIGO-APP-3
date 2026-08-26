@@ -27,6 +27,11 @@ class FinancialAuditor:
 
     async def audit_ledger(self):
         logger.info("Starting Ledger Security Audit...")
+        if not self.secret:
+            logger.warning("HMAC secret is empty. Skipping ledger audit.")
+            return {"status": "skipped", "reason": "empty_secret"}
+
+        conn = None
         try:
             conn = await asyncpg.connect(self.dsn)
             # Fetch the last 1000 entries (or all un-audited entries if we had a cursor)
@@ -42,22 +47,21 @@ class FinancialAuditor:
                 expected_sig = self.generate_signature(
                     str(row['transaction_id']),
                     row['account'],
-                    row['amount'],
-                    row['reference_id'],
-                    row['idempotency_key']
+                    float(row['amount']),
+                    row['reference_id'] or '',
+                    row['idempotency_key'] or ''
                 )
                 
-                if expected_sig != row['signature']:
+                sig_found = row['signature'] or ''
+                if not hmac.compare_digest(expected_sig, sig_found):
                     invalid_entries.append({
                         "id": str(row['id']),
                         "transaction_id": str(row['transaction_id']),
                         "account": row['account'],
                         "amount": row['amount'],
                         "expected": expected_sig,
-                        "found": row['signature']
+                        "found": sig_found
                     })
-
-            await conn.close()
 
             if invalid_entries:
                 logger.error(f"AUDIT FAILED: Found {len(invalid_entries)} tampered ledger entries!")
@@ -79,6 +83,12 @@ class FinancialAuditor:
         except Exception as e:
             logger.error(f"Failed to run audit: {e}")
             return {"status": "error", "message": str(e)}
+        finally:
+            if conn:
+                try:
+                    await conn.close()
+                except Exception:
+                    pass
 
     async def run_loop(self):
         self.is_running = True

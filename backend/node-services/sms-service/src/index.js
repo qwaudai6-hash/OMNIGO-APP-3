@@ -7,7 +7,10 @@ const twilio = require('twilio');
 
 // ── Configuration ───────────────────────────────────────────────
 const PORT = process.env.PORT || 8091;
-const KAFKA_BROKERS = (process.env.KAFKA_BROKERS || 'localhost:9092').split(',');
+// SP-NJ-08: fail fast on missing broker config.
+const KAFKA_BROKERS = process.env.KAFKA_BROKERS
+  ? process.env.KAFKA_BROKERS.split(',')
+  : (() => { console.error('[FATAL] KAFKA_BROKERS env var is required'); process.exit(1); })();
 const DB_DSN = process.env.DB_DSN || process.env.DATABASE_URL;
 if (!DB_DSN) {
   throw new Error('FATAL: DATABASE_URL (or DB_DSN) is required.');
@@ -61,6 +64,13 @@ async function fetchCustomerPhoneByOrder(orderTrackingId) {
   return fetchUserPhone(result.rows[0].customer_tracking_id);
 }
 
+
+// SP-NJ-10: never log raw phone numbers (PII) — mask middle digits.
+function redactPhone(phone) {
+  if (!phone || typeof phone !== 'string') return '<none>';
+  return phone.length <= 4 ? '***' : phone.slice(0, -4).replace(/\d/g, '*') + phone.slice(-4);
+}
+
 async function sendViaLocalGateway(phone, message) {
   if (!SMS_GATEWAY_URL || !SMS_GATEWAY_USERNAME || !SMS_GATEWAY_PASSWORD) {
     throw new Error('Local SMS gateway not configured');
@@ -78,7 +88,7 @@ async function sendViaLocalGateway(phone, message) {
 
   try {
     const response = await axios.post(SMS_GATEWAY_URL, payload, { timeout: 15000 });
-    console.log(`[SMS] Local gateway sent to ${phone}: ${response.status}`);
+    console.log(`[SMS] Local gateway sent to ${redactPhone(phone)}: ${response.status}`);
     return { success: true, provider: SMS_GATEWAY_TYPE, response: response.data };
   } catch (err) {
     console.error(`[SMS] Local gateway failed: ${err.message}`);
@@ -96,7 +106,7 @@ async function sendViaTwilio(phone, message) {
       from: TWILIO_PHONE_NUMBER,
       to: phone,
     });
-    console.log(`[SMS] Twilio sent to ${phone}: ${response.sid}`);
+    console.log(`[SMS] Twilio sent to ${redactPhone(phone)}: sid=${response.sid ? response.sid.slice(-6) : ""}`);
     return { success: true, provider: 'twilio', sid: response.sid };
   } catch (err) {
     console.error(`[SMS] Twilio failed: ${err.message}`);
@@ -104,7 +114,14 @@ async function sendViaTwilio(phone, message) {
   }
 }
 
-async function sendSMS(phone, message) {
+  // SP-NJ-14: cap message length — multi-part segments bill separately and
+  // carriers silently split or drop long payloads.
+const MAX_SMS_LEN = 160;
+async function sendSMS(rawPhone, rawMessage) {
+  const phone = rawPhone;
+  const message = typeof rawMessage === 'string' && rawMessage.length > MAX_SMS_LEN
+    ? rawMessage.slice(0, MAX_SMS_LEN - 1) + '…'
+    : rawMessage;
   if (!phone) {
     console.log('[SMS] No phone number, skipping.');
     return { success: false, skipped: true };
@@ -123,7 +140,7 @@ async function sendSMS(phone, message) {
   try {
     return await sendViaTwilio(phone, message);
   } catch (err) {
-    console.error(`[SMS] Failed to send SMS to ${phone}: ${err.message}`);
+    console.error(`[SMS] Failed to send SMS to ${redactPhone(phone)}: ${err.message}`);
     return { success: false, error: err.message };
   }
 }
@@ -180,7 +197,7 @@ function buildSMS(topic, payload) {
     case 'payments.wallet.completed':
       return {
         orderTrackingId: payload.order_id,
-        message: `Payment of ${payload.amount_cents / 100} PKR received for order ${payload.order_id}.`,
+        message: `Payment of ${(Number(payload.amount_cents) || 0) / 100} PKR received for order ${payload.order_id || ''}.` // SP-NJ-07: no NaN
       };
 
     default:
@@ -208,6 +225,7 @@ async function runKafkaConsumer() {
   await consumer.run({
     eachMessage: async ({ topic, message }) => {
       try {
+        if (!message || !message.value) return;
         const payload = JSON.parse(message.value.toString());
         // Log without exposing PII such as phone numbers.
         const logPayload = { ...payload };
@@ -235,6 +253,19 @@ async function runKafkaConsumer() {
 const app = express();
 app.use(express.json());
 
+function authenticateInternal(req, res, next) {
+  const internalSecret = process.env.INTERNAL_SERVICE_KEY || process.env.JWT_SECRET || 'omnigo-internal-service-secret';
+  const authHeader = req.headers['authorization'] || req.headers['x-internal-service-key'];
+  if (!authHeader) {
+    return res.status(401).json({ error: 'unauthorized: missing internal auth header' });
+  }
+  const key = authHeader.replace(/^Bearer\s+/i, '').trim();
+  if (key !== internalSecret && key !== process.env.JWT_SECRET) {
+    return res.status(403).json({ error: 'forbidden: invalid internal service key' });
+  }
+  next();
+}
+
 app.get('/health', (req, res) => {
   const gatewayConfigured = !!(SMS_GATEWAY_URL && SMS_GATEWAY_USERNAME && SMS_GATEWAY_PASSWORD);
   const twilioConfigured = !!(twilioClient && TWILIO_PHONE_NUMBER);
@@ -246,7 +277,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.post('/api/v1/sms/send', async (req, res) => {
+app.post('/api/v1/sms/send', authenticateInternal, async (req, res) => {
   const { phone, message } = req.body;
   if (!phone || !message) {
     return res.status(400).json({ error: 'phone and message are required' });
@@ -259,3 +290,19 @@ app.listen(PORT, () => {
   console.log(`[SMS] Service running on port ${PORT}`);
   runKafkaConsumer().catch(console.error);
 });
+
+const gracefulShutdown = async (signal) => {
+  console.log(`[${signal}] Graceful shutdown initiated...`);
+  try {
+    if (consumer) await consumer.disconnect();
+    if (pgPool) await pgPool.end();
+    console.log('Cleanup complete. Exiting.');
+    process.exit(0);
+  } catch (err) {
+    console.error('Shutdown error:', err);
+    process.exit(1);
+  }
+};
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+

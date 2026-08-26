@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -105,14 +106,16 @@ type DailyRevenue struct {
 }
 
 type AdminSurveillanceService struct {
+	dbWriter    *pgxpool.Pool
 	dbReader    *pgxpool.Pool
 	neo4jDriver neo4j.DriverWithContext
 	neo4jDb     string
 	tbService   *ledger.Service
 }
 
-func NewAdminSurveillanceService(dbReader *pgxpool.Pool, driver neo4j.DriverWithContext, dbName string, tbService *ledger.Service) *AdminSurveillanceService {
+func NewAdminSurveillanceService(dbWriter, dbReader *pgxpool.Pool, driver neo4j.DriverWithContext, dbName string, tbService *ledger.Service) *AdminSurveillanceService {
 	return &AdminSurveillanceService{
+		dbWriter:    dbWriter,
 		dbReader:    dbReader,
 		neo4jDriver: driver,
 		neo4jDb:     dbName,
@@ -120,15 +123,80 @@ func NewAdminSurveillanceService(dbReader *pgxpool.Pool, driver neo4j.DriverWith
 	}
 }
 
+// resolveOrderTrackingID resolves any of the universal tracking ID prefixes
+// (CUST-, VEND-, STOR-, PROD-, DEL-, RIDR-, TXN-/pf_/uuid, ORD-) into its
+// canonical order_tracking_id. RIDE- IDs belong to the ride-hailing domain
+// and are rejected here with a pointer to GetRideLineage.
+func (s *AdminSurveillanceService) resolveOrderTrackingID(ctx context.Context, utid string) (string, error) {
+	utid = strings.TrimSpace(utid)
+	if utid == "" {
+		return "", fmt.Errorf("tracking ID is required")
+	}
+
+	if strings.HasPrefix(utid, "ORD-") {
+		return utid, nil
+	}
+
+	var orderID string
+	var err error
+
+	switch {
+	case strings.HasPrefix(utid, "CUST-"):
+		query := `SELECT order_tracking_id FROM orders WHERE customer_tracking_id = $1 ORDER BY created_at DESC LIMIT 1`
+		err = s.dbReader.QueryRow(ctx, query, utid).Scan(&orderID)
+	case strings.HasPrefix(utid, "VEND-"):
+		query := `SELECT o.order_tracking_id FROM orders o JOIN stores s ON o.store_tracking_id = s.store_tracking_id WHERE s.vendor_tracking_id = $1 ORDER BY o.created_at DESC LIMIT 1`
+		err = s.dbReader.QueryRow(ctx, query, utid).Scan(&orderID)
+	case strings.HasPrefix(utid, "STOR-"):
+		query := `SELECT order_tracking_id FROM orders WHERE store_tracking_id = $1 ORDER BY created_at DESC LIMIT 1`
+		err = s.dbReader.QueryRow(ctx, query, utid).Scan(&orderID)
+	case strings.HasPrefix(utid, "PROD-"):
+		query := `SELECT oi.order_tracking_id FROM order_items oi WHERE oi.product_tracking_id = $1 ORDER BY oi.created_at DESC LIMIT 1`
+		err = s.dbReader.QueryRow(ctx, query, utid).Scan(&orderID)
+	case strings.HasPrefix(utid, "DEL-"):
+		query := `SELECT order_tracking_id FROM deliveries WHERE tracking_id = $1 OR order_tracking_id = $1 LIMIT 1`
+		err = s.dbReader.QueryRow(ctx, query, utid).Scan(&orderID)
+	case strings.HasPrefix(utid, "RIDR-"):
+		// Rider user ID — find the most recent order they were assigned to.
+		// (RIDE- IDs are NOT handled here: ride-hailing sessions have no
+		// order linkage; use GetRideLineage for those.)
+		query := `SELECT order_tracking_id FROM orders WHERE rider_tracking_id = $1 ORDER BY created_at DESC LIMIT 1`
+		err = s.dbReader.QueryRow(ctx, query, utid).Scan(&orderID)
+	case strings.HasPrefix(utid, "RIDE-"):
+		return "", fmt.Errorf("%s is a ride-hailing session and has no order lineage — use the ride lineage endpoint (/lineage/ride/%s)", utid, utid)
+	case strings.HasPrefix(utid, "TXN-") || strings.HasPrefix(utid, "pf_"):
+		// Transaction IDs come in three generations: TXN-<uuid> (current),
+		// pf_<uuid> (PayFast internal), and bare <uuid> (legacy webhook rows).
+		// Accept any of them, with or without the TXN- prefix pasted in.
+		stripped := strings.TrimPrefix(utid, "TXN-")
+		candidates := []string{utid, stripped, "pf_" + stripped}
+		query := `SELECT order_tracking_id FROM payment_transactions WHERE transaction_id = ANY($1) ORDER BY created_at DESC LIMIT 1`
+		err = s.dbReader.QueryRow(ctx, query, candidates).Scan(&orderID)
+	default:
+		// Fallback: try direct order lookup
+		return utid, nil
+	}
+
+	if err != nil {
+		return "", fmt.Errorf("no linked order found for tracking ID %s: %w", utid, err)
+	}
+	return orderID, nil
+}
+
 // GetCompleteOrderLineage audits the exact tracking mesh across components.
 // Uses tracking_id-based column names matching the Go-aligned init.sql (Session 16).
-func (s *AdminSurveillanceService) GetCompleteOrderLineage(ctx context.Context, orderTrackingID string) (*AdminLineageReport, error) {
+func (s *AdminSurveillanceService) GetCompleteOrderLineage(ctx context.Context, rawTrackingID string) (*AdminLineageReport, error) {
 	traceID, ok := ctx.Value("trace_id").(string)
 	if !ok {
 		traceID = "ORPHAN-TRACE"
 	}
 
-	log.Printf("[SECURITY-AUDIT] [TraceID: %s] INITIATING E2E Lineage Sweep for Order: %s", traceID, orderTrackingID)
+	orderTrackingID, err := s.resolveOrderTrackingID(ctx, rawTrackingID)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Printf("[SECURITY-AUDIT] [TraceID: %s] INITIATING E2E Lineage Sweep for Order: %s (from %s)", traceID, orderTrackingID, rawTrackingID)
 
 	// Fixed query: uses order_tracking_id (not tracking_id), store_tracking_id
 	// (not tracking_id on stores), and column names from the canonical baseline
@@ -136,14 +204,19 @@ func (s *AdminSurveillanceService) GetCompleteOrderLineage(ctx context.Context, 
 	// to the linked delivery assignment.
 	query := `
 		SELECT
-			o.order_tracking_id, o.status, o.total_amount,
+			o.order_tracking_id,
+			o.status,
+			o.total_amount,
 			o.customer_tracking_id,
+			COALESCE(c.full_name, 'Customer'),
+			COALESCE(o.store_tracking_id, 'N/A'),
 			COALESCE(s.store_name, 'N/A'),
-			COALESCE(o.rider_tracking_id, d.rider_tracking_id),
-			COALESCE(d.status, 'PENDING'),
-			(SELECT oi.product_tracking_id FROM order_items oi WHERE oi.order_tracking_id = o.order_tracking_id LIMIT 1),
-			(SELECT p.name FROM products p JOIN order_items oi ON oi.product_tracking_id = p.product_tracking_id WHERE oi.order_tracking_id = o.order_tracking_id LIMIT 1)
+			COALESCE((SELECT oi.product_tracking_id FROM order_items oi WHERE oi.order_tracking_id = o.order_tracking_id LIMIT 1), 'N/A'),
+			COALESCE((SELECT p.name FROM products p JOIN order_items oi ON oi.product_tracking_id = p.product_tracking_id WHERE oi.order_tracking_id = o.order_tracking_id LIMIT 1), 'N/A'),
+			COALESCE(o.rider_tracking_id, d.rider_tracking_id, 'UNASSIGNED'),
+			COALESCE(d.status, 'PENDING')
 		FROM orders o
+		LEFT JOIN users c ON o.customer_tracking_id = c.tracking_id
 		LEFT JOIN stores s ON o.store_tracking_id = s.store_tracking_id
 		LEFT JOIN deliveries d ON o.order_tracking_id = d.order_tracking_id
 		WHERE o.order_tracking_id = $1
@@ -151,30 +224,24 @@ func (s *AdminSurveillanceService) GetCompleteOrderLineage(ctx context.Context, 
 	`
 
 	var r AdminLineageReport
-	var riderID *string
-	var deliveryStatus *string
 
-	err := s.dbReader.QueryRow(ctx, query, orderTrackingID).Scan(
-		&r.OrderID, &r.OrderStatus, &r.TotalAmount,
+	err = s.dbReader.QueryRow(ctx, query, orderTrackingID).Scan(
+		&r.OrderID,
+		&r.OrderStatus,
+		&r.TotalAmount,
 		&r.CustomerID,
+		&r.CustomerName,
+		&r.StoreID,
 		&r.StoreName,
-		&riderID, &deliveryStatus,
-		&r.ProductID, &r.ProductName,
+		&r.ProductID,
+		&r.ProductName,
+		&r.RiderID,
+		&r.DeliveryStatus,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("relational lineage fetch failed: %w", err)
 	}
 
-	if riderID != nil && *riderID != "" {
-		r.RiderID = *riderID
-	} else {
-		r.RiderID = "UNASSIGNED"
-	}
-	if deliveryStatus != nil && *deliveryStatus != "" {
-		r.DeliveryStatus = *deliveryStatus
-	} else {
-		r.DeliveryStatus = "PENDING"
-	}
 	r.CurrentHexagon = "N/A"
 
 	// Graph audit: verify topological chain in Neo4j (graceful degradation
@@ -252,16 +319,28 @@ func (s *AdminSurveillanceService) ListPendingVerifications(ctx context.Context,
 	return users, total, rows.Err()
 }
 
-// ApproveUser verifies a user (rider/vendor) so they can log in.
+// ApproveUser verifies a user (rider/vendor) so they can log in and cascades activation to their store/products.
 func (s *AdminSurveillanceService) ApproveUser(ctx context.Context, trackingID string) error {
-	query := `UPDATE users SET is_verified = true, updated_at = NOW() WHERE tracking_id = $1`
-	res, err := s.dbReader.Exec(ctx, query, trackingID)
+	query := `UPDATE users SET is_verified = true, verification_status = 'approved', updated_at = NOW() WHERE tracking_id = $1`
+	res, err := s.dbWriter.Exec(ctx, query, trackingID)
 	if err != nil {
 		return err
 	}
 	if res.RowsAffected() == 0 {
 		return fmt.Errorf("user not found")
 	}
+
+	// Cascade activation to vendor stores and products so their catalog is
+	// immediately visible. Best-effort: the user is already verified at this
+	// point, but a failed cascade leaves their catalog invisible — so every
+	// failure is logged loudly for ops follow-up instead of being swallowed.
+	if _, err := s.dbWriter.Exec(ctx, `UPDATE stores SET is_active = true, updated_at = NOW() WHERE vendor_tracking_id = $1`, trackingID); err != nil {
+		log.Printf("[ADMIN] CRITICAL: store activation cascade failed for vendor %s: %v", trackingID, err)
+	}
+	if _, err := s.dbWriter.Exec(ctx, `UPDATE products SET is_active = true, updated_at = NOW() WHERE vendor_tracking_id = $1`, trackingID); err != nil {
+		log.Printf("[ADMIN] CRITICAL: product activation cascade failed for vendor %s: %v", trackingID, err)
+	}
+
 	return nil
 }
 
@@ -452,23 +531,29 @@ func (s *AdminSurveillanceService) ListAllUsers(ctx context.Context, role string
 	return users, total, rows.Err()
 }
 
-// GetFullOrderLineage returns order items, delivery gig, ride, and timeline events.
-func (s *AdminSurveillanceService) GetFullOrderLineage(ctx context.Context, orderTrackingID string) (*FullLineageReport, error) {
+// GetFullOrderLineage returns order items, delivery gig, ride, and timeline events for any of the 8 entity IDs.
+func (s *AdminSurveillanceService) GetFullOrderLineage(ctx context.Context, rawTrackingID string) (*FullLineageReport, error) {
 	traceID, ok := ctx.Value("trace_id").(string)
 	if !ok {
 		traceID = "ORPHAN-TRACE"
 	}
-	log.Printf("[SECURITY-AUDIT] [TraceID: %s] Full lineage sweep for order: %s", traceID, orderTrackingID)
+
+	orderTrackingID, err := s.resolveOrderTrackingID(ctx, rawTrackingID)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Printf("[SECURITY-AUDIT] [TraceID: %s] Full lineage sweep for order: %s (from %s)", traceID, orderTrackingID, rawTrackingID)
 
 	query := `
 		SELECT
 			o.order_tracking_id, o.status, o.total_amount,
 			o.customer_tracking_id,
 			COALESCE(c.full_name, ''),
-			o.store_tracking_id,
+			COALESCE(o.store_tracking_id, 'N/A'),
 			COALESCE(s.store_name, 'N/A'),
-			COALESCE(o.rider_tracking_id, d.rider_tracking_id),
-			d.tracking_id,
+			COALESCE(o.rider_tracking_id, d.rider_tracking_id, 'UNASSIGNED'),
+			COALESCE(d.tracking_id, 'N/A'),
 			COALESCE(d.status, 'PENDING')
 		FROM orders o
 		LEFT JOIN users c ON o.customer_tracking_id = c.tracking_id
@@ -478,8 +563,8 @@ func (s *AdminSurveillanceService) GetFullOrderLineage(ctx context.Context, orde
 		LIMIT 1
 	`
 	var r FullLineageReport
-	var riderID, deliveryID, deliveryStatus *string
-	err := s.dbReader.QueryRow(ctx, query, orderTrackingID).Scan(
+	var riderID, deliveryID, deliveryStatus string
+	err = s.dbReader.QueryRow(ctx, query, orderTrackingID).Scan(
 		&r.OrderID, &r.OrderStatus, &r.TotalAmount,
 		&r.CustomerID, &r.CustomerName,
 		&r.StoreID, &r.StoreName,
@@ -488,17 +573,9 @@ func (s *AdminSurveillanceService) GetFullOrderLineage(ctx context.Context, orde
 	if err != nil {
 		return nil, fmt.Errorf("full lineage fetch failed: %w", err)
 	}
-	if riderID != nil && *riderID != "" {
-		r.RiderID = *riderID
-	}
-	if deliveryID != nil {
-		r.DeliveryID = *deliveryID
-	}
-	if deliveryStatus != nil && *deliveryStatus != "" {
-		r.DeliveryStatus = *deliveryStatus
-	} else {
-		r.DeliveryStatus = "PENDING"
-	}
+	r.RiderID = riderID
+	r.DeliveryID = deliveryID
+	r.DeliveryStatus = deliveryStatus
 	r.RideID = "N/A"
 	r.RideStatus = "N/A"
 
@@ -577,7 +654,7 @@ func (s *AdminSurveillanceService) GetDisputedOrders(ctx context.Context) ([]Dis
 }
 
 // ResolveDispute resolves a frozen escrow hold.
-// If vendor_guilty or rider_guilty -> refund to customer wallet.
+// If vendor_guilty or rider_guilty -> refund to customer wallet and penalize guilty party.
 // If customer_guilty -> release funds to vendor/rider.
 func (s *AdminSurveillanceService) ResolveDispute(ctx context.Context, orderTrackingID string, decision string) error {
 	// First fetch the escrow record
@@ -627,7 +704,27 @@ func (s *AdminSurveillanceService) ResolveDispute(ctx context.Context, orderTrac
 			ON CONFLICT (customer_tracking_id) DO UPDATE SET balance = customer_wallet.balance + $2, updated_at = NOW()
 		`
 		_, err = s.dbReader.Exec(ctx, upsertWallet, customerID, escrowAmount)
-		return err
+		if err != nil {
+			return err
+		}
+
+		// Penalty debits:
+		if decision == "rider_guilty" {
+			var riderTrackingID string
+			_ = s.dbReader.QueryRow(ctx, "SELECT COALESCE(rider_tracking_id, '') FROM orders WHERE order_tracking_id = $1", orderTrackingID).Scan(&riderTrackingID)
+			if riderTrackingID != "" {
+				_, _ = s.dbReader.Exec(ctx, "UPDATE rider_wallet SET balance = balance - $1, updated_at = NOW() WHERE rider_tracking_id = $2", escrowAmount, riderTrackingID)
+			}
+		}
+		if decision == "vendor_guilty" {
+			var vendorTrackingID string
+			_ = s.dbReader.QueryRow(ctx, "SELECT COALESCE(s.vendor_tracking_id, '') FROM orders o JOIN stores s ON o.store_tracking_id = s.store_tracking_id WHERE o.order_tracking_id = $1", orderTrackingID).Scan(&vendorTrackingID)
+			if vendorTrackingID != "" {
+				_, _ = s.dbReader.Exec(ctx, "UPDATE vendor_wallet SET balance = balance - $1, updated_at = NOW() WHERE vendor_tracking_id = $2", escrowAmount, vendorTrackingID)
+			}
+		}
+
+		return nil
 
 	} else if decision == "customer_guilty" {
 		// Unfreeze the escrow, let the cron job settle it
@@ -640,4 +737,134 @@ func (s *AdminSurveillanceService) ResolveDispute(ctx context.Context, orderTrac
 	}
 
 	return fmt.Errorf("invalid dispute decision: %s", decision)
+}
+
+// PayFastStats provides aggregated metrics on PayFast transactions
+type PayFastStats struct {
+	TotalCount     int     `json:"total_count"`
+	PassedCount    int     `json:"passed_count"`
+	FailedCount    int     `json:"failed_count"`
+	InFlightCount  int     `json:"in_flight_count"`
+	TotalVolume    float64 `json:"total_volume"`
+	PassedVolume   float64 `json:"passed_volume"`
+	FailedVolume   float64 `json:"failed_volume"`
+	InFlightVolume float64 `json:"in_flight_volume"`
+}
+
+// PayFastTransactionItem represents a detailed PayFast transaction record for the admin panel
+type PayFastTransactionItem struct {
+	TransactionID string  `json:"transaction_id"`
+	OrderID       string  `json:"order_id"`
+	GatewayTxnID  string  `json:"gateway_txn_id"`
+	Amount        float64 `json:"amount"`
+	Currency      string  `json:"currency"`
+	Status        string  `json:"status"`
+	ErrorMessage  string  `json:"error_message"`
+	CustomerName  string  `json:"customer_name"`
+	CustomerPhone string  `json:"customer_phone"`
+	EscrowStatus  string  `json:"escrow_status"`
+	CreatedAt     string  `json:"created_at"`
+	UpdatedAt     string  `json:"updated_at"`
+}
+
+// GetPayFastTransactionSummary aggregates statistics of all PayFast payments.
+func (s *AdminSurveillanceService) GetPayFastTransactionSummary(ctx context.Context) (*PayFastStats, error) {
+	query := `
+		SELECT 
+			COUNT(*) as total_count,
+			COUNT(*) FILTER (WHERE status = 'captured') as passed_count,
+			COUNT(*) FILTER (WHERE status = 'failed') as failed_count,
+			COUNT(*) FILTER (WHERE status IN ('pending', 'processing', '3ds_required', 'settlement_pending', 'gateway_pending')) as in_flight_count,
+			COALESCE(SUM(amount), 0)::float8 as total_volume,
+			COALESCE(SUM(amount) FILTER (WHERE status = 'captured'), 0)::float8 as passed_volume,
+			COALESCE(SUM(amount) FILTER (WHERE status = 'failed'), 0)::float8 as failed_volume,
+			COALESCE(SUM(amount) FILTER (WHERE status IN ('pending', 'processing', '3ds_required', 'settlement_pending', 'gateway_pending')), 0)::float8 as in_flight_volume
+		FROM payment_transactions
+		WHERE gateway = 'payfast'
+	`
+	var stats PayFastStats
+	err := s.dbReader.QueryRow(ctx, query).Scan(
+		&stats.TotalCount,
+		&stats.PassedCount,
+		&stats.FailedCount,
+		&stats.InFlightCount,
+		&stats.TotalVolume,
+		&stats.PassedVolume,
+		&stats.FailedVolume,
+		&stats.InFlightVolume,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch PayFast summary: %w", err)
+	}
+	return &stats, nil
+}
+
+// GetPayFastTransactions fetches a paginated, filterable list of PayFast transactions.
+func (s *AdminSurveillanceService) GetPayFastTransactions(ctx context.Context, statusFilter string, limit, offset int) ([]PayFastTransactionItem, int, error) {
+	baseWhere := "WHERE pt.gateway = 'payfast'"
+	if statusFilter == "passed" || statusFilter == "captured" {
+		baseWhere += " AND pt.status = 'captured'"
+	} else if statusFilter == "failed" {
+		baseWhere += " AND pt.status = 'failed'"
+	} else if statusFilter == "in_flight" || statusFilter == "pending" {
+		baseWhere += " AND pt.status IN ('pending', 'processing', '3ds_required', 'settlement_pending', 'gateway_pending')"
+	}
+
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM payment_transactions pt %s", baseWhere)
+	var total int
+	if err := s.dbReader.QueryRow(ctx, countQuery).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("failed to count PayFast transactions: %w", err)
+	}
+
+	query := fmt.Sprintf(`
+		SELECT 
+			pt.transaction_id,
+			pt.order_tracking_id,
+			COALESCE(pt.gateway_txn_id, ''),
+			COALESCE(pt.amount, 0)::float8,
+			pt.currency,
+			pt.status,
+			COALESCE(pt.error_message, ''),
+			COALESCE(u.full_name, 'Customer'),
+			COALESCE(u.phone, ''),
+			COALESCE(e.status, 'none'),
+			to_char(pt.created_at, 'YYYY-MM-DD HH24:MI:SS'),
+			to_char(pt.updated_at, 'YYYY-MM-DD HH24:MI:SS')
+		FROM payment_transactions pt
+		LEFT JOIN orders o ON o.order_tracking_id = pt.order_tracking_id
+		LEFT JOIN users u ON u.tracking_id = o.customer_tracking_id
+		LEFT JOIN escrow_holds e ON e.order_tracking_id = pt.order_tracking_id
+		%s
+		ORDER BY pt.created_at DESC
+		LIMIT $1 OFFSET $2
+	`, baseWhere)
+
+	rows, err := s.dbReader.Query(ctx, query, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query PayFast transactions: %w", err)
+	}
+	defer rows.Close()
+
+	var list []PayFastTransactionItem
+	for rows.Next() {
+		var item PayFastTransactionItem
+		if err := rows.Scan(
+			&item.TransactionID,
+			&item.OrderID,
+			&item.GatewayTxnID,
+			&item.Amount,
+			&item.Currency,
+			&item.Status,
+			&item.ErrorMessage,
+			&item.CustomerName,
+			&item.CustomerPhone,
+			&item.EscrowStatus,
+			&item.CreatedAt,
+			&item.UpdatedAt,
+		); err != nil {
+			return nil, 0, err
+		}
+		list = append(list, item)
+	}
+	return list, total, rows.Err()
 }

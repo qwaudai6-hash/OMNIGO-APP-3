@@ -20,6 +20,8 @@ import (
 )
 
 type ProductService struct {
+	// LOW-03: shared HTTP client for AI-engine calls (connection reuse).
+	aiHTTPClient *http.Client
 	repo        *repository.ProductRepository
 	redisClient redis.UniversalClient // Multi-shard cluster alignment fixed
 	meiliClient *meilisearch.Client
@@ -28,10 +30,11 @@ type ProductService struct {
 
 func NewProductService(repo *repository.ProductRepository, rdb redis.UniversalClient, meili *meilisearch.Client, kafkaClient *messaging.KafkaClient) *ProductService {
 	return &ProductService{
-		repo:        repo,
-		redisClient: rdb,
-		meiliClient: meili,
-		kafkaClient: kafkaClient,
+		repo:         repo,
+		redisClient:  rdb,
+		meiliClient:  meili,
+		kafkaClient:  kafkaClient,
+		aiHTTPClient: &http.Client{Timeout: 3 * time.Second},
 	}
 }
 
@@ -54,6 +57,7 @@ func (s *ProductService) CreateProduct(ctx context.Context, req *models.CreatePr
 		Stock:             req.Stock,
 		ImageURL:          req.ImageURL,
 		Category:          req.Category,
+		IsActive:          true, // Default active so product immediately appears on customer marketplace
 	}
 
 	// Step 1: Write to Primary Database
@@ -65,6 +69,11 @@ func (s *ProductService) CreateProduct(ctx context.Context, req *models.CreatePr
 	// Step 2: HIGH-SCALE PIPELINED INVALIDATION WITH REPLICATION LAG DELAY
 	if s.redisClient != nil {
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[PANIC-RECOVER] Redis invalidation panic: %v", r)
+				}
+			}()
 			bgCtx := context.Background()
 
 			// ANTI-LAG REPLICATION SHIELD: Wait for 500ms before evicting cache.
@@ -95,6 +104,11 @@ func (s *ProductService) CreateProduct(ctx context.Context, req *models.CreatePr
 	// Step 3: Write to Meilisearch Index
 	if s.meiliClient != nil {
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[PANIC-RECOVER] Meilisearch index add panic: %v", r)
+				}
+			}()
 			index := s.meiliClient.Index("products")
 			_, _ = index.AddDocuments(prod) // Note: Prod struct is JSON marshaled
 		}()
@@ -110,8 +124,13 @@ func (s *ProductService) GetProduct(ctx context.Context, trackingID string) (*mo
 	return s.repo.GetProductByTrackingID(ctx, trackingID)
 }
 
+// GetProductByNumericID fetches a product by its internal serial id.
+func (s *ProductService) GetProductByNumericID(ctx context.Context, id int64) (*models.Product, error) {
+	return s.repo.GetProductByNumericID(ctx, id)
+}
+
 // ListProducts returns a paginated list using optimal Cache-Aside Read with Pipeline Tracker
-func (s *ProductService) ListProducts(ctx context.Context, limit, offset int, search, category, sort string, minPrice, maxPrice float64) ([]*models.Product, error) {
+func (s *ProductService) ListProducts(ctx context.Context, limit, offset int, search, category, storeID, sort string, minPrice, maxPrice float64) ([]*models.Product, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
@@ -120,8 +139,8 @@ func (s *ProductService) ListProducts(ctx context.Context, limit, offset int, se
 	}
 
 	// Dynamic Cache Key
-	cacheKey := fmt.Sprintf("products:list:limit=%d:offset=%d:search=%s:category=%s:sort=%s:min=%.0f:max=%.0f",
-		limit, offset, search, category, sort, minPrice, maxPrice)
+	cacheKey := fmt.Sprintf("products:list:limit=%d:offset=%d:search=%s:category=%s:store=%s:sort=%s:min=%.0f:max=%.0f",
+		limit, offset, search, category, storeID, sort, minPrice, maxPrice)
 
 	if s.redisClient != nil {
 		// Step 1: Try fetching from Redis Cache (Fast Path)
@@ -135,14 +154,15 @@ func (s *ProductService) ListProducts(ctx context.Context, limit, offset int, se
 	}
 
 	// Step 1.5: If search is provided and Meilisearch is active, use Meilisearch instead of PG replica
-	if search != "" && s.meiliClient != nil {
+	if search != "" && s.meiliClient != nil && storeID == "" {
 		index := s.meiliClient.Index("products")
 		req := &meilisearch.SearchRequest{
 			Limit:  int64(limit),
 			Offset: int64(offset),
 		}
 		if category != "" {
-			req.Filter = []string{fmt.Sprintf("Category = '%s'", category)}
+			safeCategory := strings.ReplaceAll(category, "'", "\\'")
+			req.Filter = []string{fmt.Sprintf("category = '%s'", safeCategory)}
 		}
 
 		resp, err := index.Search(search, req)
@@ -160,7 +180,7 @@ func (s *ProductService) ListProducts(ctx context.Context, limit, offset int, se
 	}
 
 	// Step 2: Cache Miss. Database (Read Replica) se fetch karein.
-	products, err := s.repo.ListProducts(ctx, limit, offset, search, category, sort, minPrice, maxPrice)
+	products, err := s.repo.ListProducts(ctx, limit, offset, search, category, storeID, sort, minPrice, maxPrice)
 	if err != nil {
 		return nil, fmt.Errorf("database replica fetch aborted: %w", err)
 	}
@@ -168,6 +188,11 @@ func (s *ProductService) ListProducts(ctx context.Context, limit, offset int, se
 	// Step 3: Write-Behind Pipeline for Set Indexing & Cache Storage
 	if s.redisClient != nil {
 		go func(prods []*models.Product) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[PANIC-RECOVER] Redis cache store panic: %v", r)
+				}
+			}()
 			bgCtx := context.Background()
 
 			jsonData, err := json.Marshal(prods)
@@ -199,7 +224,10 @@ func (s *ProductService) GetRecommendations(ctx context.Context, productTracking
 		log.Printf("Warning: AI_ENGINE_URL not set, recommendations endpoint will return 503")
 		return nil, fmt.Errorf("AI_ENGINE_URL not configured")
 	}
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := s.aiHTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 3 * time.Second}
+	}
 	aiPayload, _ := json.Marshal(map[string]string{"product_tracking_id": productTrackingID})
 
 	req, err := http.NewRequestWithContext(ctx, "POST", aiURL+"/api/v1/ai/frequently-bought-together", strings.NewReader(string(aiPayload)))
@@ -221,7 +249,7 @@ func (s *ProductService) GetRecommendations(ctx context.Context, productTracking
 	if len(recommendedIDs) == 0 {
 		currentProd, err := s.repo.GetProductByTrackingID(ctx, productTrackingID)
 		if err == nil && currentProd.Category != "" {
-			catProducts, err := s.repo.ListProducts(ctx, 5, 0, "", currentProd.Category, "newest", 0, 0)
+			catProducts, err := s.repo.ListProducts(ctx, 5, 0, "", currentProd.Category, "", "newest", 0, 0)
 			if err == nil {
 				var filtered []*models.Product
 				for _, p := range catProducts {
@@ -247,10 +275,21 @@ func (s *ProductService) UpdateProductStockSecure(ctx context.Context, productTr
 
 	s.invalidateCache()
 
-	// Emit product.updated event with full details
+	// Emit product.updated event with full details & sync to Meilisearch
 	prod, err := s.repo.GetProductByTrackingID(ctx, productTrackingID)
-	if err == nil {
+	if err == nil && prod != nil {
 		s.emitEvent(ctx, productTrackingID, "product.updated", prod)
+		if s.meiliClient != nil {
+			go func(p *models.Product) {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("[PANIC-RECOVER] Meilisearch stock update panic: %v", r)
+					}
+				}()
+				index := s.meiliClient.Index("products")
+				_, _ = index.AddDocuments(p)
+			}(prod)
+		}
 	}
 
 	return nil
@@ -268,6 +307,18 @@ func (s *ProductService) DeleteProductSecure(ctx context.Context, productTrackin
 		"product_tracking_id": productTrackingID,
 	})
 
+	if s.meiliClient != nil {
+		go func(pID string) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[PANIC-RECOVER] Meilisearch delete panic: %v", r)
+				}
+			}()
+			index := s.meiliClient.Index("products")
+			_, _ = index.DeleteDocument(pID)
+		}(productTrackingID)
+	}
+
 	return nil
 }
 
@@ -276,8 +327,9 @@ func (s *ProductService) DeleteProductSecure(ctx context.Context, productTrackin
 // and the store ownership is verified before inserting. This prevents a vendor
 // from spoofing another merchant's catalog.
 func (s *ProductService) CreateProductForVendor(ctx context.Context, vendorTrackingID string, req *models.VendorCreateProductRequest) (*models.Product, error) {
-	// 1. Verify the vendor actually owns the store_tracking_id they provided.
-	if err := s.repo.VerifyStoreOwnership(ctx, req.StoreTrackingID, vendorTrackingID); err != nil {
+	// 1. Verify or automatically resolve the vendor's primary store.
+	storeTrackingID, err := s.repo.ResolveOrVerifyStoreOwnership(ctx, req.StoreTrackingID, vendorTrackingID)
+	if err != nil {
 		return nil, fmt.Errorf("ownership verification failed: %w", err)
 	}
 
@@ -286,7 +338,7 @@ func (s *ProductService) CreateProductForVendor(ctx context.Context, vendorTrack
 	prod := &models.Product{
 		ProductTrackingID: utid,
 		VendorTrackingID:  vendorTrackingID,
-		StoreTrackingID:   req.StoreTrackingID,
+		StoreTrackingID:   storeTrackingID,
 		SKU:               req.SKU,
 		Name:              req.Name,
 		Description:       req.Description,
@@ -294,22 +346,22 @@ func (s *ProductService) CreateProductForVendor(ctx context.Context, vendorTrack
 		Stock:             req.Stock,
 		ImageURL:          req.ImageURL,
 		Category:          req.Category,
+		IsActive:          true, // Default active so product immediately appears on customer marketplace
 	}
-
-	isVerified, err := s.repo.GetVendorVerificationStatus(ctx, vendorTrackingID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to verify vendor status: %w", err)
-	}
-	prod.IsActive = isVerified
 
 	// 2. Write to Primary DB
 	if err := s.repo.CreateProduct(ctx, prod); err != nil {
 		return nil, fmt.Errorf("database transaction execution aborted: %w", err)
 	}
 
-	// 3. Write to Meilisearch Index
+	// 3. Write to Meilisearch Index with Panic Recovery
 	if s.meiliClient != nil {
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[PANIC-RECOVER] Meilisearch index add panic: %v", r)
+				}
+			}()
 			index := s.meiliClient.Index("products")
 			_, _ = index.AddDocuments(prod)
 		}()
@@ -362,10 +414,21 @@ func (s *ProductService) UpdateProduct(ctx context.Context, productTrackingID, v
 
 	s.invalidateCache()
 
-	// Emit product.updated event with full details
+	// Emit product.updated event with full details & sync to Meilisearch
 	prod, err := s.repo.GetProductByTrackingID(ctx, productTrackingID)
-	if err == nil {
+	if err == nil && prod != nil {
 		s.emitEvent(ctx, productTrackingID, "product.updated", prod)
+		if s.meiliClient != nil {
+			go func(p *models.Product) {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("[PANIC-RECOVER] Meilisearch index update panic: %v", r)
+					}
+				}()
+				index := s.meiliClient.Index("products")
+				_, _ = index.AddDocuments(p)
+			}(prod)
+		}
 	}
 
 	return nil
@@ -375,10 +438,16 @@ func (s *ProductService) UpdateProduct(ctx context.Context, productTrackingID, v
 func (s *ProductService) invalidateCache() {
 	if s.redisClient != nil {
 		go func() {
-			bgCtx := context.Background()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[PANIC-RECOVER] Redis cache invalidation panic: %v", r)
+				}
+			}()
+			bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
 
 			// ANTI-LAG REPLICATION SHIELD: wait for write propagation
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(300 * time.Millisecond)
 
 			trackingSetKey := "invalidations:product:catalog"
 

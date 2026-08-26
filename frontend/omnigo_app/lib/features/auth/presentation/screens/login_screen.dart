@@ -101,6 +101,8 @@ class LoginScreenState extends State<LoginScreen> {
       route = '/rider-map';
     } else if (returnedRole == 'vendor') {
       route = '/vendor-dashboard';
+    } else if (returnedRole == 'admin' || returnedRole == 'super_admin') {
+      route = '/admin-surveillance';
     }
     unawaited(Navigator.pushReplacementNamed(context, route, arguments: trackingId));
 
@@ -108,12 +110,11 @@ class LoginScreenState extends State<LoginScreen> {
   }
 
   /// Modal dialog that asks the user for the 6-digit TOTP code from
-  /// their authenticator app. Returns the entered code, or null if
-  /// the user cancelled.
-  Future<String?> _promptTwoFactorCode(BuildContext context, {required String email}) async {
+  /// their authenticator app when logging into a 2FA-protected account.
+  Future<String?> _promptTwoFactorCode(BuildContext context, {required String email}) {
     final codeController = TextEditingController();
     String? errorText;
-    return showDialog<String?>(
+    return showDialog<String>(
       context: context,
       barrierDismissible: false,
       builder: (ctx) {
@@ -173,7 +174,7 @@ class LoginScreenState extends State<LoginScreen> {
         backgroundColor: Colors.transparent,
         elevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.white),
+          icon: Icon(Icons.arrow_back, color: Theme.of(context).colorScheme.onSurface),
           onPressed: () => Navigator.pop(context),
         ),
       ),
@@ -198,7 +199,6 @@ class LoginScreenState extends State<LoginScreen> {
                 TextFormField(
                   controller: _emailController,
                   keyboardType: TextInputType.emailAddress,
-                  style: const TextStyle(color: Colors.white),
                   validator: (v) {
                     if (v == null || v.trim().isEmpty) return 'Email required';
                     if (!v.contains('@') || !v.contains('.')) return 'Enter valid email';
@@ -214,7 +214,6 @@ class LoginScreenState extends State<LoginScreen> {
                 TextFormField(
                   controller: _passwordController,
                   obscureText: true,
-                  style: const TextStyle(color: Colors.white),
                   validator: (v) {
                     if (v == null || v.isEmpty) return 'Password required';
                     if (v.length < 6) return 'Min 6 characters';

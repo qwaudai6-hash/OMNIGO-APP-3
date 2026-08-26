@@ -99,6 +99,11 @@ func (w *Worker) Start(ctx context.Context) {
 
 	// Start background Kafka consumer poll loop
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[CRITICAL RECOVER] Syncworker Kafka consumer panicked: %v", r)
+			}
+		}()
 		for {
 			select {
 			case <-ctx.Done():
@@ -167,44 +172,53 @@ func (w *Worker) flushBatch(ctx context.Context, batch []LocationPayload) {
 
 		_, err = w.db.Exec(ctx, `
 			INSERT INTO rider_location_history (rider_tracking_id, latitude, longitude, created_at, speed, bearing, battery_pct)
-			VALUES ($1, $3, $2, to_timestamp($4 / 1000.0), $6, $7, $8)
-		`, loc.RiderID, loc.Longitude, loc.Latitude, loc.TimestampMS, loc.Status, loc.SpeedMPS, loc.BearingDegrees, loc.BatteryPct)
+			VALUES ($1, $2, $3, to_timestamp($4 / 1000.0), $5, $6, $7)
+		`, loc.RiderID, loc.Latitude, loc.Longitude, loc.TimestampMS, loc.SpeedMPS, loc.BearingDegrees, loc.BatteryPct)
 		if err != nil {
 			log.Printf("Failed to insert location for rider %s: %v", loc.RiderID, err)
 		}
 	}
 
-	// 2. Redis Pipelined Live Geospatial Writes (H3 Res-7 Sharded ZSET keys)
+	// 2. Redis Pipelined Live Geospatial Writes (H3 Res-7 & Res-5 Sharded keys)
 	if w.redis != nil && len(batch) > 0 {
-		// Read pass: Fetch current clocks and last hexes in a single batch
+		// Read pass: Fetch current clocks, last hexes, and last members in a single batch
 		readPipe := w.redis.Pipeline()
 		clockCmds := make(map[string]*redis.StringCmd)
 		hexCmds := make(map[string]*redis.StringCmd)
+		h5Cmds := make(map[string]*redis.StringCmd)
+		memberCmds := make(map[string]*redis.StringCmd)
 
 		for _, loc := range batch {
 			if _, ok := clockCmds[loc.RiderID]; !ok {
 				clockCmds[loc.RiderID] = readPipe.Get(ctx, "rider:clock:"+loc.RiderID)
 				hexCmds[loc.RiderID] = readPipe.Get(ctx, "rider:last_h7:"+loc.RiderID)
+				h5Cmds[loc.RiderID] = readPipe.Get(ctx, "rider:last_h5:"+loc.RiderID)
+				memberCmds[loc.RiderID] = readPipe.Get(ctx, "rider:last_member:"+loc.RiderID)
 			}
 		}
 
 		// Run batch reads
 		_, _ = readPipe.Exec(ctx)
 
+		inMemoryClocks := make(map[string]int64)
+
 		// Write pass: Perform sharded updates and deletes in a single batch
 		writePipe := w.redis.Pipeline()
 		for _, loc := range batch {
 			// Verify Vector Clock
-			if cmd, ok := clockCmds[loc.RiderID]; ok {
-				lastClockStr, err := cmd.Result()
-				if err == nil && lastClockStr != "" {
-					if lastClock, err := strconv.ParseInt(lastClockStr, 10, 64); err == nil {
-						if loc.TimestampMS <= lastClock {
-							continue // Skip stale update
-						}
+			lastClock := inMemoryClocks[loc.RiderID]
+			if lastClock == 0 {
+				if cmd, ok := clockCmds[loc.RiderID]; ok {
+					if lastClockStr, err := cmd.Result(); err == nil && lastClockStr != "" {
+						lastClock, _ = strconv.ParseInt(lastClockStr, 10, 64)
 					}
 				}
 			}
+
+			if loc.TimestampMS <= lastClock {
+				continue // Skip stale update
+			}
+			inMemoryClocks[loc.RiderID] = loc.TimestampMS
 
 			// Store latest vector clock
 			writePipe.Set(ctx, "rider:clock:"+loc.RiderID, loc.TimestampMS, 24*time.Hour)
@@ -215,15 +229,30 @@ func (w *Worker) flushBatch(ctx context.Context, batch []LocationPayload) {
 				oldHexHex, _ = cmd.Result()
 			}
 
+			var oldH5Hex string
+			if cmd, ok := h5Cmds[loc.RiderID]; ok {
+				oldH5Hex, _ = cmd.Result()
+			}
+
+			var oldMemberJSON string
+			if cmd, ok := memberCmds[loc.RiderID]; ok {
+				oldMemberJSON, _ = cmd.Result()
+			}
+
 			if loc.Status == "offline" {
 				if oldHexHex != "" {
 					oldHexKey := fmt.Sprintf("telemetry:h3:res7:{%s}", oldHexHex)
-					oldMemberJSON, _ := w.redis.Get(ctx, "rider:last_member:"+loc.RiderID).Result()
 					if oldMemberJSON != "" {
 						writePipe.ZRem(ctx, oldHexKey, oldMemberJSON)
 					}
 				}
+				if oldH5Hex != "" {
+					oldH5Key := fmt.Sprintf("riders:locations:h3:%s", oldH5Hex)
+					writePipe.ZRem(ctx, oldH5Key, loc.RiderID)
+				}
 				writePipe.Del(ctx, lastHexKey)
+				writePipe.Del(ctx, "rider:last_h5:"+loc.RiderID)
+				writePipe.Del(ctx, "rider:coords:"+loc.RiderID)
 				writePipe.Del(ctx, "rider:last_member:"+loc.RiderID)
 			} else if loc.Latitude != 0 && loc.Longitude != 0 {
 				coord := h3.GeoCoord{Latitude: loc.Latitude, Longitude: loc.Longitude}
@@ -235,16 +264,27 @@ func (w *Worker) flushBatch(ctx context.Context, batch []LocationPayload) {
 				metaBytes, _ := json.Marshal(loc)
 				metaJSON := string(metaBytes)
 
-				// If hexagon changed, remove from old hexagon shard
+				// If H7 hexagon changed, remove from old H7 shard
 				if oldHexHex != "" && oldHexHex != newHexHex {
 					oldHexKey := fmt.Sprintf("telemetry:h3:res7:{%s}", oldHexHex)
-					oldMemberJSON, _ := w.redis.Get(ctx, "rider:last_member:"+loc.RiderID).Result()
 					if oldMemberJSON != "" {
 						writePipe.ZRem(ctx, oldHexKey, oldMemberJSON)
 					}
 				}
 
-				// Add to new ZSET with score = current timestamp in seconds
+				// Calculate H5 hexagon for delivery gig dispatching & proximity queries
+				coord5 := h3.GeoCoord{Latitude: loc.Latitude, Longitude: loc.Longitude}
+				h5Hex := h3.FromGeo(coord5, 5)
+				newH5Hex := fmt.Sprintf("%x", h5Hex)
+				h5Key := fmt.Sprintf("riders:locations:h3:%s", newH5Hex)
+
+				// If H5 hexagon changed, remove rider from old H5 geospatial shard to prevent ghost riders
+				if oldH5Hex != "" && oldH5Hex != newH5Hex {
+					oldH5Key := fmt.Sprintf("riders:locations:h3:%s", oldH5Hex)
+					writePipe.ZRem(ctx, oldH5Key, loc.RiderID)
+				}
+
+				// Add to new H7 ZSET with score = current timestamp in seconds
 				nowSec := time.Now().Unix()
 				writePipe.ZAdd(ctx, newHexKey, redis.Z{
 					Score:  float64(nowSec),
@@ -252,14 +292,16 @@ func (w *Worker) flushBatch(ctx context.Context, batch []LocationPayload) {
 				})
 				writePipe.Expire(ctx, newHexKey, 300*time.Second)
 				writePipe.Set(ctx, lastHexKey, newHexHex, 300*time.Second)
+				writePipe.Set(ctx, "rider:last_h5:"+loc.RiderID, newH5Hex, 300*time.Second)
+				writePipe.Set(ctx, "rider:coords:"+loc.RiderID, metaJSON, 300*time.Second)
 				writePipe.Set(ctx, "rider:last_member:"+loc.RiderID, metaJSON, 300*time.Second)
 
-				// Syncworker also writes to the res-5 lookup index that the delivery
-				// service reads from when matching gigs to nearby riders.
-				coord5 := h3.GeoCoord{Latitude: loc.Latitude, Longitude: loc.Longitude}
-				h5Hex := h3.FromGeo(coord5, 5)
-				h5Key := fmt.Sprintf("riders:locations:h3:%x", h5Hex)
-				writePipe.SAdd(ctx, h5Key, loc.RiderID)
+				// Write to the res-5 lookup index for GeoRadius dispatch queries
+				writePipe.GeoAdd(ctx, h5Key, &redis.GeoLocation{
+					Longitude: loc.Longitude,
+					Latitude:  loc.Latitude,
+					Name:      loc.RiderID,
+				})
 				writePipe.Expire(ctx, h5Key, 300*time.Second)
 
 				// Auto-Prune location updates older than 5 minutes
@@ -417,11 +459,15 @@ func (w *Worker) directDBShardedWrite(ctx context.Context, loc LocationPayload) 
 		pruneTime := nowSec - 300
 		pipe.ZRemRangeByScore(ctx, newHexKey, "-inf", fmt.Sprintf("%d", pruneTime))
 
-		// Peak fast path must also populate the res-5 rider lookup index.
+		// Peak fast path must also populate the res-5 rider lookup index via GeoAdd.
 		coord5 := h3.GeoCoord{Latitude: loc.Latitude, Longitude: loc.Longitude}
 		h5Hex := h3.FromGeo(coord5, 5)
 		h5Key := fmt.Sprintf("riders:locations:h3:%x", h5Hex)
-		pipe.SAdd(ctx, h5Key, loc.RiderID)
+		pipe.GeoAdd(ctx, h5Key, &redis.GeoLocation{
+			Longitude: loc.Longitude,
+			Latitude:  loc.Latitude,
+			Name:      loc.RiderID,
+		})
 		pipe.Expire(ctx, h5Key, 300*time.Second)
 	}
 	if _, err := pipe.Exec(ctx); err != nil {

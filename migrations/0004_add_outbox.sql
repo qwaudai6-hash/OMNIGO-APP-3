@@ -1,4 +1,4 @@
-CREATE TABLE outbox_events (
+CREATE TABLE IF NOT EXISTS outbox_events (
     id            BIGSERIAL PRIMARY KEY,
     aggregate_id  VARCHAR(50) NOT NULL,
     topic         VARCHAR(100) NOT NULL,

@@ -45,7 +45,7 @@ curl -s -X POST -H "Accept:application/json" -H "Content-Type:application/json" 
       "database.hostname": "postgres-primary",
       "database.port": "5432",
       "database.user": "admin",
-      "database.password": "admin123",
+      "database.password": "CHANGEME_ROTATED",
       "database.dbname": "omnigo",
       "table.include.list": "public.orders",
       "topic.prefix": "dbstream",

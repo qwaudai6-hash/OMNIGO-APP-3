@@ -16,7 +16,7 @@ CREATE TABLE users (
     id              BIGSERIAL PRIMARY KEY,
     tracking_id     VARCHAR(50) UNIQUE NOT NULL,        -- e.g. CUST-987654, VEND-123456, RIDR-555555
     email           VARCHAR(255) UNIQUE NOT NULL,
-    phone           VARCHAR(20) UNIQUE,
+    phone           VARCHAR(20),
     full_name       VARCHAR(255) NOT NULL,
     password_hash   TEXT NOT NULL,
     role            VARCHAR(20) NOT NULL,              -- 'customer', 'vendor', 'rider', 'admin'
@@ -36,7 +36,10 @@ CREATE TABLE users (
     latitude        DECIMAL(10,8),
     longitude       DECIMAL(11,8),
     -- Lifecycle flags
-    is_verified     BOOLEAN NOT NULL DEFAULT FALSE,    -- required for riders & vendors
+    background_check_url TEXT,
+    email_verified   BOOLEAN NOT NULL DEFAULT false,
+    two_factor_enabled BOOLEAN NOT NULL DEFAULT false,
+    is_verified      BOOLEAN NOT NULL DEFAULT FALSE,    -- required for riders & vendors
     is_active       BOOLEAN NOT NULL DEFAULT TRUE,
     -- KYC/KYB verification automation fields
     verification_status VARCHAR(20) NOT NULL DEFAULT 'unverified', -- unverified | pending | approved | rejected
@@ -67,6 +70,9 @@ CREATE TABLE stores (
     latitude          DECIMAL(10,8),
     longitude         DECIMAL(11,8),
     commission_rate   DECIMAL(5,2)  NOT NULL DEFAULT 2.00,
+    banner_url        TEXT,
+    is_active         BOOLEAN NOT NULL DEFAULT true,
+    
     is_verified       BOOLEAN NOT NULL DEFAULT FALSE,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -128,6 +134,17 @@ CREATE TABLE orders (
     customer_lat        DECIMAL(10,8),
     customer_lng        DECIMAL(11,8),
     admin_commission    DECIMAL(14,2) NOT NULL DEFAULT 0,
+    vendor_escrow    NUMERIC(12,2) DEFAULT 0.00,
+    delivery_escrow  NUMERIC(12,2) DEFAULT 0.00,
+    payment_status   VARCHAR(30) DEFAULT 'pending',
+    delivered_at     TIMESTAMPTZ,
+    escrow_released  BOOLEAN DEFAULT FALSE,
+    dispute_status   VARCHAR(20) DEFAULT 'NONE',
+    handover_photo_url TEXT,
+    handover_at      TIMESTAMPTZ,
+    handover_notes   TEXT,
+    handed_over_by_tracking_id VARCHAR(50),
+    
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     device_session_nonce VARCHAR(64),                 -- idempotency nonce from checkout
@@ -195,6 +212,9 @@ CREATE TABLE outbox_events (
     payload       JSONB NOT NULL,
     status        VARCHAR(20) NOT NULL DEFAULT 'PENDING',
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    retry_count   INT NOT NULL DEFAULT 0,
+    error_message TEXT,
     processed_at  TIMESTAMPTZ
 );
 
@@ -219,6 +239,10 @@ CREATE TABLE rides (
     fare_amount      DECIMAL(10,2) NOT NULL,
     admin_commission DECIMAL(10,2) NOT NULL DEFAULT 0,
     currency         VARCHAR(3)   NOT NULL DEFAULT 'PKR',
+    vehicle_type     VARCHAR(30) NOT NULL DEFAULT 'bike',
+    actual_distance_meters DOUBLE PRECISION,
+    actual_duration_seconds DOUBLE PRECISION,
+    
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -248,12 +272,12 @@ CREATE INDEX idx_favorites_product  ON favorites(product_tracking_id);
 CREATE TABLE reviews (
     id                  BIGSERIAL PRIMARY KEY,
     product_tracking_id VARCHAR(50) NOT NULL,
-    customer_tracking_id VARCHAR(50) NOT NULL,
+    user_tracking_id VARCHAR(50) NOT NULL,
     rating              INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
     comment             TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(product_tracking_id, customer_tracking_id)
+    UNIQUE(product_tracking_id, user_tracking_id)
 );
 
 CREATE INDEX idx_reviews_product ON reviews(product_tracking_id);
@@ -303,12 +327,13 @@ CREATE INDEX idx_rider_location_history_geo       ON rider_location_history USIN
 -- Refresh Tokens (Security RTR Engine)
 -- ────────────────────────────────────────────────────────────
 CREATE TABLE user_refresh_tokens (
-    id               UUID PRIMARY KEY,
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_tracking_id VARCHAR(50) NOT NULL,
     token_hash       VARCHAR(255) NOT NULL UNIQUE,
     expires_at       TIMESTAMPTZ NOT NULL,
     revoked          BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX idx_refresh_tokens_user_tracking_id ON user_refresh_tokens(user_tracking_id);
@@ -325,6 +350,9 @@ CREATE TABLE rider_wallet (
     rider_tracking_id   VARCHAR(50) UNIQUE NOT NULL,    -- FK -> users.tracking_id
     balance             DECIMAL(14,2) NOT NULL DEFAULT 0 CHECK (balance >= 0),
     lifetime_earnings   DECIMAL(14,2) NOT NULL DEFAULT 0 CHECK (lifetime_earnings >= 0),
+    cash_in_hand        DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+    is_cash_blocked     BOOLEAN NOT NULL DEFAULT FALSE,
+    
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -365,6 +393,9 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
     reference_id    VARCHAR(50),
     description     TEXT,
     idempotency_key VARCHAR(128) UNIQUE,
+    signature       VARCHAR(64) DEFAULT '',
+    signature_version INT DEFAULT 1,
+    
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -415,7 +446,8 @@ CREATE TABLE IF NOT EXISTS vendor_payouts (
     status              VARCHAR(20) NOT NULL DEFAULT 'pending',
     batch_id            UUID,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    completed_at        TIMESTAMPTZ
+    completed_at        TIMESTAMPTZ,
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_vendor_payouts_vendor ON vendor_payouts(vendor_tracking_id, status);
@@ -430,7 +462,8 @@ CREATE TABLE IF NOT EXISTS disputes (
     status              VARCHAR(20) NOT NULL DEFAULT 'open',
     resolution          TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    resolved_at         TIMESTAMPTZ
+    resolved_at         TIMESTAMPTZ,
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_disputes_order ON disputes(order_tracking_id);
@@ -447,3 +480,124 @@ CREATE TABLE IF NOT EXISTS vendor_wallet (
 );
 
 CREATE INDEX IF NOT EXISTS idx_vendor_wallet_vendor ON vendor_wallet(vendor_tracking_id);
+-- ────────────────────────────────────────────────────────────
+-- Additional Tables
+-- ────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS payment_transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    status VARCHAR(30) NOT NULL CHECK (status IN ('pending', 'processing', 'completed', 'failed', 'refunded')),
+    kind VARCHAR(30) NOT NULL,
+    idempotency_key VARCHAR(128) UNIQUE,
+    metadata JSONB,
+    callback_processed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS customer_wallet (
+    id BIGSERIAL PRIMARY KEY,
+    customer_tracking_id VARCHAR(50) UNIQUE NOT NULL,
+    balance DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+    lifetime_spent DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS carts (
+    id BIGSERIAL PRIMARY KEY,
+    customer_tracking_id VARCHAR(50) NOT NULL,
+    store_tracking_id VARCHAR(50) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS cart_items (
+    id BIGSERIAL PRIMARY KEY,
+    cart_id BIGINT NOT NULL,
+    product_tracking_id VARCHAR(50) NOT NULL,
+    quantity INT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS ride_bids (
+    id BIGSERIAL PRIMARY KEY,
+    tracking_id VARCHAR(50) UNIQUE NOT NULL,
+    ride_tracking_id VARCHAR(50) NOT NULL,
+    rider_tracking_id VARCHAR(50) NOT NULL,
+    bid_amount DECIMAL(10,2) NOT NULL,
+    status VARCHAR(30) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id BIGSERIAL PRIMARY KEY,
+    order_id VARCHAR(50) NOT NULL,
+    sender_id VARCHAR(50) NOT NULL,
+    receiver_id VARCHAR(50) NOT NULL,
+    content TEXT NOT NULL,
+    is_read BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS customer_saved_cards (
+    id BIGSERIAL PRIMARY KEY,
+    user_id VARCHAR(50) NOT NULL,
+    gateway VARCHAR(30) NOT NULL,
+    card_token VARCHAR(255) NOT NULL,
+    masked_pan VARCHAR(20),
+    card_brand VARCHAR(30),
+    card_holder_name VARCHAR(255),
+    expiry_month INT,
+    expiry_year INT,
+    is_default BOOLEAN NOT NULL DEFAULT FALSE,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id BIGSERIAL PRIMARY KEY,
+    user_tracking_id VARCHAR(50) NOT NULL,
+    token_hash TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS email_verification_tokens (
+    id BIGSERIAL PRIMARY KEY,
+    user_tracking_id VARCHAR(50) NOT NULL,
+    token TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    verified_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS user_2fa_secrets (
+    id BIGSERIAL PRIMARY KEY,
+    user_tracking_id VARCHAR(50) NOT NULL,
+    secret TEXT NOT NULL,
+    is_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    last_used_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS payment_api_keys (
+    id BIGSERIAL PRIMARY KEY,
+    vendor_tracking_id VARCHAR(50) NOT NULL,
+    api_key VARCHAR(100) UNIQUE NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    is_active BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE IF NOT EXISTS payment_api_key_audit (
+    id BIGSERIAL PRIMARY KEY,
+    key_id BIGINT NOT NULL,
+    action VARCHAR(50) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

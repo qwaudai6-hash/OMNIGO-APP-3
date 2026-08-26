@@ -6,11 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/omnigo/backend/internal/delivery/models"
 	"github.com/omnigo/backend/internal/delivery/service"
+	"github.com/omnigo/backend/internal/shared/middleware"
 )
 
 const (
@@ -153,23 +154,29 @@ func (h *DeliveryHandler) RegisterRoutes(router *gin.Engine) {
 	// Serve static files from uploads folder
 	router.Static("/uploads", "./uploads")
 
-	delivery := router.Group("/api/v1/delivery")
+	delivery := router.Group("/api/v1/delivery", middleware.JWTAuth())
 	{
-		delivery.POST("/location", h.UpdateLocation)
-		delivery.POST("/gig/accept", h.AcceptGig)
-		delivery.PATCH("/gig/:id/status", h.UpdateGigStatus)
+		// Rider-only delivery actions
+		riderOnly := delivery.Group("", middleware.RoleRequired("rider"))
+		{
+			riderOnly.POST("/location", h.UpdateLocation)
+			riderOnly.POST("/gig/accept", h.AcceptGig)
+			riderOnly.PATCH("/gig/:id/status", h.UpdateGigStatus)
+			riderOnly.POST("/gig/upload-proof", h.UploadProof)
+			riderOnly.POST("/gig/cancel", h.CancelGig)
+		}
+
+		// Authenticated delivery queries & disputes
 		delivery.GET("/gig/:id/route", h.GetRoute)
-		delivery.POST("/gig/upload-proof", h.UploadProof)
 		delivery.POST("/gig/dispute", h.DisputeGig)
-		delivery.POST("/gig/cancel", h.CancelGig)
 		delivery.GET("/surge-heatmap", h.GetSurgeHeatmap)
 	}
 
-	ride := router.Group("/api/v1/ride")
+	ride := router.Group("/api/v1/ride", middleware.JWTAuth())
 	{
 		ride.POST("/estimate", h.EstimateRide)
-		ride.POST("/bid", h.CreateRideBid)
-		ride.POST("/bid/counter", h.SubmitCounterBid)
+		ride.POST("/bid", middleware.RoleRequired("customer"), h.CreateRideBid)
+		ride.POST("/bid/counter", middleware.RoleRequired("rider"), h.SubmitCounterBid)
 	}
 }
 
@@ -206,30 +213,54 @@ func (h *DeliveryHandler) SubmitCounterBid(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "counter bid published"})
 }
 
+var allowedProofExtensions = map[string]bool{
+	".jpg":  true,
+	".jpeg": true,
+	".png":  true,
+	".webp": true,
+}
+
 // UploadProof handles rider uploading photos of delivery/pickup
 func (h *DeliveryHandler) UploadProof(c *gin.Context) {
+	callerID := middleware.GetTrackingID(c)
+	if callerID == "" {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
 	file, err := c.FormFile("photo")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing photo file"})
 		return
 	}
 
-	dstDir := "./uploads"
-	filename := filepath.Base(file.Filename)
-	uniqueFilename := fmt.Sprintf("%d_%s", time.Now().UnixMilli(), filename)
-	dst := filepath.Join(dstDir, uniqueFilename)
+	// 5MB maximum file size check
+	if file.Size > 5*1024*1024 {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "file exceeds 5MB limit"})
+		return
+	}
 
-	if err := os.MkdirAll(dstDir, os.ModePerm); err != nil {
+	ext := strings.ToLower(filepath.Ext(file.Filename))
+	if !allowedProofExtensions[ext] {
+		c.JSON(http.StatusUnsupportedMediaType, gin.H{"error": "only JPG, PNG, or WEBP images are supported"})
+		return
+	}
+
+	dstDir := "./uploads/proofs"
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create upload directory"})
 		return
 	}
+
+	uniqueFilename := fmt.Sprintf("%s_%s%s", callerID, uuid.NewString(), ext)
+	dst := filepath.Join(dstDir, uniqueFilename)
 
 	if err := c.SaveUploadedFile(file, dst); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save file"})
 		return
 	}
 
-	photoURL := fmt.Sprintf("/uploads/%s", uniqueFilename)
+	photoURL := fmt.Sprintf("/uploads/proofs/%s", uniqueFilename)
 	c.JSON(http.StatusOK, gin.H{"photo_url": photoURL})
 }
 

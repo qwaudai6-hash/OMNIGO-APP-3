@@ -9,6 +9,18 @@ import '../../../core/network/websocket_client.dart';
 
 /// A single chat message in an order thread.
 class ChatMessage {
+
+  factory ChatMessage.fromJson(Map<String, dynamic> json) {
+    return ChatMessage(
+      id: (json['id'] ?? json['message_id'] ?? '').toString(),
+      orderId: (json['order_id'] ?? '').toString(),
+      senderId: (json['sender_id'] ?? '').toString(),
+      receiverId: (json['receiver_id'] ?? '').toString(),
+      content: (json['content'] ?? '').toString(),
+      isRead: (json['is_read'] ?? json['isRead'] ?? false) as bool,
+      createdAt: DateTime.tryParse((json['created_at'] ?? '').toString()) ?? DateTime.now(),
+    );
+  }
   const ChatMessage({
     required this.id,
     required this.orderId,
@@ -27,23 +39,24 @@ class ChatMessage {
   final bool isRead;
   final DateTime createdAt;
 
-  factory ChatMessage.fromJson(Map<String, dynamic> json) {
-    return ChatMessage(
-      id: (json['id'] ?? json['message_id'] ?? '').toString(),
-      orderId: (json['order_id'] ?? '').toString(),
-      senderId: (json['sender_id'] ?? '').toString(),
-      receiverId: (json['receiver_id'] ?? '').toString(),
-      content: (json['content'] ?? '').toString(),
-      isRead: (json['is_read'] ?? json['isRead'] ?? false) as bool,
-      createdAt: DateTime.tryParse((json['created_at'] ?? '').toString()) ?? DateTime.now(),
-    );
-  }
-
   bool isMine(String myUserId) => senderId == myUserId;
 }
 
 /// A row in the chat list screen.
 class ChatConversation {
+
+  factory ChatConversation.fromJson(Map<String, dynamic> json) {
+    return ChatConversation(
+      orderId: (json['order_id'] ?? '').toString(),
+      otherUserId: (json['other_user_id'] ?? '').toString(),
+      otherUserRole: (json['other_user_role'] ?? '').toString(),
+      otherUserName: (json['other_user_name'] ?? '').toString(),
+      lastMessage: (json['last_message'] ?? '').toString(),
+      lastMessageAt: DateTime.tryParse((json['last_message_at'] ?? '').toString()) ?? DateTime.now(),
+      unreadCount: (json['unread_count'] ?? 0) as int,
+      lastSenderIsMe: (json['last_sender_is_me'] ?? false) as bool,
+    );
+  }
   const ChatConversation({
     required this.orderId,
     required this.otherUserId,
@@ -63,19 +76,6 @@ class ChatConversation {
   final DateTime lastMessageAt;
   final int unreadCount;
   final bool lastSenderIsMe;
-
-  factory ChatConversation.fromJson(Map<String, dynamic> json) {
-    return ChatConversation(
-      orderId: (json['order_id'] ?? '').toString(),
-      otherUserId: (json['other_user_id'] ?? '').toString(),
-      otherUserRole: (json['other_user_role'] ?? '').toString(),
-      otherUserName: (json['other_user_name'] ?? '').toString(),
-      lastMessage: (json['last_message'] ?? '').toString(),
-      lastMessageAt: DateTime.tryParse((json['last_message_at'] ?? '').toString()) ?? DateTime.now(),
-      unreadCount: (json['unread_count'] ?? 0) as int,
-      lastSenderIsMe: (json['last_sender_is_me'] ?? false) as bool,
-    );
-  }
 }
 
 /// ChatService is the single source of truth for in-app chat across all
@@ -112,7 +112,7 @@ class ChatService {
   final StreamController<int> _unreadController = StreamController<int>.broadcast();
   Stream<int> get unreadCount => _unreadController.stream;
 
-  bool _wsHooked = false;
+  StreamSubscription<dynamic>? _wsSubscription;
   String? _myUserId;
 
   // ── Public API ─────────────────────────────────────────────────────────
@@ -120,9 +120,8 @@ class ChatService {
   /// Bind the chat service to the shared WebSocket so incoming chat
   /// messages are forwarded to UI. Safe to call multiple times.
   Future<void> bindToWebSocket(WebSocketClient ws) async {
-    if (_wsHooked) return;
-    _wsHooked = true;
-    ws.stream.listen((raw) {
+    await _wsSubscription?.cancel();
+    _wsSubscription = ws.stream.listen((raw) {
       if (raw is! String) return;
       try {
         final frame = jsonDecode(raw) as Map<String, dynamic>;
@@ -134,6 +133,17 @@ class ChatService {
         // ignore non-chat frames
       }
     });
+  }
+
+  /// Cancel WebSocket subscription and reset binding state.
+  Future<void> unbind() async {
+    await _wsSubscription?.cancel();
+    _wsSubscription = null;
+  }
+
+  /// Dispose of resources and subscriptions.
+  Future<void> dispose() async {
+    await unbind();
   }
 
   /// Cache the JWT-derived user id so [isMine] works without hitting

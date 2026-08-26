@@ -1,0 +1,136 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omnigo-payment-orchestrator
+  namespace: omnigo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: omnigo-payment-orchestrator
+  template:
+    metadata:
+      labels:
+        app: omnigo-payment-orchestrator
+    spec:
+      containers:
+        - name: payment-orchestrator
+          image: omnigo/payment-orchestrator:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 9006
+              name: http
+          envFrom:
+            - configMapRef:
+                name: omnigo-config
+            - secretRef:
+                name: omnigo-secrets
+          resources:
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 9006
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9006
+            initialDelaySeconds: 10
+            periodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: omnigo-payment-orchestrator
+  namespace: omnigo
+spec:
+  ports:
+    - port: 9006
+      targetPort: 9006
+      name: http
+  selector:
+    app: omnigo-payment-orchestrator
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omnigo-monolith
+  namespace: omnigo
+spec:
+  # GAP-5: kept at 1 replica because uploaded proofs/KYC images live on a
+  # ReadWriteOnce volume — a second pod cannot serve files pod-A wrote.
+  # Scale horizontally ONLY after moving uploads to MinIO/S3 (bucket config
+  # already exists in docker-compose; integration tracked separately).
+  replicas: 1
+  selector:
+    matchLabels:
+      app: omnigo-monolith
+  template:
+    metadata:
+      labels:
+        app: omnigo-monolith
+    spec:
+      containers:
+        - name: monolith
+          image: omnigo/monolith:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+            - containerPort: 8008
+              name: ws
+          envFrom:
+            - configMapRef:
+                name: omnigo-config
+            - secretRef:
+                name: omnigo-secrets
+          resources:
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+          volumeMounts:
+            - name: uploads
+              mountPath: /app/uploads
+      volumes:
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: omnigo-uploads-data
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: omnigo-monolith
+  namespace: omnigo
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 80
+      targetPort: 8000
+      name: http
+    - port: 8008
+      targetPort: 8008
+      name: ws
+  selector:
+    app: omnigo-monolith

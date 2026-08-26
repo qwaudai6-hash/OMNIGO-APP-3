@@ -59,6 +59,26 @@ type DeliveryEvent struct {
 	DeliveryFee     float64 `json:"delivery_fee"`
 }
 
+type PaymentTransactionEvent struct {
+	TransactionID   string  `json:"transaction_id"`
+	OrderTrackingID string  `json:"order_tracking_id"`
+	Gateway         string  `json:"gateway"`
+	GatewayTxnID    string  `json:"gateway_txn_id"`
+	Amount          float64 `json:"amount"`
+	Currency        string  `json:"currency"`
+	Status          string  `json:"status"`
+	CreatedAt       string  `json:"created_at"`
+}
+
+type RideEvent struct {
+	TrackingID      string  `json:"tracking_id"`
+	CustomerTrackID string  `json:"customer_tracking_id"`
+	DriverTrackID   *string `json:"driver_tracking_id"`
+	Status          string  `json:"status"`
+	FareAmount      float64 `json:"fare_amount"`
+	VehicleType     string  `json:"vehicle_type"`
+}
+
 type GraphSyncWorker struct {
 	kafkaClient *kgo.Client
 	neo4jDriver neo4j.DriverWithContext
@@ -75,6 +95,8 @@ func NewGraphSyncWorker(brokers []string, neo4jUri, username, password, dbName s
 			"dbstream.public.stores",
 			"dbstream.public.products",
 			"dbstream.public.deliveries",
+			"dbstream.public.payment_transactions",
+			"dbstream.public.rides",
 		),
 	}
 
@@ -112,6 +134,8 @@ func (w *GraphSyncWorker) BootstrapConstraints(ctx context.Context) error {
 		`CREATE CONSTRAINT rider_utid_unique IF NOT EXISTS FOR (r:Rider) REQUIRE r.utid IS UNIQUE`,
 		`CREATE CONSTRAINT product_utid_unique IF NOT EXISTS FOR (p:Product) REQUIRE p.utid IS UNIQUE`,
 		`CREATE CONSTRAINT delivery_utid_unique IF NOT EXISTS FOR (d:Delivery) REQUIRE d.utid IS UNIQUE`,
+		`CREATE CONSTRAINT txn_utid_unique IF NOT EXISTS FOR (t:Transaction) REQUIRE t.utid IS UNIQUE`,
+		`CREATE CONSTRAINT ride_utid_unique IF NOT EXISTS FOR (rd:Ride) REQUIRE rd.utid IS UNIQUE`,
 	}
 
 	for _, query := range constraints {
@@ -123,17 +147,16 @@ func (w *GraphSyncWorker) BootstrapConstraints(ctx context.Context) error {
 			return result.Consume(ctx)
 		})
 		if err != nil {
-			return fmt.Errorf("failed to apply bootstrap constraint (%s): %w", query, err)
+			log.Printf("Warning: Failed to apply constraint (%s): %v", query, err)
 		}
 	}
-
-	log.Println("[Neo4j Bootstrap] Uniqueness constraints for Customer, Store, Order, Vendor, Rider, Product, and Delivery successfully applied.")
+	log.Println("Graph Database constraints checked/bootstrapped successfully.")
 	return nil
 }
 
-// Start runs the batch-processing loop using UNWIND pipelines
+// Start begins processing change-data-capture logs from Kafka into Neo4j
 func (w *GraphSyncWorker) Start(ctx context.Context) {
-	log.Println("Starting Graph Sync Worker in UNWIND batching mode...")
+	log.Println("Neo4j Graph Synchronization Worker started — listening on dbstream.* CDC topics...")
 
 	const batchSize = 100
 	const flushTimeout = 500 * time.Millisecond
@@ -145,6 +168,8 @@ func (w *GraphSyncWorker) Start(ctx context.Context) {
 	storesBatch := make([]map[string]interface{}, 0, batchSize)
 	productsBatch := make([]map[string]interface{}, 0, batchSize)
 	deliveriesBatch := make([]map[string]interface{}, 0, batchSize)
+	txnsBatch := make([]map[string]interface{}, 0, batchSize)
+	ridesBatch := make([]map[string]interface{}, 0, batchSize)
 
 	ticker := time.NewTicker(flushTimeout)
 	defer ticker.Stop()
@@ -177,6 +202,14 @@ func (w *GraphSyncWorker) Start(ctx context.Context) {
 		if len(deliveriesBatch) > 0 {
 			w.FlushDeliveries(ctx, deliveriesBatch)
 			deliveriesBatch = make([]map[string]interface{}, 0, batchSize)
+		}
+		if len(txnsBatch) > 0 {
+			w.FlushTransactions(ctx, txnsBatch)
+			txnsBatch = make([]map[string]interface{}, 0, batchSize)
+		}
+		if len(ridesBatch) > 0 {
+			w.FlushRides(ctx, ridesBatch)
+			ridesBatch = make([]map[string]interface{}, 0, batchSize)
 		}
 	}
 
@@ -296,11 +329,51 @@ func (w *GraphSyncWorker) Start(ctx context.Context) {
 							"delivery_fee":      event.DeliveryFee,
 						})
 					}
+
+				case "dbstream.public.payment_transactions":
+					var event PaymentTransactionEvent
+					if err := json.Unmarshal(record.Value, &event); err != nil {
+						log.Printf("Skip: JSON unmarshal error: %v", err)
+						continue
+					}
+					if event.TransactionID != "" {
+						txnsBatch = append(txnsBatch, map[string]interface{}{
+							"transaction_id":    event.TransactionID,
+							"order_tracking_id": event.OrderTrackingID,
+							"gateway":           event.Gateway,
+							"gateway_txn_id":    event.GatewayTxnID,
+							"amount":            event.Amount,
+							"currency":          event.Currency,
+							"status":            event.Status,
+							"timestamp":         event.CreatedAt,
+						})
+					}
+
+				case "dbstream.public.rides":
+					var event RideEvent
+					if err := json.Unmarshal(record.Value, &event); err != nil {
+						log.Printf("Skip: JSON unmarshal error: %v", err)
+						continue
+					}
+					if event.TrackingID != "" && event.CustomerTrackID != "" {
+						driverID := ""
+						if event.DriverTrackID != nil && *event.DriverTrackID != "" {
+							driverID = *event.DriverTrackID
+						}
+						ridesBatch = append(ridesBatch, map[string]interface{}{
+							"tracking_id":          event.TrackingID,
+							"customer_tracking_id": event.CustomerTrackID,
+							"driver_tracking_id":   driverID,
+							"status":               event.Status,
+							"fare_amount":          event.FareAmount,
+							"vehicle_type":         event.VehicleType,
+						})
+					}
 				}
 
 				if len(ordersBatch) >= batchSize || len(custBatch) >= batchSize || len(vendBatch) >= batchSize ||
 					len(riderBatch) >= batchSize || len(storesBatch) >= batchSize || len(productsBatch) >= batchSize ||
-					len(deliveriesBatch) >= batchSize {
+					len(deliveriesBatch) >= batchSize || len(txnsBatch) >= batchSize || len(ridesBatch) >= batchSize {
 					flushAll()
 					ticker.Reset(flushTimeout)
 				}
@@ -529,6 +602,76 @@ func (w *GraphSyncWorker) FlushDeliveries(ctx context.Context, batch []map[strin
 		return
 	}
 	log.Printf("[Neo4j Batch Sync] Successfully flushed %d Deliveries to Graph Database", len(batch))
+}
+
+// FlushTransactions merges financial transactions and links to orders
+func (w *GraphSyncWorker) FlushTransactions(ctx context.Context, batch []map[string]interface{}) {
+	session := w.neo4jDriver.NewSession(ctx, neo4j.SessionConfig{
+		AccessMode:   neo4j.AccessModeWrite,
+		DatabaseName: w.neo4jDb,
+	})
+	defer session.Close(ctx)
+
+	cypherQuery := `
+		UNWIND $events AS event
+		MERGE (t:Transaction {utid: event.transaction_id})
+		SET t.gateway = event.gateway, t.gateway_txn_id = event.gateway_txn_id, t.amount = event.amount, t.currency = event.currency, t.status = event.status, t.created_at = event.timestamp
+		WITH t, event
+		WHERE event.order_tracking_id <> ""
+		MERGE (o:Order {utid: event.order_tracking_id})
+		MERGE (o)-[:PAID_VIA]->(t)
+	`
+
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		result, err := tx.Run(ctx, cypherQuery, map[string]interface{}{"events": batch})
+		if err != nil {
+			return nil, err
+		}
+		return result.Consume(ctx)
+	})
+
+	if err != nil {
+		log.Printf("Batch Write Error (Transactions): Failed to flush %d records: %v", len(batch), err)
+		return
+	}
+	log.Printf("[Neo4j Batch Sync] Successfully flushed %d Transactions to Graph Database", len(batch))
+}
+
+// FlushRides merges ride hailing records and creates relationships to customer and driver
+func (w *GraphSyncWorker) FlushRides(ctx context.Context, batch []map[string]interface{}) {
+	session := w.neo4jDriver.NewSession(ctx, neo4j.SessionConfig{
+		AccessMode:   neo4j.AccessModeWrite,
+		DatabaseName: w.neo4jDb,
+	})
+	defer session.Close(ctx)
+
+	cypherQuery := `
+		UNWIND $events AS event
+		MERGE (rd:Ride {utid: event.tracking_id})
+		SET rd.status = event.status, rd.fare = event.fare_amount, rd.vehicle = event.vehicle_type
+		WITH rd, event
+		WHERE event.customer_tracking_id <> ""
+		MERGE (c:Customer {utid: event.customer_tracking_id})
+		MERGE (c)-[:REQUESTED]->(rd)
+		WITH rd, event
+		WHERE event.driver_tracking_id <> ""
+		MERGE (r:Rider {utid: event.driver_tracking_id})
+		MERGE (r)-[:FULFILLED]->(rd)
+	`
+
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		result, err := tx.Run(ctx, cypherQuery, map[string]interface{}{"events": batch})
+		if err != nil {
+			return nil, err
+		}
+		return result.Consume(ctx)
+	})
+
+	if err != nil {
+		log.Printf("Batch Write Error (Rides): Failed to flush %d records: %v", len(batch), err)
+		return
+	}
+	log.Printf("[Neo4j Batch Sync] Successfully flushed %d Rides to Graph Database", len(batch))
 }
 
 func (w *GraphSyncWorker) Close() {

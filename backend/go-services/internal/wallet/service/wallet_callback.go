@@ -42,7 +42,11 @@ func WalletSalt(gateway string) string {
 // 1. Sort keys alphabetically.
 // 2. Build string: salt&key1=value1&key2=value2...
 // 3. HMAC-SHA256 with the salt, uppercase hex.
+// Returns "" when the salt is unconfigured — callers must refuse to sign.
 func ComputeWalletSignature(params map[string]string, salt string) string {
+	if salt == "" {
+		return ""
+	}
 	keys := make([]string, 0, len(params))
 	for k := range params {
 		if k == "pp_SecureHash" {
@@ -73,7 +77,13 @@ func ComputeWalletSignature(params map[string]string, salt string) string {
 //  2. Sort remaining keys alphabetically.
 //  3. Build string: salt&key1=value1&key2=value2...
 //  4. HMAC-SHA256 with the salt, uppercase hex.
+//
+// An unconfigured (empty) salt makes the HMAC trivially forgeable by anyone,
+// so verification always fails closed.
 func VerifyWalletCallback(form url.Values, salt, providedHash string) bool {
+	if salt == "" {
+		return false
+	}
 	keys := make([]string, 0, len(form))
 	for k := range form {
 		if k == "pp_SecureHash" {

@@ -165,13 +165,25 @@ class _MapLibreMapWidgetState extends State<MapLibreMapWidget> {
 
   Future<void> fitBounds(List<LatLng> points, {double padding = 50}) async {
     final controller = _controller;
-    if (controller == null || points.length < 2) return;
+    if (controller == null || points.isEmpty) return;
+    if (points.length == 1) {
+      await controller.animateCamera(
+        CameraUpdate.newLatLngZoom(points.first, widget.initialZoom),
+      );
+      return;
+    }
     double minLat = 90, maxLat = -90, minLng = 180, maxLng = -180;
     for (final p in points) {
       minLat = min(minLat, p.latitude);
       maxLat = max(maxLat, p.latitude);
       minLng = min(minLng, p.longitude);
       maxLng = max(maxLng, p.longitude);
+    }
+    if ((maxLat - minLat).abs() < 1e-6 && (maxLng - minLng).abs() < 1e-6) {
+      await controller.animateCamera(
+        CameraUpdate.newLatLngZoom(LatLng(minLat, minLng), widget.initialZoom),
+      );
+      return;
     }
     await controller.animateCamera(
       CameraUpdate.newLatLngBounds(

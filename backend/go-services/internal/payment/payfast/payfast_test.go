@@ -3,8 +3,10 @@ package payfast
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -48,25 +50,39 @@ func TestPayFastSignature(t *testing.T) {
 			t.Errorf("expected %s, got %s", expectedHash, hash)
 		}
 	})
+
+	t.Run("Official PayFast Email Worked Example - Validation Hash", func(t *testing.T) {
+		// Input string sequence from official email: BAS-01|jdnkaabcks|102|000
+		basketID := "BAS-01"
+		secretKey := "jdnkaabcks"
+		merchantID := "102"
+		errCode := "000"
+
+		calculatedHash := CalculateResponseValidationHash(basketID, secretKey, merchantID, errCode)
+		expectedHash := "e8192a7554dd699975adf39619c703a492392edf5e416a61e183866ecdf6a2a2"
+
+		if calculatedHash != expectedHash {
+			t.Errorf("Official PayFast worked example mismatch! Expected %s, got %s", expectedHash, calculatedHash)
+		}
+
+		if !VerifyResponseHash(expectedHash, calculatedHash) {
+			t.Errorf("VerifyResponseHash failed to verify exact hash")
+		}
+	})
 }
 
 func TestPayFastAuthAndTokenCache(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/token" {
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(AuthTokenResponse{
-				Code:         "00",
-				Token:        "fake_access_token",
-				RefreshToken: "fake_refresh_token",
-				ExpiresIn:    "3600",
-				Message:      "Success",
-			})
+			// Emulate APPS UAT response format with uppercase ACCESS_TOKEN
+			w.Write([]byte(`{"MERCHANT_ID":"102","ACCESS_TOKEN":"uat_access_token_123","GENERATED_DATE_TIME":"2026-08-21 22:00:00"}`))
 			return
 		}
 	}))
 	defer ts.Close()
 
-	client := NewClient("merchantID", "secretKey", "Test Merchant", ts.URL)
+	client := NewClient("102", "ROTATED_ME_REMOVE_THIS_PAYFAST_UAT_KEY", "", "Test Merchant", ts.URL)
 
 	ctx := context.Background()
 	token, err := client.GetAuthToken(ctx, "127.0.0.1")
@@ -74,20 +90,42 @@ func TestPayFastAuthAndTokenCache(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if token != "fake_access_token" {
-		t.Errorf("expected fake_access_token, got %s", token)
+	if token != "uat_access_token_123" {
+		t.Errorf("expected uat_access_token_123, got %s", token)
 	}
 
-	// Wait briefly to ensure caching is not bypassing incorrectly (though our cache timeout is 1 hour)
 	time.Sleep(10 * time.Millisecond)
 
-	// Second call should hit the cache and not error out
 	token2, err := client.GetAuthToken(ctx, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("unexpected error on second call: %v", err)
 	}
-	if token2 != "fake_access_token" {
-		t.Errorf("expected fake_access_token from cache, got %s", token2)
+	if token2 != "uat_access_token_123" {
+		t.Errorf("expected uat_access_token_123 from cache, got %s", token2)
+	}
+}
+
+func TestIsSuccessCode(t *testing.T) {
+	tests := []struct {
+		code     string
+		expected bool
+	}{
+		{"00", true},
+		{"000", true},
+		{" 00 ", true},
+		{" 000 ", true},
+		{"05", false},
+		{"97", false},
+		{"104", false},
+		{"002", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		got := IsSuccessCode(tt.code)
+		if got != tt.expected {
+			t.Errorf("IsSuccessCode(%q) = %v; expected %v", tt.code, got, tt.expected)
+		}
 	}
 }
 
@@ -115,7 +153,7 @@ func TestGetTemporaryTransactionToken(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client := NewClient("merchantID", "secretKey", "Test Merchant", ts.URL)
+	client := NewClient("merchantID", "secretKey", "hashKey", "Test Merchant", ts.URL)
 
 	ctx := context.Background()
 	req := TemporaryTokenRequest{
@@ -154,7 +192,7 @@ func TestInitiateTokenizedTransaction(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client := NewClient("merchantID", "secretKey", "Test Merchant", ts.URL)
+	client := NewClient("merchantID", "secretKey", "hashKey", "Test Merchant", ts.URL)
 
 	ctx := context.Background()
 	req := TokenizedTransactionRequest{
@@ -182,7 +220,6 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 			r.ParseForm()
 			w.WriteHeader(http.StatusOK)
 			if r.FormValue("card_number") == "4111222233334444" {
-				// 3DS required
 				json.NewEncoder(w).Encode(TemporaryTokenResponse{
 					StatusCode:      "00",
 					InstrumentToken: "inst_3ds",
@@ -190,7 +227,6 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 					Data3DSHTML:     "<html>Please authenticate 3DS</html>",
 				})
 			} else if r.FormValue("card_number") == "4111111111111111" {
-				// 3DS not required, directly tokenize
 				json.NewEncoder(w).Encode(TemporaryTokenResponse{
 					StatusCode:      "00",
 					InstrumentToken: "inst_no3ds",
@@ -198,10 +234,9 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 					Data3DSHTML:     "",
 				})
 			} else {
-				// Malicious or unknown
 				json.NewEncoder(w).Encode(TemporaryTokenResponse{
 					StatusCode: "99",
-					StatusMsg:    "Unknown Gateway Error",
+					StatusMsg:  "Unknown Gateway Error",
 				})
 			}
 			return
@@ -212,18 +247,18 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 				json.NewEncoder(w).Encode(TokenizedTransactionResponse{
 					StatusCode:    "00",
 					TransactionID: "txn_3ds",
-					StatusMsg:       "Approved",
+					StatusMsg:     "Approved",
 				})
 			} else if r.FormValue("instrument_token") == "inst_no3ds" {
 				json.NewEncoder(w).Encode(TokenizedTransactionResponse{
 					StatusCode:    "00",
 					TransactionID: "txn_no3ds",
-					StatusMsg:       "Approved",
+					StatusMsg:     "Approved",
 				})
 			} else {
 				json.NewEncoder(w).Encode(TokenizedTransactionResponse{
-					StatusCode:    "111", // duplicate or similar
-					StatusMsg:       "Transaction already captured or duplicate",
+					StatusCode: "111",
+					StatusMsg:  "Transaction already captured or duplicate",
 				})
 			}
 			return
@@ -231,7 +266,7 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client := NewClient("merchantID", "secretKey", "Test Merchant", ts.URL)
+	client := NewClient("merchantID", "secretKey", "hashKey", "Test Merchant", ts.URL)
 	ctx := context.Background()
 
 	t.Run("3DS Required Flow", func(t *testing.T) {
@@ -278,53 +313,6 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 		}
 	})
 
-	t.Run("Failed 3DS Callback", func(t *testing.T) {
-		// Simulating PayFast rejecting a tokenized transaction due to bad 3DS paRes
-		req := TokenizedTransactionRequest{InstrumentToken: "inst_bad3ds"} // Assuming the mock handles this, or just asserting failure logic in handler
-		// We can test this by expecting an error or a failure status code
-		_ = req
-	})
-
-	t.Run("Amount Tampering Detection", func(t *testing.T) {
-		// Status check returns different amount
-		statusRes := TransactionStatusResponse{
-			StatusCode: "00",
-			BasketID:   "order_123",
-			TxnAmt:     "100.00",
-		}
-		expectedAmount := "150.00"
-		if statusRes.TxnAmt != expectedAmount {
-			// This matches our handler's check
-			t.Log("Amount tampering successfully detected")
-		} else {
-			t.Error("Failed to detect amount tampering")
-		}
-	})
-
-	t.Run("Wrong Order Ownership (Basket ID mismatch)", func(t *testing.T) {
-		statusRes := TransactionStatusResponse{
-			StatusCode: "00",
-			BasketID:   "wrong_order",
-		}
-		if statusRes.BasketID != "order_123" {
-			t.Log("Basket ID mismatch successfully detected")
-		} else {
-			t.Error("Failed to detect Basket ID mismatch")
-		}
-	})
-
-	t.Run("Failed Status Verification", func(t *testing.T) {
-		statusRes := TransactionStatusResponse{
-			StatusCode: "99",
-			StatusMsg:  "Declined by bank",
-		}
-		if statusRes.StatusCode != "00" {
-			t.Log("Failed status correctly identified")
-		} else {
-			t.Error("Failed status was ignored")
-		}
-	})
-
 	t.Run("Status Check By Basket ID", func(t *testing.T) {
 		basketServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/token" {
@@ -345,7 +333,7 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 		}))
 		defer basketServer.Close()
 
-		bClient := NewClient("merchantID", "secretKey", "Test Merchant", basketServer.URL)
+		bClient := NewClient("merchantID", "secretKey", "hashKey", "Test Merchant", basketServer.URL)
 		bRes, err := bClient.GetTransactionStatusByBasketID(ctx, "order_999")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -374,7 +362,6 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 	})
 
 	t.Run("Status Verification - Omitted txnamt Handling", func(t *testing.T) {
-		// Official PayFast documentation status response without txnamt
 		statusJSON := `{"status_code":"00","status_msg":"Success","basket_id":"order_888","transaction_id":"txn_888","code":"00"}`
 		var statusRes TransactionStatusResponse
 		if err := json.Unmarshal([]byte(statusJSON), &statusRes); err != nil {
@@ -393,25 +380,21 @@ func TestFlexibleTypes(t *testing.T) {
 			Flag FlexibleBool `json:"flag"`
 		}
 
-		// Raw boolean true
 		var t1 TestStruct
 		if err := json.Unmarshal([]byte(`{"flag": true}`), &t1); err != nil || !t1.Flag.Bool() {
 			t.Errorf("expected true, got %v (err: %v)", t1.Flag.Bool(), err)
 		}
 
-		// String "true"
 		var t2 TestStruct
 		if err := json.Unmarshal([]byte(`{"flag": "true"}`), &t2); err != nil || !t2.Flag.Bool() {
 			t.Errorf("expected true, got %v (err: %v)", t2.Flag.Bool(), err)
 		}
 
-		// Raw boolean false
 		var t3 TestStruct
 		if err := json.Unmarshal([]byte(`{"flag": false}`), &t3); err != nil || t3.Flag.Bool() {
 			t.Errorf("expected false, got %v (err: %v)", t3.Flag.Bool(), err)
 		}
 
-		// String "false"
 		var t4 TestStruct
 		if err := json.Unmarshal([]byte(`{"flag": "false"}`), &t4); err != nil || t4.Flag.Bool() {
 			t.Errorf("expected false, got %v (err: %v)", t4.Flag.Bool(), err)
@@ -423,19 +406,16 @@ func TestFlexibleTypes(t *testing.T) {
 			Val FlexibleString `json:"val"`
 		}
 
-		// String value "05"
 		var t1 TestStruct
 		if err := json.Unmarshal([]byte(`{"val": "05"}`), &t1); err != nil || t1.Val.String() != "05" {
 			t.Errorf("expected '05', got %v (err: %v)", t1.Val.String(), err)
 		}
 
-		// Boolean value true
 		var t2 TestStruct
 		if err := json.Unmarshal([]byte(`{"val": true}`), &t2); err != nil || t2.Val.String() != "true" {
 			t.Errorf("expected 'true', got %v (err: %v)", t2.Val.String(), err)
 		}
 
-		// Numeric value 123
 		var t3 TestStruct
 		if err := json.Unmarshal([]byte(`{"val": 123}`), &t3); err != nil || t3.Val.String() != "123" {
 			t.Errorf("expected '123', got %v (err: %v)", t3.Val.String(), err)
@@ -452,19 +432,16 @@ func TestCircuitBreaker(t *testing.T) {
 
 	mockErr := &GatewayError{StatusCode: 504, Message: "Gateway Timeout"}
 
-	// 1. Trigger consecutive failures
 	for i := 0; i < 3; i++ {
 		_ = cb.Execute(func() error {
 			return mockErr
 		})
 	}
 
-	// 2. Circuit should be Open
 	if cb.State() != StateOpen {
 		t.Errorf("expected circuit to be Open after 3 failures, got %v", cb.State())
 	}
 
-	// 3. Subsequent calls should fail-fast with ErrCircuitBreakerOpen
 	err := cb.Execute(func() error {
 		return nil
 	})
@@ -472,10 +449,8 @@ func TestCircuitBreaker(t *testing.T) {
 		t.Errorf("expected ErrCircuitBreakerOpen, got %v", err)
 	}
 
-	// 4. Wait for cooldown period to elapse -> HalfOpen
 	time.Sleep(60 * time.Millisecond)
 
-	// 5. Probe request succeeds -> Circuit should reset to Closed
 	err = cb.Execute(func() error {
 		return nil
 	})
@@ -521,4 +496,172 @@ func TestIsTransientAndSanitization(t *testing.T) {
 	})
 }
 
+func TestCircuitBreakerPanicRecovery(t *testing.T) {
+	cb := NewCircuitBreaker(1, 50*time.Millisecond)
 
+	// Cause state to transition to Open
+	_ = cb.Execute(func() error {
+		return context.DeadlineExceeded
+	})
+
+	if cb.State() != StateOpen {
+		t.Fatalf("expected circuit to be Open, got %v", cb.State())
+	}
+
+	time.Sleep(60 * time.Millisecond)
+
+	// Now in HalfOpen probe, simulate panic in gateway handler
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatalf("expected panic to bubble up")
+			}
+		}()
+
+		_ = cb.Execute(func() error {
+			panic("unexpected gateway nil pointer panic")
+		})
+	}()
+
+	// Verify breaker is back to StateOpen and not deadlocked
+	if cb.State() != StateOpen {
+		t.Errorf("expected circuit to transition to Open after panic, got %v", cb.State())
+	}
+}
+
+// A missing/unset PayFast config must NEVER panic at construction: services build
+// this client unconditionally at startup and also serve non-PayFast traffic.
+func TestNewClientGracefulDegradation(t *testing.T) {
+	t.Run("Empty config does not panic and reports unconfigured", func(t *testing.T) {
+		var client *Client
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("NewClient panicked on empty config: %v", r)
+				}
+			}()
+			t.Setenv("PAYFAST_BASE_URL", "")
+			t.Setenv("PAYFAST_API_URL", "")
+			client = NewClient("", "", "", "", "")
+		}()
+		if client == nil {
+			t.Fatal("expected non-nil client")
+		}
+		if client.IsConfigured() {
+			t.Errorf("empty credentials must report IsConfigured()==false")
+		}
+		if _, err := client.GetAuthToken(context.Background(), "1.2.3.4"); !errors.Is(err, ErrNotConfigured) {
+			t.Errorf("expected ErrNotConfigured, got %v", err)
+		}
+	})
+
+	t.Run("Credentials without base URL are unconfigured (no boot crash)", func(t *testing.T) {
+		t.Setenv("PAYFAST_BASE_URL", "")
+		t.Setenv("PAYFAST_API_URL", "")
+		client := NewClient("mid", "skey", "", "Merchant", "")
+		if client.IsConfigured() {
+			t.Errorf("credentials without gateway URL must NOT report configured")
+		}
+	})
+
+	t.Run("PAYFAST_API_URL alias satisfies configuration", func(t *testing.T) {
+		t.Setenv("PAYFAST_MERCHANT_ID", "mid")
+		t.Setenv("PAYFAST_SECURED_KEY", "skey")
+		t.Setenv("PAYFAST_HASH_KEY", "hkey")
+		t.Setenv("PAYFAST_MERCHANT_NAME", "Merchant")
+		t.Setenv("PAYFAST_BASE_URL", "")
+		t.Setenv("PAYFAST_API_URL", "https://ipg.gopayfast.com/")
+		client := NewClientFromEnv()
+		if !client.IsConfigured() {
+			t.Errorf("PAYFAST_API_URL alias must satisfy IsConfigured()")
+		}
+	})
+
+	t.Run("Explicit baseURL wins over env", func(t *testing.T) {
+		t.Setenv("PAYFAST_BASE_URL", "https://from-env.example")
+		client := NewClient("mid", "skey", "", "M", "https://explicit.example")
+		if client.baseURL != "https://explicit.example" {
+			t.Errorf("explicit arg should take precedence, got %q", client.baseURL)
+		}
+	})
+}
+
+func TestIsTransientGatewayStatuses(t *testing.T) {
+	cases := []struct {
+		name       string
+		statusCode int
+		want       bool
+	}{
+		{"500 internal server error IS transient", 500, true},
+		{"501 not implemented IS transient", 501, true},
+		{"502 bad gateway IS transient", 502, true},
+		{"503 service unavailable IS transient", 503, true},
+		{"504 gateway timeout IS transient", 504, true},
+		{"408 request timeout IS transient", 408, true},
+		{"400 bad request is NOT transient", 400, false},
+		{"401 unauthorized is NOT transient", 401, false},
+		{"402 payment required is NOT transient", 402, false},
+		{"422 unprocessable is NOT transient", 422, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := &GatewayError{StatusCode: tc.statusCode, Message: "test"}
+			if got := IsTransient(err); got != tc.want {
+				t.Errorf("IsTransient(HTTP %d) = %v, want %v", tc.statusCode, got, tc.want)
+			}
+		})
+	}
+}
+
+// Sensitive credentials (PAN/CVV/CNIC/OTP/instrument tokens) must never appear in any
+// json.Marshal output of request structs — a single debug log of a marshaled request
+// would otherwise leak cardholder data into logs.
+func TestSensitiveRequestFieldsNotSerializable(t *testing.T) {
+	t.Run("TemporaryTokenRequest", func(t *testing.T) {
+		req := TemporaryTokenRequest{
+			BasketID:      "ord_1",
+			TxnAmt:        "100.00",
+			CardNumber:    "4111222233334444",
+			ExpiryMonth:   "12",
+			ExpiryYear:    "2028",
+			CVV:           "123",
+			AccountNumber: "03001234567",
+			CNICNumber:    "3520212345671",
+		}
+		b, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("marshal failed: %v", err)
+		}
+		out := string(b)
+		for _, secret := range []string{"4111222233334444", "03001234567", "3520212345671"} {
+			if strings.Contains(out, secret) {
+				t.Errorf("sensitive value %q leaked in JSON output: %s", secret, out)
+			}
+		}
+		for _, key := range []string{"card_number", "cvv", "expiry_month", "expiry_year", "account_number", "cnic_number"} {
+			if strings.Contains(out, key) {
+				t.Errorf("sensitive field key %q present in JSON output: %s", key, out)
+			}
+		}
+	})
+
+	t.Run("TokenizedTransactionRequest", func(t *testing.T) {
+		req := TokenizedTransactionRequest{
+			InstrumentToken: "instr_secret_token_abc",
+			Otp:             "998877",
+			BasketID:        "ord_1",
+			TxnAmt:          "100.00",
+		}
+		b, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("marshal failed: %v", err)
+		}
+		out := string(b)
+		if strings.Contains(out, "instr_secret_token_abc") {
+			t.Errorf("instrument token leaked in JSON output: %s", out)
+		}
+		if strings.Contains(out, "998877") {
+			t.Errorf("OTP leaked in JSON output: %s", out)
+		}
+	})
+}

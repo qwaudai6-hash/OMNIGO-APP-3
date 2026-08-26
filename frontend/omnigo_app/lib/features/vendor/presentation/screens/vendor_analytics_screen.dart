@@ -205,10 +205,10 @@ class VendorAnalyticsScreenState extends State<VendorAnalyticsScreen> with Singl
       decoration: BoxDecoration(
         color: const Color(0xFF16161D),
         borderRadius: BorderRadius.circular(32),
-        border: Border.all(color: Colors.white.withOpacity(0.05)),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
         boxShadow: [
           BoxShadow(
-            color: AppTheme.limeAccent.withOpacity(0.05),
+            color: AppTheme.limeAccent.withValues(alpha: 0.05),
             blurRadius: 40,
             offset: const Offset(0, 10),
           ),
@@ -222,7 +222,7 @@ class VendorAnalyticsScreenState extends State<VendorAnalyticsScreen> with Singl
               Container(
                 padding: const EdgeInsets.all(8),
                 decoration: BoxDecoration(
-                  color: AppTheme.limeAccent.withOpacity(0.1),
+                  color: AppTheme.limeAccent.withValues(alpha: 0.1),
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: const Icon(Icons.account_balance_wallet_rounded, color: AppTheme.limeAccent, size: 24),
@@ -236,7 +236,7 @@ class VendorAnalyticsScreenState extends State<VendorAnalyticsScreen> with Singl
           ),
           const SizedBox(height: 24),
           Text(
-            '\$${revenue.toStringAsFixed(2)}',
+            'PKR ${revenue.toStringAsFixed(2)}',
             style: const TextStyle(color: Colors.white, fontSize: 42, fontWeight: FontWeight.w900, letterSpacing: -1),
           ),
           const SizedBox(height: 16),
@@ -245,7 +245,7 @@ class VendorAnalyticsScreenState extends State<VendorAnalyticsScreen> with Singl
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                 decoration: BoxDecoration(
-                  color: isPositive ? Colors.green.withOpacity(0.1) : Colors.red.withOpacity(0.1),
+                  color: isPositive ? Colors.green.withValues(alpha: 0.1) : Colors.red.withValues(alpha: 0.1),
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Row(
@@ -288,7 +288,7 @@ class VendorAnalyticsScreenState extends State<VendorAnalyticsScreen> with Singl
         _buildMetricCard('Orders Done', completed.toString(), Icons.check_circle_outline_rounded, Colors.blueAccent),
         _buildMetricCard('Pending Ops', pending.toString(), Icons.hourglass_empty_rounded, Colors.orangeAccent),
         _buildMetricCard('Live Catalog', activeProducts.toString(), Icons.storefront_rounded, Colors.purpleAccent),
-        _buildMetricCard('This Week', '\$${currentWeek.toStringAsFixed(0)}', Icons.timeline_rounded, AppTheme.limeAccent),
+        _buildMetricCard('This Week', 'PKR ${currentWeek.toStringAsFixed(0)}', Icons.timeline_rounded, AppTheme.limeAccent),
       ],
     );
   }
@@ -299,7 +299,7 @@ class VendorAnalyticsScreenState extends State<VendorAnalyticsScreen> with Singl
       decoration: BoxDecoration(
         color: const Color(0xFF16161D),
         borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: Colors.white.withOpacity(0.05)),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -333,7 +333,7 @@ class VendorAnalyticsScreenState extends State<VendorAnalyticsScreen> with Singl
       decoration: BoxDecoration(
         color: const Color(0xFF16161D),
         borderRadius: BorderRadius.circular(32),
-        border: Border.all(color: Colors.white.withOpacity(0.05)),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -358,11 +358,11 @@ class VendorAnalyticsScreenState extends State<VendorAnalyticsScreen> with Singl
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                 decoration: BoxDecoration(
-                  color: AppTheme.limeAccent.withOpacity(0.1),
+                  color: AppTheme.limeAccent.withValues(alpha: 0.1),
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Text(
-                  '\$${currentVelocity.toStringAsFixed(0)}',
+                  'PKR ${currentVelocity.toStringAsFixed(0)}',
                   style: const TextStyle(color: AppTheme.limeAccent, fontWeight: FontWeight.bold, fontSize: 12),
                 ),
               ),
@@ -407,7 +407,7 @@ class VendorAnalyticsScreenState extends State<VendorAnalyticsScreen> with Singl
         decoration: BoxDecoration(
           color: const Color(0xFF16161D),
           borderRadius: BorderRadius.circular(24),
-          border: Border.all(color: Colors.white.withOpacity(0.05)),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
         ),
         child: const Center(
           child: Text('No orders processed yet.', style: TextStyle(color: Colors.grey)),
@@ -457,7 +457,7 @@ class VendorAnalyticsScreenState extends State<VendorAnalyticsScreen> with Singl
               decoration: BoxDecoration(
                 color: const Color(0xFF16161D),
                 borderRadius: BorderRadius.circular(24),
-                border: Border.all(color: Colors.white.withOpacity(0.05)),
+                border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -474,7 +474,7 @@ class VendorAnalyticsScreenState extends State<VendorAnalyticsScreen> with Singl
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                             decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.08),
+                              color: Colors.white.withValues(alpha: 0.08),
                               borderRadius: BorderRadius.circular(10),
                             ),
                             child: Text(
@@ -486,7 +486,7 @@ class VendorAnalyticsScreenState extends State<VendorAnalyticsScreen> with Singl
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                             decoration: BoxDecoration(
-                              color: statusColor.withOpacity(0.1),
+                              color: statusColor.withValues(alpha: 0.1),
                               borderRadius: BorderRadius.circular(10),
                             ),
                             child: Text(
@@ -571,7 +571,7 @@ class VendorAnalyticsScreenState extends State<VendorAnalyticsScreen> with Singl
                         style: const TextStyle(color: Colors.grey, fontSize: 12),
                       ),
                       Text(
-                        '\$$totalAmount',
+                        'PKR $totalAmount',
                         style: const TextStyle(color: AppTheme.limeAccent, fontWeight: FontWeight.bold, fontSize: 16),
                       ),
                     ],
@@ -602,11 +602,16 @@ class SparklinePainter extends CustomPainter {
       ..strokeWidth = 3.0
       ..strokeCap = StrokeCap.round;
 
+    if (data.length <= 1) {
+      canvas.drawCircle(Offset(size.width / 2, size.height / 2), 4, paint);
+      return;
+    }
+
     final fillPaint = Paint()
       ..shader = LinearGradient(
         begin: Alignment.topCenter,
         end: Alignment.bottomCenter,
-        colors: [color.withOpacity(0.3), color.withOpacity(0.0)],
+        colors: [color.withValues(alpha: 0.3), color.withValues(alpha: 0.0)],
       ).createShader(Rect.fromLTWH(0, 0, size.width, size.height))
       ..style = PaintingStyle.fill;
 

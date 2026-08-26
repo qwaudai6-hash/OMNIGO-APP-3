@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -61,6 +62,9 @@ func (c *circuitState) allow() bool {
 		return true
 	}
 	if time.Since(c.openedAt) > c.openTimeout {
+		if c.halfOpenProbe {
+			return false // only one probe at a time
+		}
 		c.halfOpenProbe = true
 		return true
 	}
@@ -97,6 +101,7 @@ type Gateway struct {
 	websocketUp *Upstream
 	aiUpstream  *Upstream
 	startedAt   time.Time
+	redisClient redis.UniversalClient
 }
 
 // Options configures the gateway from env vars.
@@ -117,17 +122,11 @@ func resolveUpstream(envKey, devFallback string) *Upstream {
 }
 
 // New builds the gateway from environment variables.
-//
-// Required env vars (production, Railway private networking):
-//
-//	AUTH_SERVICE_URL, PRODUCT_SERVICE_URL, ADMIN_SERVICE_URL,
-//	DELIVERY_SERVICE_URL, RIDE_SERVICE_URL, VENDOR_STORE_SERVICE_URL,
-//	ORDER_SERVICE_URL, PAYMENT_SERVICE_URL,
-//	WEBSOCKET_GATEWAY_URL, AI_ENGINE_URL
-//
-// Dev fallbacks point at localhost ports so `go run cmd/gateway` works locally.
 func New(opts Options) *Gateway {
-	g := &Gateway{startedAt: time.Now()}
+	g := &Gateway{
+		startedAt:   time.Now(),
+		redisClient: opts.Redis,
+	}
 
 	breaker := func() *circuitState { return newCircuit(5, 15*time.Second) }
 
@@ -145,6 +144,7 @@ func New(opts Options) *Gateway {
 	add("/api/v1/wishlist", "PRODUCT_SERVICE_URL", "http://127.0.0.1:9001")
 	add("/api/v1/reviews", "PRODUCT_SERVICE_URL", "http://127.0.0.1:9001")
 	add("/api/v1/vendor/products", "PRODUCT_SERVICE_URL", "http://127.0.0.1:9001")
+	add("/uploads", "PRODUCT_SERVICE_URL", "http://127.0.0.1:9001")
 	add("/api/v1/stores", "VENDOR_STORE_SERVICE_URL", "http://127.0.0.1:9002")
 	add("/api/v1/vendor", "VENDOR_STORE_SERVICE_URL", "http://127.0.0.1:9002")
 	add("/api/v1/geocoding", "VENDOR_STORE_SERVICE_URL", "http://127.0.0.1:9002")
@@ -164,6 +164,12 @@ func New(opts Options) *Gateway {
 	// (plural) which routes to the payment-orchestrator (different service).
 	add("/api/v1/payment", "ORDER_SERVICE_URL", "http://127.0.0.1:9005")
 	add("/api/v1/payments", "PAYMENT_SERVICE_URL", "http://127.0.0.1:9006")
+	// Finance split: refund/cancel live on order-service, while
+	// reconcile / payouts-export live on payment-orchestrator. Longest-prefix
+	// matching makes the two specific prefixes win over the generic one.
+	add("/api/v1/finance/refund", "ORDER_SERVICE_URL", "http://127.0.0.1:9005")
+	add("/api/v1/finance/cancel", "ORDER_SERVICE_URL", "http://127.0.0.1:9005")
+	add("/api/v1/finance", "PAYMENT_SERVICE_URL", "http://127.0.0.1:9006")
 	add("/api/v1/ai", "AI_ENGINE_URL", "http://127.0.0.1:8086")
 	// Map stack proxy: forwards style.json, tiles, glyphs, sprites,
 	// reverse geocode, and OSRM route calls to the in-house map-service.
@@ -202,10 +208,12 @@ func (g *Gateway) Handler() http.Handler {
 	r.Use(middleware.Recovery())
 	r.Use(middleware.RequestID())
 	r.Use(middleware.CORS())
-	if rdb := os.Getenv("REDIS_ADDRS"); rdb != "" {
-		// Gateway-level rate limit: 300 req/min per IP (generous; per-route limits apply downstream).
-		// ponytail: single global limit here; tighten on specific auth endpoints in their own services.
-		r.Use(middleware.RateLimit(nil, 300, time.Minute))
+	r.Use(middleware.BodyLimit()) // MEDIUM-26: 2 MiB cap at the edge
+	if g.redisClient != nil {
+		r.Use(middleware.RateLimit(g.redisClient, 300, time.Minute))
+	} else if rdbAddr := os.Getenv("REDIS_ADDRS"); rdbAddr != "" {
+		rdb := redis.NewClient(&redis.Options{Addr: rdbAddr})
+		r.Use(middleware.RateLimit(rdb, 300, time.Minute))
 	}
 	r.Use(g.accessLog())
 
@@ -227,12 +235,10 @@ func (g *Gateway) Handler() http.Handler {
 
 // root is a friendly landing for browser hits to the bare domain.
 func (g *Gateway) root(c *gin.Context) {
+	// GW-06: do not advertise the internal API surface to anonymous callers.
 	c.JSON(http.StatusOK, gin.H{
-		"service":   "omnigo-gateway",
-		"status":    "ok",
-		"version":   "1.0.0",
-		"endpoints": []string{"/api/v1/auth", "/api/v1/products", "/api/v1/orders", "/api/v1/payments", "/api/v1/rides", "/ws", "/health"},
-		"docs":      "https://omnigo-app-production.up.railway.app/health",
+		"service": "omnigo-gateway",
+		"status":  "ok",
 	})
 }
 
@@ -327,28 +333,40 @@ func (g *Gateway) proxy(c *gin.Context) {
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
 		req.Host = target.Host
-		// Forward request ID + trace context for distributed tracing.
-		if rid := c.GetHeader("X-Request-ID"); rid != "" {
+		// GW-08/GW-22: tracing IDs are generated SERVER-SIDE (requestid
+		// middleware sanitizes them). Never forward raw client-supplied trace
+		// identifiers upstream — they enable log injection / cache poisoning.
+		if rid := c.GetString("request_id"); rid != "" {
 			req.Header.Set("X-Request-ID", rid)
 		}
-		if tid := c.GetHeader("X-Trace-Id"); tid != "" {
-			req.Header.Set("X-Trace-Id", tid)
-		}
 		// Preserve the original client IP for downstream rate limiting / audit.
-		req.Header.Set("X-Forwarded-For", c.ClientIP())
+		if prior := req.Header.Get("X-Forwarded-For"); prior != "" {
+			req.Header.Set("X-Forwarded-For", prior+", "+c.ClientIP())
+		} else {
+			req.Header.Set("X-Forwarded-For", c.ClientIP())
+		}
 		req.Header.Set("X-Forwarded-Proto", "https")
 		req.Header.Set("X-Forwarded-Host", c.Request.Host)
 	}
 
-	// Track success/failure for the circuit breaker + retry once on 502/503/504.
+	// GW-11: a single failed request must count ONCE against the breaker.
+	// Previously the ErrorHandler recorded a failure AND the 502 status
+	// observer recorded it again → premature circuit opening.
+	errorHandled := false
+
+	// Track success/failure for the circuit breaker + retry once on transport error.
 	proxy.ErrorHandler = func(w http.ResponseWriter, req *http.Request, err error) {
 		r.breaker.recordFailure()
+		errorHandled = true
 		logging.Error(req.Context(), "gateway proxy error",
 			"upstream", r.upstream.Name,
 			"path", req.URL.Path,
 			"error", err.Error())
-		// ponytail: single retry on transient transport error. Add backoff + jitter
-		// if you see flapping under load. Upgrade path: retryWithBackoff(3, 100ms).
+		// GW-12: brief jittered backoff before the single retry so N gateway
+		// goroutines don't hammer a recovering upstream in lockstep.
+		// GW-13: retry only bodyless idempotent requests (GET/HEAD/OPTIONS),
+		// so a consumed request body can never be replayed empty.
+		time.Sleep(time.Duration(100+rand.Intn(100)) * time.Millisecond)
 		if retryOnce(target, w, req) {
 			return
 		}
@@ -359,6 +377,9 @@ func (g *Gateway) proxy(c *gin.Context) {
 	// Wrap the response writer to observe status code for breaker accounting.
 	observed := &statusRecorder{ResponseWriter: c.Writer, status: http.StatusOK}
 	proxy.ServeHTTP(observed, c.Request)
+	if errorHandled {
+		return // already accounted by ErrorHandler (incl. its retry outcome)
+	}
 	if observed.status >= 500 {
 		r.breaker.recordFailure()
 	} else {
@@ -399,7 +420,13 @@ func retryOnce(target *url.URL, w http.ResponseWriter, origReq *http.Request) bo
 	default:
 		return false
 	}
-	retryReq, err := http.NewRequestWithContext(origReq.Context(), origReq.Method, target.String()+origReq.URL.Path, origReq.Body)
+	// Preserve the full target URL including query string — dropping RawQuery
+	// here made retried filtered GETs return unfiltered results.
+	retryURL := target.String() + origReq.URL.Path
+	if origReq.URL.RawQuery != "" {
+		retryURL += "?" + origReq.URL.RawQuery
+	}
+	retryReq, err := http.NewRequestWithContext(origReq.Context(), origReq.Method, retryURL, nil)
 	if err != nil {
 		return false
 	}

@@ -197,10 +197,10 @@ class InventoryErrorDialog extends StatelessWidget {
         decoration: BoxDecoration(
           color: Colors.grey.shade900,
           borderRadius: BorderRadius.circular(32),
-          border: Border.all(color: Colors.red.withOpacity(0.3), width: 1.5),
+          border: Border.all(color: Colors.red.withValues(alpha: 0.3), width: 1.5),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.5),
+              color: Colors.black.withValues(alpha: 0.5),
               blurRadius: 20,
               offset: const Offset(0, 10),
             ),
@@ -212,7 +212,7 @@ class InventoryErrorDialog extends StatelessWidget {
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
-                color: Colors.red.withOpacity(0.1),
+                color: Colors.red.withValues(alpha: 0.1),
                 shape: BoxShape.circle,
               ),
               child: const Icon(
@@ -277,8 +277,8 @@ class VendorInventoryScreen extends StatefulWidget {
 
 class VendorInventoryScreenState extends State<VendorInventoryScreen> {
   final VendorInventoryController _controller = VendorInventoryController();
-  MaplibreMapController? _mapController;
   LatLng _storeLocation = const LatLng(31.5204, 74.3587); // Default: Lahore
+  String? _storeTrackingId;
 
   List<ProductModel> _loadedProducts = [];
   String _jwtToken = '';
@@ -309,9 +309,15 @@ class VendorInventoryScreenState extends State<VendorInventoryScreen> {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
         final lat = (data['latitude'] as num?)?.toDouble();
         final lng = (data['longitude'] as num?)?.toDouble();
-        if (lat != null && lng != null && lat != 0.0 && lng != 0.0) {
+        final storeId = data['store_tracking_id'] as String?;
+        if (mounted) {
           setState(() {
-            _storeLocation = LatLng(lat, lng);
+            if (lat != null && lng != null && lat != 0.0 && lng != 0.0) {
+              _storeLocation = LatLng(lat, lng);
+            }
+            if (storeId != null && storeId.isNotEmpty) {
+              _storeTrackingId = storeId;
+            }
           });
         }
       }
@@ -346,8 +352,13 @@ class VendorInventoryScreenState extends State<VendorInventoryScreen> {
       },);
 
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body) as List<dynamic>;
-        final list = data.map((item) => ProductModel.fromJson(item as Map<String, dynamic>)).toList();
+        final dynamic decoded = jsonDecode(response.body);
+        final List<dynamic> listData = decoded is Map<String, dynamic>
+            ? (decoded['products'] as List<dynamic>? ?? <dynamic>[])
+            : (decoded is List<dynamic> ? decoded : <dynamic>[]);
+        final list = listData
+            .map((item) => ProductModel.fromJson(item as Map<String, dynamic>))
+            .toList();
 
         setState(() {
           if (refresh) {
@@ -378,25 +389,23 @@ class VendorInventoryScreenState extends State<VendorInventoryScreen> {
   /// Navigate to the Add/Edit form. Pass an existing product to enter edit
   /// mode, or null to create a new one. On pop with `true`, refresh the list.
   Future<void> _openProductEditor({ProductModel? existing}) async {
+    final effectiveStoreId = existing?.storeTrackingId ??
+        _storeTrackingId ??
+        (_loadedProducts.isNotEmpty ? _loadedProducts.first.storeTrackingId : '');
+
     final result = await Navigator.push<bool>(
       context,
       MaterialPageRoute(
         builder: (_) => VendorAddProductScreen(
           vendorTrackingId: widget.vendorTrackingId,
-          // Reuse the first product's store_tracking_id if available,
-          // otherwise fall back to a placeholder (the Add screen will
-          // validate server-side via VerifyStoreOwnership).
-          storeTrackingId: existing?.storeTrackingId ??
-              (_loadedProducts.isNotEmpty
-                  ? _loadedProducts.first.storeTrackingId
-                  : 'STOR-000000'),
+          storeTrackingId: effectiveStoreId,
           existing: existing,
         ),
       ),
     );
-      if (result == true) {
-        unawaited(_fetchProducts(refresh: true));
-      }
+    if (result == true) {
+      unawaited(_fetchProducts(refresh: true));
+    }
   }
 
   /// Confirms and deletes a product via the secure DELETE endpoint.
@@ -518,9 +527,7 @@ class VendorInventoryScreenState extends State<VendorInventoryScreen> {
                       iconSize: 1.0,
                     ),
                   },
-                  onMapCreated: (controller) {
-                    _mapController = controller;
-                  },
+                  onMapCreated: (_) {},
                 ),
                 Positioned(
                   bottom: 12,
@@ -529,7 +536,7 @@ class VendorInventoryScreenState extends State<VendorInventoryScreen> {
                     padding:
                         const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                     decoration: BoxDecoration(
-                      color: Colors.black.withOpacity(0.85),
+                      color: Colors.black.withValues(alpha: 0.85),
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: const Row(
@@ -656,7 +663,7 @@ class VendorInventoryScreenState extends State<VendorInventoryScreen> {
                                     borderRadius: BorderRadius.circular(24),
                                     side: BorderSide(
                                       color: isOutOfStock
-                                          ? Colors.red.withOpacity(0.2)
+                                          ? Colors.red.withValues(alpha: 0.2)
                                           : Colors.grey.shade200,
                                       width: 1.5,
                                     ),
@@ -680,7 +687,14 @@ class VendorInventoryScreenState extends State<VendorInventoryScreen> {
                                                           .imageUrl.isNotEmpty
                                                       ? Image.network(
                                                           liveProduct.imageUrl,
-                                                          fit: BoxFit.cover,)
+                                                          fit: BoxFit.cover,
+                                                          errorBuilder: (context, error, stackTrace) =>
+                                                              const Icon(
+                                                                Icons
+                                                                    .image_not_supported_rounded,
+                                                                color: Colors.grey,
+                                                              ),
+                                                        )
                                                       : const Icon(
                                                           Icons
                                                               .image_not_supported_rounded,
@@ -753,7 +767,7 @@ class VendorInventoryScreenState extends State<VendorInventoryScreen> {
                                           child: Container(
                                             decoration: BoxDecoration(
                                               color: Colors.black
-                                                  .withOpacity(0.38),
+                                                  .withValues(alpha: 0.38),
                                               borderRadius:
                                                   BorderRadius.circular(24),
                                             ),

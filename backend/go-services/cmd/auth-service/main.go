@@ -114,9 +114,9 @@ func main() {
 	// (production-safe).
 	flowH := handlers.NewAuthFlowHandler(svc)
 	flowH.WithNotifier(buildEmailNotifier(cfg))
+	var rdb redis.UniversalClient
 	if redisClient != nil {
-		var rdb redis.UniversalClient = redisClient.Client
-		_ = rdb
+		rdb = redisClient.Client
 	}
 
 	// 5. Setup Router
@@ -125,7 +125,7 @@ func main() {
 
 	// Security middleware: CORS + rate limiting (auth endpoints: 30 req/min stricter)
 	router.Use(middleware.CORS())
-	router.Use(middleware.RateLimit(nil, 30, time.Minute))
+	router.Use(middleware.RateLimit(rdb, 30, time.Minute))
 
 	// Healthcheck
 	router.GET("/health", func(c *gin.Context) {
@@ -134,11 +134,11 @@ func main() {
 	router.GET("/readyz", health.DBPool(db.Writer))
 
 	h.RegisterRoutes(router)
-	flowH.RegisterRoutes(router)
+	flowH.RegisterRoutes(router, rdb)
 
 	// 6. Start Server with Graceful Shutdown
 	srv := &http.Server{
-		Addr:    fmt.Sprintf("127.0.0.1:%d", cfg.Port),
+		Addr:    fmt.Sprintf("%s:%d", config.BindHost(), cfg.Port),
 		Handler: router,
 	}
 

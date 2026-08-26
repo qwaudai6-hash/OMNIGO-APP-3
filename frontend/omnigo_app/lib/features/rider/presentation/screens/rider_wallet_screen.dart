@@ -139,6 +139,11 @@ class _RiderWalletScreenState extends State<RiderWalletScreen> {
   Widget build(BuildContext context) {
     final balance = ((_wallet?['balance'] as num?) ?? 0).toDouble();
     final lifetime = ((_wallet?['lifetime_earnings'] as num?) ?? 0).toDouble();
+    // UX FIX: surface the COD cash-holding counter. Backend blocks new COD
+    // gigs at >= PKR 5,000 — riders could never see WHY they were blocked.
+    final cashInHand = ((_wallet?['cash_in_hand'] as num?) ?? 0).toDouble();
+    const codCashLimit = 5000.0;
+    final codBlocked = cashInHand >= codCashLimit;
     final credits = (_wallet?['recent_credits'] ?? <dynamic>[]) as List<dynamic>;
 
     return Scaffold(
@@ -166,6 +171,8 @@ class _RiderWalletScreenState extends State<RiderWalletScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     _buildSummaryCard(balance, lifetime),
+                    const SizedBox(height: 16),
+                    _buildCashInHandCard(cashInHand, codCashLimit, codBlocked),
                     if (_codDebts.isNotEmpty) ...[
                       const SizedBox(height: 24),
                       _buildCODDebtsSection(),
@@ -346,8 +353,8 @@ class _RiderWalletScreenState extends State<RiderWalletScreen> {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.black.withOpacity(0.05)),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 10, offset: const Offset(0, 4))],
+        border: Border.all(color: Colors.black.withValues(alpha: 0.05)),
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10, offset: const Offset(0, 4))],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -362,6 +369,71 @@ class _RiderWalletScreenState extends State<RiderWalletScreen> {
           const SizedBox(height: 8),
           Text('Delivery fee: PKR ${fee.toStringAsFixed(2)}', style: const TextStyle(color: Colors.grey, fontSize: 12)),
           Text('Admin commission: PKR ${commission.toStringAsFixed(2)}', style: const TextStyle(color: Colors.grey, fontSize: 12)),
+        ],
+      ),
+    );
+  }
+
+  /// UX FIX: COD cash-holding meter. Shows how close the rider is to the
+  /// PKR 5,000 deposit threshold and warns when new COD gigs are blocked.
+  Widget _buildCashInHandCard(double cashInHand, double limit, bool blocked) {
+    final progress = (cashInHand / limit).clamp(0.0, 1.0);
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: blocked ? const Color(0xFFFFF3F0) : Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: blocked ? Colors.redAccent : Colors.grey.shade300),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                blocked ? Icons.block_rounded : Icons.account_balance_wallet_outlined,
+                color: blocked ? Colors.redAccent : Colors.black87,
+                size: 20,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'COD Cash in Hand',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: blocked ? Colors.redAccent : Colors.black87,
+                ),
+              ),
+              const Spacer(),
+              Text(
+                'PKR ${cashInHand.toStringAsFixed(0)} / ${limit.toStringAsFixed(0)}',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                  color: blocked ? Colors.redAccent : Colors.black54,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: LinearProgressIndicator(
+              value: progress,
+              minHeight: 8,
+              backgroundColor: Colors.grey.shade200,
+              valueColor: AlwaysStoppedAnimation<Color>(
+                blocked ? Colors.redAccent : (progress > 0.75 ? Colors.orange : Colors.green),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            blocked
+                ? 'Limit reached \u2014 new COD gigs are blocked. Deposit your collected cash to unlock them.'
+                : 'Deposit collected cash before this reaches PKR ${limit.toStringAsFixed(0)} to keep accepting COD orders.',
+            style: TextStyle(fontSize: 11.5, color: blocked ? Colors.redAccent : Colors.black54),
+          ),
         ],
       ),
     );

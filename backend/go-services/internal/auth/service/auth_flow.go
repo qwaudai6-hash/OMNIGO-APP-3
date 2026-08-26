@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"time"
@@ -62,12 +63,23 @@ func (s *AuthService) ConfirmPasswordReset(ctx context.Context, token, newPasswo
 	}
 	tokenHash := sha256Hex(token)
 
+	hash, err := bcryptGenerateFromPassword(newPassword)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
 	var (
 		uid       string
 		expiresAt time.Time
 		usedAt    *time.Time
 	)
-	row := s.db.QueryRow(ctx,
+	row := tx.QueryRow(ctx,
 		`SELECT user_tracking_id, expires_at, used_at
 		 FROM password_reset_tokens
 		 WHERE token_hash = $1
@@ -82,16 +94,6 @@ func (s *AuthService) ConfirmPasswordReset(ctx context.Context, token, newPasswo
 		return errors.New("token expired")
 	}
 
-	hash, err := bcryptGenerateFromPassword(newPassword)
-	if err != nil {
-		return err
-	}
-
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
 	if _, err := tx.Exec(ctx,
 		`UPDATE users SET password_hash = $1, updated_at = NOW() WHERE tracking_id = $2`,
 		hash, uid); err != nil {
@@ -100,6 +102,12 @@ func (s *AuthService) ConfirmPasswordReset(ctx context.Context, token, newPasswo
 	if _, err := tx.Exec(ctx,
 		`UPDATE password_reset_tokens SET used_at = NOW() WHERE token_hash = $1`,
 		tokenHash); err != nil {
+		return err
+	}
+	// Invalidate all active sessions across all devices for this user
+	if _, err := tx.Exec(ctx,
+		`UPDATE user_refresh_tokens SET revoked = TRUE, updated_at = NOW() WHERE user_tracking_id = $1`,
+		uid); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -125,11 +133,17 @@ func (s *AuthService) IssueEmailVerification(ctx context.Context, trackingID str
 	return raw, nil
 }
 
-// ConfirmEmailVerification marks the user as verified and the token as
-// used. Returns the verified email so the front-end can show a success
+// ConfirmEmailVerification validates the token and marks the user's
+// email verified. Returns the verified email so the caller can display a
 // banner.
 func (s *AuthService) ConfirmEmailVerification(ctx context.Context, token string) (string, error) {
 	tokenHash := sha256Hex(token)
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
 
 	var (
 		uid        string
@@ -137,7 +151,7 @@ func (s *AuthService) ConfirmEmailVerification(ctx context.Context, token string
 		expiresAt  time.Time
 		verifiedAt *time.Time
 	)
-	row := s.db.QueryRow(ctx,
+	row := tx.QueryRow(ctx,
 		`SELECT user_tracking_id, email, expires_at, verified_at
 		 FROM email_verification_tokens
 		 WHERE token_hash = $1
@@ -153,11 +167,6 @@ func (s *AuthService) ConfirmEmailVerification(ctx context.Context, token string
 		return "", errors.New("token expired")
 	}
 
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer tx.Rollback(ctx)
 	if _, err := tx.Exec(ctx,
 		`UPDATE users SET email_verified = true, updated_at = NOW() WHERE tracking_id = $1`,
 		uid); err != nil {
@@ -396,11 +405,8 @@ func loadEncryptionKey() []byte {
 		}
 		return out
 	}
-	// Dev fallback — deterministic from a fixed string. Service will
-	// warn at startup if running with this key (see command-line
-	// entrypoint).
-	sum := sha256.Sum256([]byte("omnigo-dev-fallback-key-not-for-production"))
-	return sum[:]
+	log.Fatal("[FATAL] HMAC_TOKEN_ENCRYPTION_KEY env var is missing or invalid (must be 64 hex chars). Cannot start service securely.")
+	return nil // unreachable but satisfies compiler
 }
 
 var totpEncryptionKey []byte

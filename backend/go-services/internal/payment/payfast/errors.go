@@ -86,13 +86,11 @@ func IsTransient(err error) bool {
 	// Gateway HTTP status checks
 	var gwErr *GatewayError
 	if errors.As(err, &gwErr) {
-		switch gwErr.StatusCode {
-		case http.StatusRequestTimeout, // 408
-			http.StatusBadGateway,          // 502
-			http.StatusServiceUnavailable,  // 503
-			http.StatusGatewayTimeout:      // 504
-			return true
-		}
+		// 408 is an explicit timeout; ANY 5xx means the gateway side failed while our
+		// transaction state there is unknown (includes 500 Internal Server Error from the
+		// gateway itself and "auth endpoint unreachable" wrappers). Treating 5xx as
+		// transient lets the circuit breaker trip instead of hammering a dying upstream.
+		return gwErr.StatusCode == http.StatusRequestTimeout || gwErr.StatusCode >= http.StatusInternalServerError
 	}
 
 	return false
@@ -113,27 +111,42 @@ func IsDeterministicRejection(err error) bool {
 	return false
 }
 
-// MapIssuerResponseCode converts raw 1LINK/bank ISO-8583 response codes into clear, actionable advice for customers.
+// MapIssuerResponseCode converts raw 1LINK/PayFast response codes into clear, actionable advice for customers.
 func MapIssuerResponseCode(code string) string {
 	switch strings.TrimSpace(code) {
-	case "00":
+	case "00", "000":
 		return "Approved"
-	case "05", "51":
+	case "002":
+		return "Transaction timed out at bank gateway. Please retry."
+	case "03":
+		return "You have entered an inactive account. Please contact your bank."
+	case "05", "51", "97", "881":
 		return "Insufficient balance in your card/account. Please top up and retry."
 	case "14", "54":
 		return "Card expired or invalid expiry date entered."
-	case "57", "58":
+	case "55":
+		return "You have entered an invalid OTP or PIN. Please check and retry."
+	case "57", "58", "880", "883":
 		return "Online e-commerce transactions are not enabled on your card. Please enable online shopping in your bank app and retry."
-	case "61":
-		return "Exceeded transaction amount limit on your card/account."
+	case "61", "106", "882":
+		return "Daily transaction limit or count exceeded on your card. Please contact your bank."
 	case "65":
 		return "Exceeded transaction frequency limit on your card."
 	case "75":
 		return "Incorrect CVV / OTP entered too many times."
+	case "104":
+		return "Entered payment details are incorrect. Please verify card number, CVV, and expiry."
+	case "803":
+		return "OTP has been sent to your email address."
+	case "804":
+		return "OTP has been sent to your mobile number."
+	case "805":
+		return "OTP verified successfully."
+	case "806":
+		return "OTP could not be verified. Please request a new OTP."
 	case "91", "96":
 		return "Your issuing bank or 1LINK switch is temporarily unavailable. Please retry in a few moments."
 	default:
 		return "Payment was declined by issuing bank."
 	}
 }
-

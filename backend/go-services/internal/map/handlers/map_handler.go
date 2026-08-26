@@ -42,9 +42,18 @@ func (h *MapHandler) ProxyTile(c *gin.Context) {
 		source = "tiles"
 	}
 
-	z, err1 := strconv.Atoi(c.Param("z"))
-	x, err2 := strconv.Atoi(c.Param("x"))
-	y, err3 := strconv.Atoi(c.Param("y"))
+	zStr := c.Param("z")
+	xStr := c.Param("x")
+	yStr := c.Param("y")
+
+	// Strip file extension (.pbf, .png, etc.) from y coordinate if present
+	if dotIdx := strings.Index(yStr, "."); dotIdx != -1 {
+		yStr = yStr[:dotIdx]
+	}
+
+	z, err1 := strconv.Atoi(zStr)
+	x, err2 := strconv.Atoi(xStr)
+	y, err3 := strconv.Atoi(yStr)
 	if err1 != nil || err2 != nil || err3 != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tile coordinates"})
 		return
@@ -76,6 +85,13 @@ func (h *MapHandler) ProxyGlyphs(c *gin.Context) {
 func (h *MapHandler) ProxySprite(c *gin.Context) {
 	id := c.Param("id")
 	ext := c.Param("ext")
+	file := c.Param("file")
+
+	if file != "" {
+		ext = parseExtension(file)
+		id = strings.TrimSuffix(file, "."+ext)
+	}
+
 	if id == "" || (ext != "json" && ext != "png") {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid sprite request"})
 		return
@@ -95,6 +111,7 @@ func (h *MapHandler) RegisterRoutes(router *gin.Engine) {
 		mapGroup.GET("/tiles/:source/:z/:x/:y", h.ProxyTile)
 		mapGroup.GET("/glyphs/:fontstack/:start-:end.pbf", h.ProxyGlyphs)
 		mapGroup.GET("/sprites/:id@2x.:ext", h.ProxySprite)
+		mapGroup.GET("/sprites/:file", h.ProxySprite)
 	}
 }
 

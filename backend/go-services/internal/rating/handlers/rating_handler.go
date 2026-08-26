@@ -144,8 +144,10 @@ func (h *RatingHandler) ListRatingsForUser(c *gin.Context) {
 }
 
 // RegisterRoutes attaches the ratings endpoints to the gin router.
+// JWTAuth() is mandatory here: CreateRating reads the caller identity from
+// the gin context, which is only populated by the JWT middleware.
 func (h *RatingHandler) RegisterRoutes(router *gin.Engine) {
-	ratings := router.Group("/api/v1/ratings")
+	ratings := router.Group("/api/v1/ratings", middleware.JWTAuth())
 	{
 		ratings.POST("/", h.CreateRating)
 		ratings.GET("/:tracking_id", h.ListRatingsForUser)

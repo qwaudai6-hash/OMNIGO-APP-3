@@ -19,6 +19,15 @@ type Product struct {
 	IsActive          bool      `json:"is_active"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
+
+	// Store enrichment (LEFT JOIN on list endpoints). Flutter's Product model
+	// parses these to render vendor branding on catalog cards; omitted from
+	// write payloads via omitempty.
+	StoreName     string `json:"store_name,omitempty"`
+	StoreLogoURL  string `json:"store_logo_url,omitempty"`
+	StoreBannerURL string `json:"store_banner_url,omitempty"`
+	LogoURL       string `json:"logo_url,omitempty"`
+	BannerURL     string `json:"banner_url,omitempty"`
 }
 
 // CreateProductRequest is the payload for creating a new product

@@ -11,6 +11,8 @@ import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/services/cart_provider.dart';
 
 import '../../data/models/product.dart';
+import '../widgets/payfast_card_sheet.dart';
+import 'order_success_screen.dart';
 import 'vendor_store_page.dart';
 
 class ProductDetailsScreen extends StatefulWidget {
@@ -44,8 +46,8 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
   bool _isLoadingRecommendations = false;
   // Frequently Bought Together (separate AI endpoint) — items people
   // typically add to cart when they buy this product.
-  List<Product> _coBought = [];
-  bool _isLoadingCoBought = false;
+  final List<Product> _coBought = [];
+  final bool _isLoadingCoBought = false;
 
   // ── Vendor store card state ───────────────────────────────────────
   Map<String, dynamic>? _storeInfo;
@@ -74,7 +76,7 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
   /// Fetches vendor store info to show the Daraz-style store card.
   Future<void> _fetchStoreInfo() async {
     final storeId = widget.product.storeTrackingId;
-    if (storeId.isEmpty || storeId == 'STOR-001') return;
+    if (storeId.isEmpty) return;
 
     // Pre-fill from product model if available (no extra network call needed)
     if (widget.product.storeName != null) {
@@ -336,7 +338,7 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
 
     try {
       final url = Uri.parse(ApiEndpoints.orderCheckout());
-      final vendorStoreId = widget.product.storeTrackingId.isNotEmpty ? widget.product.storeTrackingId : 'STOR-001';
+      final vendorStoreId = widget.product.storeTrackingId;
       final unitPrice = widget.product.basePrice;
       final totalPrice = unitPrice * _quantity;
       final prodId = widget.product.productTrackingId.isNotEmpty ? widget.product.productTrackingId : 'PROD-N/A';
@@ -346,8 +348,6 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
         'product_tracking_id': prodId,
         'quantity': _quantity,
       }];
-
-      String paymentMethod = 'Cash on Delivery';
 
       // ── Step 1: Place the order FIRST so the backend allocates a real
       //    ORD- tracking ID. The previous flow created a synthetic nonce
@@ -422,7 +422,6 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
                 ),
               );
               await Stripe.instance.presentPaymentSheet();
-              paymentMethod = 'Card (Stripe Payment Confirmed)';
             } catch (e) {
               if (mounted) {
                 setState(() => _isCheckoutProcessing = false);
@@ -479,67 +478,100 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
           return;
         }
       } else if (paymentChoice == 'payfast') {
-        // PayFast PK — signed hosted checkout flow
-        final prefs2 = await SharedPreferences.getInstance();
-        final customerPhone = prefs2.getString('phone') ?? '';
-        final customerEmail = prefs2.getString('email') ?? '';
+        // PayFast PK — Option C tokenized flow (same pipeline as cart checkout):
+        // fraud checks, payment_transactions audit row, 3DS step-up, gateway
+        // verification and the admin/vendor/delivery ledger split all happen
+        // server-side in the payment orchestrator.
+        if (!mounted) return;
+        final cardDetails = await showPayFastCardDetailsSheet(context);
+        if (cardDetails == null) {
+          // User cancelled card entry — keep the order, drop the pending nonce.
+          if (mounted) setState(() => _isCheckoutProcessing = false);
+          await prefs.remove('pending_nonce');
+          return;
+        }
 
         final payfastResponse = await http.post(
-          Uri.parse(ApiEndpoints.payfastCharge()),
+          Uri.parse(ApiEndpoints.payfastPayment()),
           headers: {
             'Content-Type': 'application/json',
             'Authorization': 'Bearer $token',
+            // Idempotency-Key: a network-level retry of this exact Buy Now
+            // checkout replays the original attempt instead of double-charging.
+            'Idempotency-Key': 'buynow-$nonce',
           },
           body: jsonEncode({
-            'amount': totalPrice.toStringAsFixed(2),
             'order_id': realOrderTrackingId,
-            'customer_mobile': customerPhone,
-            'customer_email': customerEmail,
+            // account_type_id intentionally omitted — the orchestrator derives
+            // it from the supplied instrument (card vs bank/wallet).
+            'card_number': cardDetails['card_number'],
+            'expiry_month': cardDetails['expiry_month'],
+            'expiry_year': cardDetails['expiry_year'],
+            'cvv': cardDetails['cvv'],
+            'customer_mobile_no': cardDetails['customer_mobile_no'],
           }),
-        ).timeout(const Duration(seconds: 12));
+        ).timeout(const Duration(seconds: 15));
 
-        if (payfastResponse.statusCode == 200) {
-          final pfData = jsonDecode(payfastResponse.body) as Map<String, dynamic>;
-          final redirectUrl = pfData['redirect_url']?.toString() ?? '';
-          if (redirectUrl.isNotEmpty && mounted) {
-            final uri = Uri.parse(redirectUrl);
-            if (await canLaunchUrl(uri)) {
-              await launchUrl(uri, mode: LaunchMode.externalApplication);
+        if (payfastResponse.statusCode != 200) {
+          if (mounted) setState(() => _isCheckoutProcessing = false);
+          final errBody = jsonDecode(payfastResponse.body) as Map<String, dynamic>? ?? {};
+          final errMsg = errBody['error']?.toString() ??
+              'Failed to initiate PayFast payment. Server returned ${payfastResponse.statusCode}';
+          if (mounted) _showErrorDialog(errMsg);
+          return;
+        }
+
+        final pfData = jsonDecode(payfastResponse.body) as Map<String, dynamic>;
+        final status = pfData['status']?.toString();
+        if (status == 'failed') {
+          if (mounted) setState(() => _isCheckoutProcessing = false);
+          if (mounted) _showErrorDialog(pfData['message']?.toString() ?? 'PayFast payment failed');
+          return;
+        }
+
+        // 3DS step-up: render the bank challenge; the ACS posts its result to the
+        // backend callback directly, which resumes tokenization + settlement.
+        if (status == '3ds_redirect' || pfData['action'] == '3ds_redirect') {
+          final threedHtml = pfData['threed_html']?.toString() ?? '';
+          if (threedHtml.isNotEmpty && mounted) {
+            final verified = await showPayFast3DSChallenge(context, threedHtml);
+            if (!verified) {
+              if (mounted) setState(() => _isCheckoutProcessing = false);
+              if (mounted) {
+                _showErrorDialog('3DS verification was cancelled or incomplete. Your order is saved as pending.');
+              }
+              return;
             }
           }
-          // Order will be confirmed via webhook after payment.
-          if (mounted) setState(() => _isCheckoutProcessing = false);
-          if (mounted) _showPaymentPendingDialog(nonce, method: 'PayFast');
-          await prefs.remove('pending_nonce');
-          await prefs.remove('pending_order_product');
-          await prefs.remove('pending_order_status');
-          return;
-        } else if (payfastResponse.statusCode == 503 && mounted) {
-          // PayFast not configured on backend — inform user
-          if (mounted) setState(() => _isCheckoutProcessing = false);
-          if (mounted) _showErrorDialog('PayFast is not configured on the server. Please use another payment method.');
-          await prefs.remove('pending_nonce');
-          await prefs.remove('pending_order_product');
-          await prefs.remove('pending_order_status');
-          return;
-        } else {
-          if (mounted) setState(() => _isCheckoutProcessing = false);
-          if (mounted) _showErrorDialog('Failed to initiate PayFast payment. Server returned ${payfastResponse.statusCode}');
-          await prefs.remove('pending_nonce');
-          await prefs.remove('pending_order_product');
-          await prefs.remove('pending_order_status');
-          return;
+        }
+
+        // Deferred outcomes: money may still be settling at the gateway.
+        if (status == 'gateway_pending' || status == 'in_progress') {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Payment is processing at the gateway. Your order will update automatically once it completes.'),
+                duration: Duration(seconds: 5),
+              ),
+            );
+          }
         }
       } else {
         // Cash on Delivery — no payment gateway call needed
-        paymentMethod = 'Cash on Delivery';
       }
 
-      // ── Step 3: success.
+      // ── Step 3: success — same landing screen as cart checkout for a
+      //    consistent post-payment experience across entry points.
       await prefs.remove('pending_nonce');
       await prefs.remove('pending_order_product');
       await prefs.remove('pending_order_status');
-      if (mounted) _showSuccessDialog(realOrderTrackingId, paymentMethod: paymentMethod);
+      if (mounted) {
+        await Navigator.pushAndRemoveUntil(
+          context,
+          MaterialPageRoute<void>(builder: (_) => OrderSuccessScreen(trackingId: realOrderTrackingId)),
+          (route) => route.isFirst,
+        );
+      }
     } catch (e) {
       if (mounted) _showErrorDialog('Network Error: Could not reach the server.');
     } finally {
@@ -549,26 +581,6 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
         });
       }
     }
-  }
-
-  void _showSuccessDialog(String nonce, {String paymentMethod = 'Cash on Delivery'}) {
-    showDialog<void>(
-      context: context,
-      builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text('Order Placed Successfully!'),
-        content: Text('Your order for ${widget.product.name} (x$_quantity) is confirmed.\n\nPayment: $paymentMethod\nReceipt: $nonce'),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              Navigator.pop(context); // Go back to dashboard
-            },
-            child: const Text('OK'),
-          ),
-        ],
-      ),
-    );
   }
 
   void _showErrorDialog(String message) {
@@ -663,13 +675,13 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                     width: 220,
                                     height: 220,
                                     errorBuilder: (context, error, stackTrace) =>
-                                        Icon(Icons.shopping_bag, size: 120, color: Colors.white.withOpacity(0.8)),
+                                        Icon(Icons.shopping_bag, size: 120, color: Colors.white.withValues(alpha: 0.8)),
                                   ),
                                 ),
                               );
                             },
                           )
-                        : Icon(Icons.shopping_bag, size: 120, color: Colors.white.withOpacity(0.8)),
+                        : Icon(Icons.shopping_bag, size: 120, color: Colors.white.withValues(alpha: 0.8)),
                   ),
                 ),
                 if (prod.allImages.length > 1)
@@ -684,7 +696,7 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
                           width: _activeImageIndex == index ? 20 : 8,
                           height: 8,
                           decoration: BoxDecoration(
-                            color: _activeImageIndex == index ? AppTheme.blackAccent : Colors.white.withOpacity(0.7),
+                            color: _activeImageIndex == index ? AppTheme.blackAccent : Colors.white.withValues(alpha: 0.7),
                             borderRadius: BorderRadius.circular(4),
                           ),
                         ),
@@ -819,7 +831,13 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                             child: ClipRRect(
                                               borderRadius: BorderRadius.circular(12),
                                               child: (rec.imageUrl != null && rec.imageUrl!.isNotEmpty)
-                                                  ? Image.network(rec.imageUrl!, fit: BoxFit.cover, width: double.infinity)
+                                                  ? Image.network(
+                                                      rec.imageUrl!,
+                                                      fit: BoxFit.cover,
+                                                      width: double.infinity,
+                                                      errorBuilder: (context, error, stackTrace) =>
+                                                          const Center(child: Icon(Icons.shopping_bag_outlined, color: Colors.grey)),
+                                                    )
                                                   : const Center(child: Icon(Icons.shopping_bag_outlined, color: Colors.grey)),
                                             ),
                                           ),
@@ -1033,9 +1051,9 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
-        color: bgColor.withOpacity(0.2),
+        color: bgColor.withValues(alpha: 0.2),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: bgColor.withOpacity(0.5)),
+        border: Border.all(color: bgColor.withValues(alpha: 0.5)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -1138,16 +1156,16 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
                   Row(
                     children: [
                       Icon(Icons.verified_outlined,
-                          size: 12, color: Colors.green.shade600),
+                          size: 12, color: Colors.green.shade600,),
                       const SizedBox(width: 3),
                       Text(
                         'Verified Seller',
                         style: TextStyle(
-                            fontSize: 11, color: Colors.green.shade600),
+                            fontSize: 11, color: Colors.green.shade600,),
                       ),
                       const SizedBox(width: 8),
                       Icon(Icons.storefront_outlined,
-                          size: 11, color: Colors.grey.shade500),
+                          size: 11, color: Colors.grey.shade500,),
                       const SizedBox(width: 3),
                       Flexible(
                         child: Text(
@@ -1157,7 +1175,7 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
                           style: TextStyle(
                               fontSize: 10,
                               color: Colors.grey.shade400,
-                              fontFamily: 'monospace'),
+                              fontFamily: 'monospace',),
                         ),
                       ),
                     ],
@@ -1186,7 +1204,7 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
                   ),
                   SizedBox(width: 4),
                   Icon(Icons.arrow_forward_ios_rounded,
-                      size: 10, color: AppTheme.limeAccent),
+                      size: 10, color: AppTheme.limeAccent,),
                 ],
               ),
             ),

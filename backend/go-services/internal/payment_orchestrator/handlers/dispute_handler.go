@@ -11,6 +11,7 @@ import (
 
 	"github.com/omnigo/backend/internal/escrow"
 	"github.com/omnigo/backend/internal/shared/database"
+	"github.com/omnigo/backend/internal/shared/middleware"
 )
 
 // DisputeHandler handles dispute filing and resolution.
@@ -41,10 +42,14 @@ func (h *DisputeHandler) File(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
-	// Get the user who filed the dispute (from JWT)
-	filedBy := c.GetHeader("X-User-Tracking-ID")
+	// Get the user who filed the dispute (from verified JWT)
+	filedBy := middleware.GetTrackingID(c)
 	if filedBy == "" {
-		filedBy = "unknown"
+		filedBy = c.GetHeader("X-User-Tracking-ID")
+	}
+	if filedBy == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized: missing user identity"})
+		return
 	}
 
 	// Check if order exists
@@ -221,10 +226,10 @@ func (h *DisputeHandler) List(c *gin.Context) {
 
 // RegisterRoutes registers dispute endpoints.
 func (h *DisputeHandler) RegisterRoutes(router *gin.Engine) {
-	payments := router.Group("/api/v1/payments")
+	payments := router.Group("/api/v1/payments", middleware.JWTAuth())
 	{
 		payments.POST("/disputes", h.File)
-		payments.PATCH("/disputes/:id", h.Resolve)
-		payments.GET("/disputes", h.List)
+		payments.PATCH("/disputes/:id", middleware.RoleRequired("admin"), h.Resolve)
+		payments.GET("/disputes", middleware.RoleRequired("admin"), h.List)
 	}
 }

@@ -36,6 +36,13 @@ func CORS() gin.HandlerFunc {
 	}
 
 	return func(c *gin.Context) {
+		// Baseline security headers
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("X-Frame-Options", "DENY")
+		c.Header("X-XSS-Protection", "0")
+		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
+		c.Header("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
+
 		origin := c.Request.Header.Get("Origin")
 		allowed := false
 
@@ -53,12 +60,13 @@ func CORS() gin.HandlerFunc {
 		if allowed {
 			if allowedOrigins == "*" {
 				c.Header("Access-Control-Allow-Origin", "*")
+				// Per W3C CORS spec: Do NOT set Allow-Credentials: true with wildcard origin "*"
 			} else {
 				c.Header("Access-Control-Allow-Origin", origin)
+				c.Header("Access-Control-Allow-Credentials", "true")
 			}
 			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization, X-Trace-Id, X-Customer-ID, X-Store-ID, X-Device-Session-Nonce")
-			c.Header("Access-Control-Allow-Credentials", "true")
 			c.Header("Access-Control-Max-Age", "86400")
 		}
 

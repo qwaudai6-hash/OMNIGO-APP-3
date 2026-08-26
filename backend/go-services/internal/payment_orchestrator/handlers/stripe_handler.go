@@ -73,9 +73,39 @@ func (h *StripeSplitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Idempotency check
+	// 3. Only settlement-relevant event type carries money forward.
+	if event.Type != "payment_intent.succeeded" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	var paymentIntent stripe.PaymentIntent
+	if err := json.Unmarshal(event.Data.Raw, &paymentIntent); err != nil {
+		fmt.Printf("[StripeSplit] Failed to unmarshal payment intent: %v\n", err)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	orderID := paymentIntent.Metadata["order_id"]
+	storeID := paymentIntent.Metadata["store_id"]
+
+	if orderID == "" {
+		// GO-26: money arrived but we cannot route it. Acknowledge 200
+		// (retrying can never fix bad metadata) but persist the raw event
+		// to a Redis dead-letter list for manual reconciliation instead of
+		// only logging.
+		fmt.Printf("[StripeSplit] CRITICAL: payment_intent.succeeded WITHOUT order_id — parked for reconciliation. event=%s pi=%s\n",
+			event.ID, paymentIntent.ID)
+		h.parkUnroutableEvent(ctx, event.ID, paymentIntent.ID, float64(paymentIntent.Amount)/100.0)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// 4. Cross-endpoint dedup. Key shares the "lock:webhook:settle:<gw>:<txn>"
+	// namespace with the generic webhook handler keyed on the PaymentIntent ID,
+	// so a dual-webhook configuration can never double-settle one payment.
 	if h.redis != nil {
-		webhookLockKey := fmt.Sprintf("lock:webhook:split:%s", event.ID)
+		webhookLockKey := fmt.Sprintf("lock:webhook:settle:stripe:%s", paymentIntent.ID)
 		success, err := h.redis.SetNX(ctx, webhookLockKey, "1", 24*time.Hour).Result()
 		if err != nil || !success {
 			w.WriteHeader(http.StatusOK)
@@ -83,58 +113,62 @@ func (h *StripeSplitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 4. Process payment_intent.succeeded
-	if event.Type == "payment_intent.succeeded" {
-		var paymentIntent stripe.PaymentIntent
-		if err := json.Unmarshal(event.Data.Raw, &paymentIntent); err != nil {
-			fmt.Printf("[StripeSplit] Failed to unmarshal payment intent: %v\n", err)
-			w.WriteHeader(http.StatusOK)
-			return
-		}
+	// 5. Execute payment split
+	if err := h.executeSplit(ctx, orderID, storeID, float64(paymentIntent.Amount)/100.0, paymentIntent.ID); err != nil {
+		fmt.Printf("[StripeSplit] Split execution failed for order %s: %v\n", orderID, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 
-		orderID := paymentIntent.Metadata["nonce"]
-		storeID := paymentIntent.Metadata["store_id"]
+	fmt.Printf("[StripeSplit] Split completed for order %s: %.2f PKR\n", orderID, float64(paymentIntent.Amount)/100.0)
 
-		if orderID == "" {
-			fmt.Printf("[StripeSplit] No order ID in payment intent metadata\n")
-			w.WriteHeader(http.StatusOK)
-			return
+	// 6. Emit Kafka event only on success
+	if h.kafka != nil {
+		eventPayload := map[string]interface{}{
+			"event_id":  event.ID,
+			"order_id":  orderID,
+			"store_id":  storeID,
+			"amount":    paymentIntent.Amount,
+			"currency":  paymentIntent.Currency,
+			"status":    "PAYMENT_SPLIT_COMPLETED",
+			"timestamp": time.Now().UnixMilli(),
 		}
-
-		// 5. Execute payment split
-		if err := h.executeSplit(ctx, orderID, storeID, float64(paymentIntent.Amount)/100.0, event.ID); err != nil {
-			fmt.Printf("[StripeSplit] Split execution failed for order %s: %v\n", orderID, err)
-			// Still return 200 to prevent Stripe retries — the split can be reconciled later
-		} else {
-			fmt.Printf("[StripeSplit] Split completed for order %s: %.2f PKR\n", orderID, float64(paymentIntent.Amount)/100.0)
-		}
-
-		// 6. Emit Kafka event
-		if h.kafka != nil {
-			eventPayload := map[string]interface{}{
-				"event_id":  event.ID,
-				"order_id":  orderID,
-				"store_id":  storeID,
-				"amount":    paymentIntent.Amount,
-				"currency":  paymentIntent.Currency,
-				"status":    "PAYMENT_SPLIT_COMPLETED",
-				"timestamp": time.Now().UnixMilli(),
-			}
-			eventBytes, _ := json.Marshal(eventPayload)
-			h.kafka.Produce(ctx, &kgo.Record{
-				Topic: "payment.split_completed",
-				Key:   []byte(orderID),
-				Value: eventBytes,
-			}, nil)
-		}
+		eventBytes, _ := json.Marshal(eventPayload)
+		h.kafka.Produce(ctx, &kgo.Record{
+			Topic: "payment.split_completed",
+			Key:   []byte(orderID),
+			Value: eventBytes,
+		}, nil)
 	}
 
 	// 7. Fast ACK
 	w.WriteHeader(http.StatusOK)
 }
 
+// parkUnroutableEvent stores a succeeded-but-unroutable payment event in a
+// Redis dead-letter list so finance ops can replay the split later.
+// Key: dlq:stripe_split (JSON entries, capped at 10k).
+func (h *StripeSplitHandler) parkUnroutableEvent(ctx context.Context, eventID, paymentIntentID string, amount float64) {
+	if h.redis == nil {
+		return
+	}
+	entry, err := json.Marshal(map[string]interface{}{
+		"event_id":         eventID,
+		"payment_intent":   paymentIntentID,
+		"amount":           amount,
+		"reason":           "missing order_id metadata",
+		"parked_at_unixms": time.Now().UnixMilli(),
+	})
+	if err != nil {
+		return
+	}
+	h.redis.LPush(ctx, "dlq:stripe_split", entry)
+	h.redis.LTrim(ctx, "dlq:stripe_split", 0, 9999)
+}
+
 // executeSplit performs the three-way ledger split for an online payment.
-func (h *StripeSplitHandler) executeSplit(ctx context.Context, orderID, storeID string, amount float64, eventID string) error {
+// gatewayTxnID is the Stripe PaymentIntent ID.
+func (h *StripeSplitHandler) executeSplit(ctx context.Context, orderID, storeID string, amount float64, gatewayTxnID string) error {
 	// 1. Read order details to get delivery tracking ID
 	var deliveryTrackingID string
 	err := h.db.QueryRow(ctx,
@@ -154,8 +188,13 @@ func (h *StripeSplitHandler) executeSplit(ctx context.Context, orderID, storeID 
 		return fmt.Errorf("split calculation failed: %w", err)
 	}
 
-	// 3. Execute ledger transfers atomically
-	idempotencyKey := fmt.Sprintf("stripe:split:%s", eventID)
+	// 3. Execute ledger transfers atomically.
+	// Idempotency base shares the "settle:stripe:<pi.ID>" namespace with the
+	// generic webhook handler's settlement events, so even if both endpoints
+	// race past the Redis lock, the ledger replays the existing entries
+	// instead of moving money twice. The gatewayTxnID param carries the
+	// PaymentIntent ID (see ServeHTTP).
+	idempotencyKey := fmt.Sprintf("settle:stripe:%s", gatewayTxnID)
 
 	// Transfer 1: Stripe holding → Admin revenue (2%)
 	_, err = h.ledger.Transfer(ctx, ledger.TransferRequest{
@@ -204,8 +243,17 @@ func (h *StripeSplitHandler) executeSplit(ctx context.Context, orderID, storeID 
 		}
 	}
 
-	// 4. Create escrow hold for vendor portion (48h hold)
-	if err := h.escrow.CreateHold(ctx, orderID, storeID, split.VendorEscrow); err != nil {
+	// 4. Create escrow hold for vendor portion (48h hold).
+	// CRITICAL FIX: hold must carry the VENDOR USER id (VEND-…) — PayoutWorker
+	// validates against users.tracking_id. Resolve from the order row.
+	var vendorTrackID string
+	_ = h.db.QueryRow(ctx,
+		`SELECT COALESCE(vendor_tracking_id, '') FROM orders WHERE order_tracking_id = $1`,
+		orderID).Scan(&vendorTrackID)
+	if vendorTrackID == "" {
+		vendorTrackID = storeID // legacy fallback
+	}
+	if err := h.escrow.CreateHold(ctx, orderID, vendorTrackID, split.VendorEscrow); err != nil {
 		fmt.Printf("[StripeSplit] Warning: failed to create escrow hold for order %s: %v\n", orderID, err)
 		// Non-fatal — the ledger entries are already committed
 	}

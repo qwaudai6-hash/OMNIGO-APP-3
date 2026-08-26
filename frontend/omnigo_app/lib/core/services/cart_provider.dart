@@ -12,6 +12,13 @@ class CartProvider extends ChangeNotifier {
   int get itemCount => _items.values.fold(0, (sum, item) => sum + item.quantity);
   double get totalAmount => _items.values.fold(0.0, (sum, item) => sum + (item.price * item.quantity));
 
+  String? get currentStoreId => _items.values.isNotEmpty ? _items.values.first.storeTrackingId : null;
+
+  bool isDifferentStore(String storeTrackingId) {
+    if (_items.isEmpty) return false;
+    return _items.values.first.storeTrackingId != storeTrackingId;
+  }
+
   Future<void> loadCart() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -28,7 +35,7 @@ class CartProvider extends ChangeNotifier {
     }
   }
 
-  Future<void> addItem(Product product, {int quantity = 1}) async {
+  Future<void> addItem(Product product, {int quantity = 1, bool clearIfDifferentStore = false}) async {
     final productId = product.productTrackingId;
     final storeTrackingId = product.storeTrackingId;
 
@@ -36,11 +43,21 @@ class CartProvider extends ChangeNotifier {
       throw Exception('Invalid product data. Cannot add to cart.');
     }
 
+    if (_items.isNotEmpty && _items.values.first.storeTrackingId != storeTrackingId) {
+      if (clearIfDifferentStore) {
+        _items.clear();
+      } else {
+        throw Exception('DIFFERENT_STORE');
+      }
+    }
+
     final name = product.name.isNotEmpty ? product.name : 'Unknown Product';
     final price = product.basePrice;
 
     if (_items.containsKey(productId)) {
-      _items[productId]!.quantity += quantity;
+      // CartItem is immutable (MEDIUM-14) — replace via copyWith.
+      final existing = _items[productId]!;
+      _items[productId] = existing.copyWith(quantity: existing.quantity + quantity);
     } else {
       _items[productId] = CartItem(
         productId: productId,
@@ -65,7 +82,7 @@ class CartProvider extends ChangeNotifier {
       if (quantity <= 0) {
         _items.remove(productId);
       } else {
-        _items[productId]!.quantity = quantity;
+        _items[productId] = _items[productId]!.copyWith(quantity: quantity);
       }
       await _saveToStorage();
       notifyListeners();

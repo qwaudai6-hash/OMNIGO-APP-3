@@ -8,12 +8,18 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
+
+	"github.com/omnigo/backend/internal/shared/telemetry"
 )
 
 // ValidateCustomerPayment calls POST /customer/validate
-func (c *Client) ValidateCustomerPayment(ctx context.Context, req CustomerValidationRequest) (*CustomerValidationResponse, error) {
+func (c *Client) ValidateCustomerPayment(ctx context.Context, req CustomerValidationRequest) (result *CustomerValidationResponse, err error) {
+	callStart := time.Now()
+	defer func() { telemetry.TimeGatewayCall("validate_customer", callStart, &err) }()
+
 	var validationRes *CustomerValidationResponse
-	err := c.circuitBreaker.Execute(func() error {
+	err = c.circuitBreaker.Execute(func() error {
 		token, err := c.GetAuthToken(ctx, req.CustomerIP)
 		if err != nil {
 			return fmt.Errorf("failed to get auth token: %w", err)
@@ -33,7 +39,7 @@ func (c *Client) ValidateCustomerPayment(ctx context.Context, req CustomerValida
 		formData.Set("customer_ip", req.CustomerIP)
 
 		// Calculate and set secured_hash
-		securedHash := CalculateValidationHash(req, c.securedKey)
+		securedHash := CalculateValidationHash(req, c.hashKey)
 		formData.Set("secured_hash", securedHash)
 
 		// Instrument-specific parameters
@@ -108,9 +114,12 @@ func (c *Client) ValidateCustomerPayment(ctx context.Context, req CustomerValida
 }
 
 // InitiateTransaction calls POST /transaction
-func (c *Client) InitiateTransaction(ctx context.Context, req InitiateTransactionRequest, otp string) (*InitiateTransactionResponse, error) {
+func (c *Client) InitiateTransaction(ctx context.Context, req InitiateTransactionRequest, otp string) (result *InitiateTransactionResponse, err error) {
+	callStart := time.Now()
+	defer func() { telemetry.TimeGatewayCall("initiate_transaction", callStart, &err) }()
+
 	var txnRes *InitiateTransactionResponse
-	err := c.circuitBreaker.Execute(func() error {
+	err = c.circuitBreaker.Execute(func() error {
 		token, err := c.GetAuthToken(ctx, req.CustomerIP)
 		if err != nil {
 			return fmt.Errorf("failed to get auth token: %w", err)
@@ -139,7 +148,7 @@ func (c *Client) InitiateTransaction(ctx context.Context, req InitiateTransactio
 			formData.Set("otp", otp)
 		}
 
-		securedHash := CalculateTransactionHash(req, otp, c.securedKey)
+		securedHash := CalculateTransactionHash(req, otp, c.hashKey)
 		formData.Set("secured_hash", securedHash)
 
 		if req.CardNumber != "" {
@@ -213,10 +222,12 @@ func (c *Client) InitiateTransaction(ctx context.Context, req InitiateTransactio
 }
 
 // GetTransactionStatus calls GET /transaction/<transaction_id>
-// GetTransactionStatus calls GET /transaction/<transaction_id>
-func (c *Client) GetTransactionStatus(ctx context.Context, transactionID string) (*TransactionStatusResponse, error) {
+func (c *Client) GetTransactionStatus(ctx context.Context, transactionID string) (result *TransactionStatusResponse, err error) {
+	callStart := time.Now()
+	defer func() { telemetry.TimeGatewayCall("transaction_status", callStart, &err) }()
+
 	var statusRes *TransactionStatusResponse
-	err := c.circuitBreaker.Execute(func() error {
+	err = c.circuitBreaker.Execute(func() error {
 		token, err := c.GetAuthToken(ctx, "")
 		if err != nil {
 			return fmt.Errorf("failed to get auth token: %w", err)
@@ -274,9 +285,12 @@ func (c *Client) GetTransactionStatus(ctx context.Context, transactionID string)
 }
 
 // GetTransactionStatusByBasketID calls GET /transaction/basket_id/<basket_id>
-func (c *Client) GetTransactionStatusByBasketID(ctx context.Context, basketID string) (*TransactionStatusResponse, error) {
+func (c *Client) GetTransactionStatusByBasketID(ctx context.Context, basketID string) (result *TransactionStatusResponse, err error) {
+	callStart := time.Now()
+	defer func() { telemetry.TimeGatewayCall("transaction_status_by_basket", callStart, &err) }()
+
 	var statusRes *TransactionStatusResponse
-	err := c.circuitBreaker.Execute(func() error {
+	err = c.circuitBreaker.Execute(func() error {
 		token, err := c.GetAuthToken(ctx, "")
 		if err != nil {
 			return fmt.Errorf("failed to get auth token: %w", err)
@@ -334,9 +348,12 @@ func (c *Client) GetTransactionStatusByBasketID(ctx context.Context, basketID st
 }
 
 // GetTemporaryTransactionToken calls POST /transaction/token
-func (c *Client) GetTemporaryTransactionToken(ctx context.Context, req TemporaryTokenRequest) (*TemporaryTokenResponse, error) {
+func (c *Client) GetTemporaryTransactionToken(ctx context.Context, req TemporaryTokenRequest) (result *TemporaryTokenResponse, err error) {
+	callStart := time.Now()
+	defer func() { telemetry.TimeGatewayCall("temporary_token", callStart, &err) }()
+
 	var tokenRes *TemporaryTokenResponse
-	err := c.circuitBreaker.Execute(func() error {
+	err = c.circuitBreaker.Execute(func() error {
 		token, err := c.GetAuthToken(ctx, req.CustomerIP)
 		if err != nil {
 			return fmt.Errorf("failed to get auth token: %w", err)
@@ -372,7 +389,7 @@ func (c *Client) GetTemporaryTransactionToken(ctx context.Context, req Temporary
 			formData.Set("cnic_number", req.CNICNumber)
 		}
 
-		securedHash := CalculateTemporaryTokenHash(req, c.securedKey)
+		securedHash := CalculateTemporaryTokenHash(req, c.hashKey)
 		formData.Set("secured_hash", securedHash)
 
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()))
@@ -426,9 +443,12 @@ func (c *Client) GetTemporaryTransactionToken(ctx context.Context, req Temporary
 }
 
 // InitiateTokenizedTransaction calls POST /transaction/tokenized
-func (c *Client) InitiateTokenizedTransaction(ctx context.Context, req TokenizedTransactionRequest) (*TokenizedTransactionResponse, error) {
+func (c *Client) InitiateTokenizedTransaction(ctx context.Context, req TokenizedTransactionRequest) (result *TokenizedTransactionResponse, err error) {
+	callStart := time.Now()
+	defer func() { telemetry.TimeGatewayCall("tokenized_transaction", callStart, &err) }()
+
 	var txnRes *TokenizedTransactionResponse
-	err := c.circuitBreaker.Execute(func() error {
+	err = c.circuitBreaker.Execute(func() error {
 		token, err := c.GetAuthToken(ctx, req.CustomerIP)
 		if err != nil {
 			return fmt.Errorf("failed to get auth token: %w", err)
@@ -461,7 +481,7 @@ func (c *Client) InitiateTokenizedTransaction(ctx context.Context, req Tokenized
 			formData.Set("data_3ds_pares", req.Data3DSPaRes)
 		}
 
-		securedHash := CalculateTokenizedTransactionHash(req, c.securedKey)
+		securedHash := CalculateTokenizedTransactionHash(req, c.hashKey)
 		formData.Set("secured_hash", securedHash)
 
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()))

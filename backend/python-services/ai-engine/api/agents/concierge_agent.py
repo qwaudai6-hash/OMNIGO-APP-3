@@ -114,16 +114,36 @@ def analyze_intent(state: AgentState) -> AgentState:
     }
 
 # Node 2: Tool Execution Engine
+# SP-PY-08: LLM output is UNTRUSTED. Validate tool names against the
+# whitelist, coerce args to a plain dict of scalars, cap per-call work, and
+# never let a single tool exception abort the whole agent loop.
+_MAX_TOOL_ARGS = 8
+_ALLOWED_ARG_TYPES = (str, int, float, bool)
+
 def execute_tools(state: AgentState) -> AgentState:
     results = []
     for tool_request in state["tools_to_call"]:
         tool_name = tool_request.get("name")
-        tool_args = tool_request.get("args", {})
+        raw_args = tool_request.get("args") or {}
 
-        if tool_name in AVAILABLE_TOOLS:
+        if not isinstance(raw_args, dict) or len(raw_args) > _MAX_TOOL_ARGS:
+            results.append({"tool": tool_name, "error": "rejected: invalid or oversized args"})
+            continue
+        if any(not isinstance(v, _ALLOWED_ARG_TYPES) for v in raw_args.values()):
+            results.append({"tool": tool_name, "error": "rejected: non-scalar arg"})
+            continue
+
+        fn = AVAILABLE_TOOLS.get(tool_name)
+        if fn is None:
+            results.append({"tool": tool_name, "error": "unknown tool"})
+            continue
+
+        try:
             time.sleep(0.2)
-            result = AVAILABLE_TOOLS[tool_name](**tool_args)
+            result = fn(**raw_args)
             results.append({"tool": tool_name, "result": result})
+        except Exception as exc:  # one bad tool must not kill the agent run
+            results.append({"tool": tool_name, "error": f"tool failed: {exc}"})
 
     return {**state, "tool_results": results}
 

@@ -88,18 +88,7 @@ func (r *RideRepository) AssignRider(ctx context.Context, trackingID, riderTrack
 	}
 
 	if !isVerified {
-		var orderCount int
-		countQuery := `
-			SELECT COUNT(*) FROM (
-				SELECT id FROM deliveries WHERE rider_tracking_id = $1 AND status IN ('accepted', 'picked_up', 'in_transit', 'completed')
-				UNION ALL
-				SELECT id FROM rides WHERE rider_tracking_id = $1 AND status IN ('accepted', 'in_progress', 'completed')
-			) combined_orders
-		`
-		_ = tx.QueryRow(ctx, countQuery, riderTrackID).Scan(&orderCount)
-		if orderCount >= 10 {
-			return fmt.Errorf("conflict: unverified rider order limit reached (10/10). Please submit KYC verification to accept more orders")
-		}
+		return fmt.Errorf("conflict: rider KYC verification required. Please submit CNIC and Driving License documents for admin approval")
 	}
 
 	query := `
@@ -124,19 +113,21 @@ func (r *RideRepository) AssignRider(ctx context.Context, trackingID, riderTrack
 func (r *RideRepository) UpdateRideStatus(ctx context.Context, trackingID, riderTrackID, newStatus string) error {
 	// State machine: accepted → in_progress | cancelled,
 	//                in_progress → completed | cancelled.
-	allowed := map[string][]string{
-		"accepted":    {"in_progress", "cancelled"},
-		"in_progress": {"completed", "cancelled"},
-	}
-
+	// The transition check is expressed inline because pgx cannot encode a
+	// map for ANY($n); each allowed (current → next) pair is listed below.
 	query := `
 		UPDATE rides
 		SET status = $1, updated_at = NOW()
 		WHERE tracking_id = $2
-		  AND rider_tracking_id = $3
-		  AND status = ANY($4)
+		  AND (
+		        (status = 'requested' AND $4::text = 'cancelled' AND rider_tracking_id IS NULL)
+		     OR (rider_tracking_id = $3 AND (
+		          (status = 'accepted'    AND $4::text IN ('in_progress', 'cancelled'))
+		       OR (status = 'in_progress' AND $4::text IN ('completed',  'cancelled'))
+		     ))
+		  )
 	`
-	tag, err := r.writer.Exec(ctx, query, newStatus, trackingID, riderTrackID, allowed)
+	tag, err := r.writer.Exec(ctx, query, newStatus, trackingID, riderTrackID, newStatus)
 	if err != nil {
 		return err
 	}
@@ -146,19 +137,23 @@ func (r *RideRepository) UpdateRideStatus(ctx context.Context, trackingID, rider
 	return nil
 }
 
-// CompleteRide marks the ride as completed and updates the fare. The
-// caller must already have validated that the rider is authorized.
+// CompleteRide marks the ride as completed and persists the final fare along
+// with the rider-reported distance/duration (HIGH-07) so analytics and
+// per-km earnings audits are possible. The caller must already have
+// validated that the rider is authorized and the fare is the agreed one.
 func (r *RideRepository) CompleteRide(ctx context.Context, trackingID, riderTrackID string, finalFare, distanceMeters, durationSeconds float64) error {
 	query := `
 		UPDATE rides
 		SET status = 'completed',
 		    fare_amount = $1,
+		    actual_distance_meters = $4,
+		    actual_duration_seconds = $5,
 		    updated_at = NOW()
 		WHERE tracking_id = $2
 		  AND rider_tracking_id = $3
 		  AND status = 'in_progress'
 	`
-	tag, err := r.writer.Exec(ctx, query, finalFare, trackingID, riderTrackID)
+	tag, err := r.writer.Exec(ctx, query, finalFare, trackingID, riderTrackID, distanceMeters, durationSeconds)
 	if err != nil {
 		return err
 	}

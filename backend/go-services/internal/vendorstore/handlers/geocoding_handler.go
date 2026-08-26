@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,13 +21,13 @@ const geocodingCacheTTL = 24 * time.Hour
 
 // rateLimitBucket is a tiny stdlib token-bucket per client IP.
 type rateLimitBucket struct {
-	tokens   int
+	tokens   float64
 	lastSeen time.Time
 }
 
 const (
-	rateLimitMaxTokens = 10
-	rateLimitRefillSec = 60
+	rateLimitMaxTokens = 10.0
+	rateLimitRefillSec = 60.0
 )
 
 var (
@@ -43,6 +44,11 @@ type GeocodingHandler struct {
 func init() {
 	// Cleanup stale rate-limit buckets every 10 minutes to prevent OOM
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[RECOVER] GeocodingHandler rateLimit cleanup panicked: %v", r)
+			}
+		}()
 		for {
 			time.Sleep(10 * time.Minute)
 			rateLimitMu.Lock()
@@ -90,24 +96,22 @@ func allowRequest(clientIP string) bool {
 	now := time.Now()
 	b, ok := rateLimitBuckets[clientIP]
 	if !ok {
-		rateLimitBuckets[clientIP] = &rateLimitBucket{tokens: rateLimitMaxTokens - 1, lastSeen: now}
+		rateLimitBuckets[clientIP] = &rateLimitBucket{tokens: rateLimitMaxTokens - 1.0, lastSeen: now}
 		return true
 	}
 
 	elapsed := now.Sub(b.lastSeen).Seconds()
-	refill := int(elapsed / rateLimitRefillSec * rateLimitMaxTokens)
-	if refill > 0 {
-		b.tokens += refill
-		if b.tokens > rateLimitMaxTokens {
-			b.tokens = rateLimitMaxTokens
-		}
+	// Continuous token replenishment: 10 tokens per 60 seconds = 1/6 token per second
+	b.tokens += elapsed * (rateLimitMaxTokens / rateLimitRefillSec)
+	if b.tokens > rateLimitMaxTokens {
+		b.tokens = rateLimitMaxTokens
 	}
 	b.lastSeen = now
 
-	if b.tokens <= 0 {
+	if b.tokens < 1.0 {
 		return false
 	}
-	b.tokens--
+	b.tokens -= 1.0
 	return true
 }
 
@@ -126,7 +130,10 @@ func (h *GeocodingHandler) fetchGeocoding(ctx context.Context, query string) ([]
 			if err == nil {
 				defer resp.Body.Close()
 				if resp.StatusCode == http.StatusOK {
-					body, _ := io.ReadAll(resp.Body)
+					body, err := io.ReadAll(resp.Body)
+					if err != nil {
+						return nil, err
+					}
 					var photonResp struct {
 						Features []struct {
 							Geometry struct {
@@ -148,6 +155,9 @@ func (h *GeocodingHandler) fetchGeocoding(ctx context.Context, query string) ([]
 					if json.Unmarshal(body, &photonResp) == nil && len(photonResp.Features) > 0 {
 						results := make([]map[string]interface{}, 0, len(photonResp.Features))
 						for _, f := range photonResp.Features {
+							if len(f.Geometry.Coordinates) < 2 {
+								continue
+							}
 							lat := f.Geometry.Coordinates[1]
 							lng := f.Geometry.Coordinates[0]
 							parts := []string{}

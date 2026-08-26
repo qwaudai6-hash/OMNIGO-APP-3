@@ -11,9 +11,9 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 /// as local notifications so users see alerts while the app is open. On iOS it
 /// requests alert/badge/sound permissions via APNs / FCM.
 class NotificationService {
-  static final NotificationService _instance = NotificationService._internal();
   factory NotificationService() => _instance;
   NotificationService._internal();
+  static final NotificationService _instance = NotificationService._internal();
 
   final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
@@ -161,14 +161,18 @@ class NotificationService {
     }
   }
 
-  GlobalKey<NavigatorState>? navigatorKey;
+  /// Global navigator key. Assign this to [MaterialApp.navigatorKey] so
+  /// notification taps can deep-link into the app from any context.
+  static final GlobalKey<NavigatorState> navigatorKey =
+      GlobalKey<NavigatorState>();
 
   void _onNotificationTapped(NotificationResponse response) {
     final route = response.payload;
     if (route == null || route.isEmpty) return;
     debugPrint('[Notification tap] payload=$route');
-    if (navigatorKey?.currentState != null) {
-      navigatorKey!.currentState!.pushNamed(route);
+    final state = navigatorKey.currentState;
+    if (state != null) {
+      state.pushNamed(route);
     }
   }
 

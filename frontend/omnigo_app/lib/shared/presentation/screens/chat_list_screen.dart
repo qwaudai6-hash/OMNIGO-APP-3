@@ -21,7 +21,6 @@ class ChatListScreen extends StatefulWidget {
 class _ChatListScreenState extends State<ChatListScreen> {
   List<ChatConversation> _conversations = [];
   bool _isLoading = false;
-  String? _myRole;
   String? _myUserId;
   StreamSubscription<List<ChatConversation>>? _convSub;
   StreamSubscription<ChatMessage>? _msgSub;
@@ -57,7 +56,6 @@ class _ChatListScreenState extends State<ChatListScreen> {
 
   Future<void> _bootstrap() async {
     final prefs = await SharedPreferences.getInstance();
-    _myRole = prefs.getString('role');
     _myUserId = prefs.getString('tracking_id');
     if (_myUserId != null) {
       await ChatService.instance.setUserId(_myUserId!);
@@ -83,7 +81,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
 
   Future<void> _openConversation(ChatConversation conv) async {
     await Navigator.of(context).push(
-      MaterialPageRoute(
+      MaterialPageRoute<void>(
         builder: (_) => ChatRoomScreen(
           orderId: conv.orderId,
           otherUserId: conv.otherUserId,
@@ -114,7 +112,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
 
     if (!mounted) return;
     await Navigator.of(context).push(
-      MaterialPageRoute(
+      MaterialPageRoute<void>(
         builder: (_) => ChatRoomScreen(
           orderId: orderId,
           otherUserId: otherUserId,

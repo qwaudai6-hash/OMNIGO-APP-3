@@ -28,7 +28,18 @@ async def lifespan(app: FastAPI):
 
     # Health endpoint must respond immediately — train models in background
     import asyncio
-    asyncio.create_task(train_all_models())
+
+    # SP-PY-06: surface background-training exceptions. A bare create_task()
+    # used to swallow failures until GC — app started "healthy" with dead models.
+    def _log_task_crash(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.exception(f"[startup] background model training CRASHED: {exc}")
+
+    training_task = asyncio.create_task(train_all_models())
+    training_task.add_done_callback(_log_task_crash)
 
     from api.agents.financial_auditor import start_auditor
     logger.info("Starting Financial Auditor Daemon...")

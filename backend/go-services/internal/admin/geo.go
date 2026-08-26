@@ -167,6 +167,9 @@ func (g *GeoService) callPhotonReverse(lat, lng string) (body []byte, status int
 		return nil, 200, false
 	}
 	f := photonResp.Features[0]
+	if len(f.Geometry.Coordinates) < 2 {
+		return nil, 200, false
+	}
 	latF := f.Geometry.Coordinates[1]
 	lngF := f.Geometry.Coordinates[0]
 	name, _ := f.Properties["name"].(string)

@@ -146,6 +146,17 @@ func EnvPort(def int) int {
 	return def
 }
 
+// BindHost returns the interface services should listen on. Default is
+// loopback, which is correct for the monolith deployment (children are
+// spawned in-process and proxied locally). Per-service container deployments
+// MUST set BIND_HOST=0.0.0.0 or the service is unreachable from the gateway.
+func BindHost() string {
+	if h := os.Getenv("BIND_HOST"); h != "" {
+		return h
+	}
+	return "127.0.0.1"
+}
+
 // envOrFirst tries env vars in order, returns first non-empty or "".
 func envOrFirst(keys ...string) string {
 	for _, k := range keys {

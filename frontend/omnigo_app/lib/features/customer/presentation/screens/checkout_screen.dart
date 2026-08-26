@@ -9,6 +9,7 @@ import '../../../../core/services/cart_provider.dart';
 import '../../../../core/network/api_client.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/di/service_locator.dart';
+import '../widgets/payfast_card_sheet.dart';
 import 'order_success_screen.dart';
 
 class CheckoutScreen extends StatefulWidget {
@@ -22,6 +23,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   int _currentStep = 0;
   String _selectedPaymentMethod = 'cod';
   bool _isLoading = false;
+  late final String _checkoutSessionNonce;
 
   // Real delivery location — fetched from GPS
   String _deliveryAddress = 'Fetching your location...';
@@ -32,6 +34,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   @override
   void initState() {
     super.initState();
+    _checkoutSessionNonce = '${DateTime.now().millisecondsSinceEpoch}_${UniqueKey().toString()}';
     _fetchCurrentLocation();
   }
 
@@ -151,7 +154,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         'dropoff_lng': _deliveryLocation!.longitude,
         'payment_gateway': _selectedPaymentMethod,
         'currency': 'PKR',
-        'device_session_nonce': DateTime.now().millisecondsSinceEpoch.toString(),
+        'device_session_nonce': _checkoutSessionNonce,
         'items': items,
         'total_amount': cart.totalAmount,
       };
@@ -201,10 +204,85 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         } else {
           throw Exception('No client secret returned from checkout');
         }
+      } else if (_selectedPaymentMethod == 'payfast') {
+        if (!mounted) return;
+        // Collect card details from user (Option C Tokenized Flow)
+        final cardDetails = await showPayFastCardDetailsSheet(context);
+        if (cardDetails == null) {
+          // User cancelled card entry
+          if (mounted) setState(() => _isLoading = false);
+          return;
+        }
+
+        final payfastResponse = await apiClient.post(
+          ApiEndpoints.payfastPayment(),
+          {
+            'order_id': realOrderTrackingId,
+            // account_type_id intentionally omitted — the orchestrator derives
+            // it from the supplied instrument (card vs bank/wallet).
+            'card_number': cardDetails['card_number'],
+            'expiry_month': cardDetails['expiry_month'],
+            'expiry_year': cardDetails['expiry_year'],
+            'cvv': cardDetails['cvv'],
+            'customer_mobile_no': cardDetails['customer_mobile_no'],
+          },
+        ) as Map<String, dynamic>;
+
+        final status = payfastResponse['status']?.toString();
+        if (status == 'failed') {
+          throw Exception(payfastResponse['message'] ?? 'PayFast payment failed');
+        }
+
+        // Handle 3DS Challenge redirect if gateway returned 3DS form HTML
+        if (status == '3ds_redirect' || payfastResponse['action'] == '3ds_redirect') {
+          final threedHtml = payfastResponse['threed_html']?.toString() ?? '';
+          if (threedHtml.isNotEmpty && mounted) {
+            final verified = await showPayFast3DSChallenge(context, threedHtml);
+            if (!verified) {
+              throw Exception('3DS verification was cancelled or incomplete');
+            }
+          }
+        }
+
+        // Deferred outcomes: money may not be captured yet — inform the user instead
+        // of showing an unconditional success screen.
+        if (status == 'gateway_pending' || status == 'in_progress') {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Payment is processing at the gateway. Your order will update automatically once it completes.'),
+                duration: Duration(seconds: 5),
+              ),
+            );
+          }
+        }
       }
+
+      // PF-4 FIX: never show unconditional success. Poll the order until the
+      // SettlementWorker flips it to a paid state (or timeout → honest
+      // "processing" handoff). Covers 3DS completion, manual-verify tap, and
+      // direct non-3DS approvals alike.
+      final paidConfirmed = await _waitForPaymentConfirmation(
+        apiClient,
+        realOrderTrackingId.toString(),
+      );
 
       final trackingId = realOrderTrackingId.toString();
       await cart.clearCart();
+
+      if (!paidConfirmed && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Payment is still processing at the bank. Track this order — status updates automatically.'),
+            duration: Duration(seconds: 6),
+          ),
+        );
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => OrderSuccessScreen(trackingId: trackingId, pending: true)),
+        );
+        return;
+      }
 
       if (mounted) {
         await Navigator.pushAndRemoveUntil(
@@ -354,8 +432,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 content: Column(
                   children: [
                     _buildPaymentOption('cod', 'Cash on Delivery', Icons.money),
-                    _buildPaymentOption('card', 'Credit/Debit Card', Icons.credit_card),
-                    _buildPaymentOption('jazzcash', 'JazzCash', Icons.phone_android),
+                    _buildPaymentOption('payfast', 'PayFast (Debit/Credit Card & Bank)', Icons.payment_outlined),
+                    _buildPaymentOption('card', 'Credit/Debit Card (International)', Icons.credit_card),
+                    _buildPaymentOption('easypaisa', 'EasyPaisa (Mobile Account)', Icons.account_balance_wallet, isComingSoon: true),
+                    _buildPaymentOption('jazzcash', 'JazzCash (Mobile Account)', Icons.phone_android, isComingSoon: true),
                   ],
                 ),
                 isActive: _currentStep >= 1,
@@ -416,28 +496,84 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     );
   }
 
-  Widget _buildPaymentOption(String value, String title, IconData icon) {
-    final isSelected = _selectedPaymentMethod == value;
+  Widget _buildPaymentOption(String value, String title, IconData icon, {bool isComingSoon = false}) {
+    final isSelected = !isComingSoon && _selectedPaymentMethod == value;
     return GestureDetector(
-      onTap: () => setState(() => _selectedPaymentMethod = value),
+      onTap: () {
+        if (isComingSoon) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('$title is coming soon! Please use PayFast Card or Cash on Delivery.'),
+              duration: const Duration(seconds: 2),
+            ),
+          );
+          return;
+        }
+        setState(() => _selectedPaymentMethod = value);
+      },
       child: Container(
         margin: const EdgeInsets.only(bottom: 12),
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: isSelected ? Colors.blue.shade50 : Colors.white,
+          color: isSelected ? Colors.blue.shade50 : (isComingSoon ? Colors.grey.shade50 : Colors.white),
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: isSelected ? AppTheme.blackAccent : Colors.grey.shade200, width: isSelected ? 2 : 1),
+          border: Border.all(
+            color: isSelected ? AppTheme.blackAccent : Colors.grey.shade200,
+            width: isSelected ? 2 : 1,
+          ),
         ),
         child: Row(
           children: [
-            Icon(icon, color: isSelected ? AppTheme.blackAccent : Colors.grey),
+            Icon(icon, color: isComingSoon ? Colors.grey.shade400 : (isSelected ? AppTheme.blackAccent : Colors.grey)),
             const SizedBox(width: 16),
-            Text(title, style: TextStyle(fontWeight: isSelected ? FontWeight.bold : FontWeight.normal)),
-            const Spacer(),
-            if (isSelected) const Icon(Icons.check_circle, color: AppTheme.blackAccent),
+            Expanded(
+              child: Text(
+                title,
+                style: TextStyle(
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                  color: isComingSoon ? Colors.grey.shade500 : Colors.black87,
+                ),
+              ),
+            ),
+            if (isComingSoon)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: Colors.amber.shade100,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.amber.shade400, width: 0.8),
+                ),
+                child: Text(
+                  'Coming Soon',
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.amber.shade900),
+                ),
+              )
+            else if (isSelected)
+              const Icon(Icons.check_circle, color: AppTheme.blackAccent),
           ],
         ),
       ),
     );
   }
+}
+
+/// PF-4: polls order status up to ~45s waiting for the settlement worker to
+/// mark the order paid. Returns true only on confirmed payment states.
+Future<bool> _waitForPaymentConfirmation(
+  ApiClient apiClient,
+  String orderId,
+) async {
+  const paidStates = {'paid', 'accepted', 'shipped', 'in_transit', 'delivered', 'completed'};
+  for (var i = 0; i < 15; i++) {
+    await Future.delayed(const Duration(seconds: 3));
+    try {
+      final resp = await apiClient.get('/orders/$orderId');
+      if (resp is Map<String, dynamic>) {
+        final st = resp['status']?.toString().toLowerCase();
+        if (st != null && paidStates.contains(st)) return true;
+        if (st == 'failed' || st == 'cancelled') return false;
+      }
+    } catch (_) {/* transient network errors — keep polling */}
+  }
+  return false;
 }

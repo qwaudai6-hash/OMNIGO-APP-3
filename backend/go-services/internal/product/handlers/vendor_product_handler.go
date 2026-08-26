@@ -10,6 +10,7 @@ import (
 	"github.com/omnigo/backend/internal/product/models"
 	"github.com/omnigo/backend/internal/product/service"
 	sharedAuth "github.com/omnigo/backend/internal/shared/auth"
+	middleware "github.com/omnigo/backend/internal/shared/middleware"
 )
 
 type VendorProductHandler struct {
@@ -197,9 +198,10 @@ func (h *VendorProductHandler) ListVendorProducts(c *gin.Context) {
 	})
 }
 
-// RegisterRoutes registers endpoints on Gin engine
+// RegisterRoutes registers endpoints on Gin engine.
+// All vendor product mutations require an authenticated vendor/admin.
 func (h *VendorProductHandler) RegisterRoutes(router *gin.Engine) {
-	vendor := router.Group("/api/v1/vendor/products")
+	vendor := router.Group("/api/v1/vendor/products", middleware.JWTAuth(), middleware.RoleRequired("vendor", "admin"))
 	{
 		vendor.GET("/", h.ListVendorProducts)
 		vendor.POST("/", h.AddProduct)

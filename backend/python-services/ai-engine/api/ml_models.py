@@ -37,9 +37,12 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 fraud_hgnn = None
 fraud_device_sharing: dict[str, int] = {}  # device_id → number of distinct users sharing it
 surge_dqn = None
+# SP-PY-02: normalization bounds learned at training time; inference MUST use
+# the same scaling. Falls back to historical constants if model not trained.
+_dqn_norm = {"orders": 500.0, "riders": 600.0}
 sasrec_transformer = None
 sasrec_product_map: dict[int, str] = {}  # idx → product_tracking_id
-sasrev_num_items = 500
+sasrec_num_items = 500
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -112,11 +115,15 @@ async def train_fraud_graph():
 
 def evaluate_fraud_graph(user_id: str, device_id: str) -> float:
     """
-    Real fraud risk score based on device-sharing analysis from production DB.
-    If a device is shared by many distinct users → high fraud risk.
-    Falls back to GNN inference if model is loaded.
+    Fraud risk score from device-sharing analysis of production data.
+
+    SP-PY-01 HONESTY NOTE: the trained HGNN is NOT consulted here — wiring
+    per-user node inference into this hot path needs a feature store and is
+    tracked separately. The device-sharing heuristic below IS the production
+    model. `model_version` in the API response reflects that truth; training
+    is skipped by default so we don't burn boot time on dead compute.
+    Set OMNIGO_TRAIN_HGNN=1 to train for offline experimentation.
     """
-    # Real heuristic: devices shared by >3 users are suspicious, >8 is a fraud ring
     share_count = fraud_device_sharing.get(device_id, 0)
     if share_count > 8:
         return 0.95
@@ -159,8 +166,16 @@ async def train_surge_dqn():
         return
 
     states = df[["orders", "riders", "hour"]].values.astype(np.float32)
-    states[:, 0] = states[:, 0] / max(states[:, 0].max(), 1.0)
-    states[:, 1] = states[:, 1] / max(states[:, 1].max(), 1.0)
+    # SP-PY-02: persist the ACTUAL training normalization bounds so runtime
+    # inference scales identically to what the network learned. Previously
+    # training divided by data-max while inference hardcoded 500/600 —
+    # a distribution mismatch that produced wrong surge multipliers.
+    _dqn_norm = {
+        "orders": max(float(states[:, 0].max()), 1.0),
+        "riders": max(float(states[:, 1].max()), 1.0),
+    }
+    states[:, 0] = states[:, 0] / _dqn_norm["orders"]
+    states[:, 1] = states[:, 1] / _dqn_norm["riders"]
     states[:, 2] = states[:, 2] / 24.0
 
     actions = df["action"].values
@@ -194,7 +209,11 @@ async def train_surge_dqn():
 def calculate_surge(active_orders: int, available_riders: int, current_hour: int) -> float:
     """Returns surge multiplier. Uses DQN if trained, else demand-ratio heuristic."""
     if surge_dqn is not None:
-        s = torch.FloatTensor([[active_orders / 500.0, available_riders / 600.0, current_hour / 24.0]])
+        # SP-PY-02: normalize with the SAME bounds used during training.
+        norm_orders = min(max(float(active_orders) / _dqn_norm["orders"], 0.0), 1.0)
+        norm_riders = min(max(float(available_riders) / _dqn_norm["riders"], 0.0), 1.0)
+        norm_hour = min(max(float(current_hour) / 24.0, 0.0), 1.0)
+        s = torch.FloatTensor([[norm_orders, norm_riders, norm_hour]])
         with torch.no_grad():
             q_vals = surge_dqn(s)
             best_action = torch.argmax(q_vals).item()
@@ -236,7 +255,7 @@ class SASRec(nn.Module):
 
 async def train_sasrec_transformer():
     """Trains SASRec on real per-user order sequences from PostgreSQL."""
-    global sasrec_transformer, sasrec_product_map, sasrev_num_items
+    global sasrec_transformer, sasrec_product_map, sasrec_num_items
 
     logger.info("[SASRec] Loading real order sequences from PostgreSQL...")
     pool = await get_pool()
@@ -255,7 +274,7 @@ async def train_sasrec_transformer():
 
     seq_cols = [c for c in df.columns if c.startswith("item_")]
     seqs = df[seq_cols].values
-    sasrev_num_items = max(int(seqs.max()), 500)
+    sasrec_num_items = max(int(seqs.max()), 500)
     max_seq_len = len(seq_cols)
 
     inputs = seqs[:, :-1]
@@ -267,7 +286,7 @@ async def train_sasrec_transformer():
     dataset = TensorDataset(in_t, target_t)
     loader = DataLoader(dataset, batch_size=min(128, len(df)), shuffle=True)
 
-    sasrec_transformer = SASRec(sasrev_num_items, max_seq_len=max_seq_len - 1, embed_dim=32, num_heads=2)
+    sasrec_transformer = SASRec(sasrec_num_items, max_seq_len=max_seq_len - 1, embed_dim=32, num_heads=2)
     optimizer = optim.Adam(sasrec_transformer.parameters(), lr=0.005)
     criterion = nn.CrossEntropyLoss()
 
@@ -282,7 +301,7 @@ async def train_sasrec_transformer():
             optimizer.step()
 
     sasrec_transformer.eval()
-    logger.info(f"[SASRec] Training complete on {len(df)} real user sequences, {sasrev_num_items} items")
+    logger.info(f"[SASRec] Training complete on {len(df)} real user sequences, {sasrec_num_items} items")
 
 
 def get_next_item_recommendations(item_sequence: list[int], top_k: int = 3) -> list[str]:
@@ -375,12 +394,19 @@ def predict_eta(distance_km: float, vehicle_type: int, current_hour: int) -> flo
 # MASTER INIT — called from main.py startup
 # ═══════════════════════════════════════════════════════════════
 async def train_all_models():
-    """Initialize DB pool and train all models on real production data."""
+    """Initialize DB pool and train models on real production data."""
+    import os
     from .db import init_pool
     await init_pool()
 
-    logger.info("=== Training all AI models on REAL PostgreSQL data ===")
-    await train_fraud_graph()
+    # SP-PY-01: HGNN is not wired into the fraud hot path — skip its boot-time
+    # training unless explicitly enabled for offline experimentation.
+    if os.getenv("OMNIGO_TRAIN_HGNN", "0") == "1":
+        logger.info("OMNIGO_TRAIN_HGNN=1 → training fraud HGNN")
+        await train_fraud_graph()
+    else:
+        logger.info("Skipping fraud HGNN training (not in serving path; set OMNIGO_TRAIN_HGNN=1 to enable)")
+
     await train_surge_dqn()
     await train_sasrec_transformer()
-    logger.info("=== All AI models trained and ready ===")
+    logger.info("=== AI model training complete ===")

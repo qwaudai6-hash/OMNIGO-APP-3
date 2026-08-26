@@ -27,8 +27,10 @@ func NewKafkaClient(brokers []string, clientID string) (*KafkaClient, error) {
 	user := os.Getenv("KAFKA_USER")
 	pass := os.Getenv("KAFKA_PASSWORD")
 	if user != "" && pass != "" {
+		// GW-26: pin a modern TLS floor — an empty tls.Config permits TLS 1.0
+		// negotiation, unacceptable for a bus carrying financial events.
 		opts = append(opts,
-			kgo.DialTLSConfig(new(tls.Config)),
+			kgo.DialTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12}),
 			kgo.SASL(scram.Auth{
 				User: user,
 				Pass: pass,

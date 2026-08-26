@@ -221,6 +221,20 @@ func startChild(name, port string) bool {
 	if os.Getenv("JWT_ISSUER") == "" {
 		env = append(env, "JWT_ISSUER=omnigo-platform")
 	}
+	// Propagate TigerBeetle Ledger configuration to child microservices
+	if tbAddr := os.Getenv("TIGERBEETLE_ADDRESSES"); tbAddr != "" {
+		env = append(env, "TIGERBEETLE_ADDRESSES="+tbAddr)
+		env = append(env, "TIGERBEETLE_ADDR="+tbAddr)
+		env = append(env, "TB_ENABLED=true")
+	} else if tbAddr2 := os.Getenv("TIGERBEETLE_ADDR"); tbAddr2 != "" {
+		env = append(env, "TIGERBEETLE_ADDRESSES="+tbAddr2)
+		env = append(env, "TIGERBEETLE_ADDR="+tbAddr2)
+		env = append(env, "TB_ENABLED=true")
+	}
+	// Propagate Kafka and Event configuration
+	if kafkaBrokers := os.Getenv("KAFKA_BROKERS"); kafkaBrokers != "" {
+		env = append(env, "KAFKA_BROKERS="+kafkaBrokers)
+	}
 	cmd.Env = env
 	if err := cmd.Start(); err != nil {
 		log.Printf("✗ Failed to start %s: %v", name, err)
@@ -325,10 +339,60 @@ func handleReady(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(out)
 }
 
+// startTigerBeetleIfConfigured formats and launches TigerBeetle if embedded mode is enabled.
+func startTigerBeetleIfConfigured() {
+	if os.Getenv("TIGERBEETLE_EMBEDDED") != "true" && os.Getenv("TIGERBEETLE_AUTOSTART") != "true" {
+		return
+	}
+	tbBin := "tigerbeetle"
+	if _, err := exec.LookPath(tbBin); err != nil {
+		if _, err := os.Stat("/app/bin/tigerbeetle"); err == nil {
+			tbBin = "/app/bin/tigerbeetle"
+		} else if _, err := os.Stat("./tigerbeetle"); err == nil {
+			tbBin = "./tigerbeetle"
+		} else {
+			log.Println("ℹ TigerBeetle autostart requested but binary not found in PATH or /app/bin. Assuming external container.")
+			return
+		}
+	}
+
+	dataDir := os.Getenv("TIGERBEETLE_DATA_DIR")
+	if dataDir == "" {
+		dataDir = "/tmp/tigerbeetle_data"
+	}
+	_ = os.MkdirAll(dataDir, 0755)
+	dataFile := dataDir + "/0_0.tigerbeetle"
+
+	if _, err := os.Stat(dataFile); os.IsNotExist(err) {
+		log.Println("🐅 Formatting TigerBeetle data file at", dataFile)
+		formatCmd := exec.Command(tbBin, "format", "--cluster=0", "--replica=0", "--replica-count=1", dataFile)
+		if out, err := formatCmd.CombinedOutput(); err != nil {
+			log.Printf("⚠ TigerBeetle format error: %v (output: %s)", err, string(out))
+		} else {
+			log.Println("✓ TigerBeetle format complete")
+		}
+	}
+
+	tbPort := envPortOr("TIGERBEETLE_PORT", "3000")
+	tbCmd := exec.Command(tbBin, "start", "--addresses=0.0.0.0:"+tbPort, dataFile)
+	tbCmd.Stdout = os.Stdout
+	tbCmd.Stderr = os.Stderr
+	if err := tbCmd.Start(); err != nil {
+		log.Printf("⚠ Failed to start embedded TigerBeetle: %v", err)
+	} else {
+		log.Printf("✓ Spawned TigerBeetle ledger on port %s (pid=%d)", tbPort, tbCmd.Process.Pid)
+		_ = os.Setenv("TIGERBEETLE_ADDRESSES", "127.0.0.1:"+tbPort)
+		_ = os.Setenv("TB_ENABLED", "true")
+	}
+}
+
 // ── Main ────────────────────────────────────────────────────────────────────
 
 func main() {
 	log.Println("Starting OMNIGO Monolith API Gateway (Railway Production Mode)...")
+
+	// Start embedded TigerBeetle if configured
+	startTigerBeetleIfConfigured()
 
 	// Fail fast on missing secrets — no silent fallback.
 	for _, k := range []string{
@@ -351,7 +415,7 @@ func main() {
 		[]string{"/api/v1/auth", "/api/v1/users"},
 		envPortOr("AUTH_SERVICE_PORT", "9000"))
 	register("product-service",
-		[]string{"/api/v1/products", "/api/v1/wishlist", "/api/v1/reviews", "/api/v1/vendor/products"},
+		[]string{"/api/v1/products", "/api/v1/wishlist", "/api/v1/reviews", "/api/v1/vendor/products", "/uploads"},
 		envPortOr("PRODUCT_SERVICE_PORT", "9001"))
 	register("vendor-store-service",
 		[]string{"/api/v1/vendor", "/api/v1/stores", "/api/v1/geocoding"},
@@ -363,13 +427,14 @@ func main() {
 		[]string{"/api/v1/rides", "/api/v1/ride"},
 		envPortOr("RIDE_SERVICE_PORT", "9004"))
 	register("order-service",
-		[]string{"/api/v1/orders"},
+		[]string{"/api/v1/orders", "/api/v1/cart", "/api/v1/chat", "/api/v1/ratings", "/api/v1/wallet", "/api/v1/payment",
+			"/api/v1/finance/refund", "/api/v1/finance/cancel"},
 		envPortOr("ORDER_SERVICE_PORT", "9005"))
 	register("payment-orchestrator",
 		[]string{"/api/v1/payments", "/api/v1/finance"},
 		envPortOr("PAYMENT_ORCHESTRATOR_PORT", "9006"))
 	register("admin-service",
-		[]string{"/api/v1/admin"},
+		[]string{"/api/v1/admin", "/api/v1/geo"},
 		envPortOr("ADMIN_SERVICE_PORT", "9007"))
 	register("websocket-gateway",
 		[]string{"/ws", "/api/v1/ws"},

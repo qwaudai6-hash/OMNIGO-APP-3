@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/omnigo/backend/internal/delivery/models"
+	sharedAuth "github.com/omnigo/backend/internal/shared/auth"
 	"github.com/omnigo/backend/internal/shared/messaging"
 	"github.com/redis/go-redis/v9"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -25,15 +27,22 @@ var upgrader = websocket.Upgrader{
 		if origin == "" {
 			return true
 		}
-		allowed := []string{
-			"https://omnigo-app-production.up.railway.app",
-			"https://omnigo.app",
-			"https://www.omnigo.app",
-			"http://localhost",
-			"http://127.0.0.1",
+		u, err := url.Parse(origin)
+		if err != nil || u.Hostname() == "" {
+			return false
 		}
-		for _, o := range allowed {
-			if strings.HasPrefix(origin, o) {
+		// Compare parsed hostnames exactly — a HasPrefix on the raw header
+		// allowed spoofed hosts like "http://localhost.evil.com".
+		allowedHosts := []string{
+			"omnigo-app-production.up.railway.app",
+			"omnigo.app",
+			"www.omnigo.app",
+			"localhost",
+			"127.0.0.1",
+		}
+		host := u.Hostname()
+		for _, h := range allowedHosts {
+			if strings.EqualFold(host, h) {
 				return true
 			}
 		}
@@ -120,6 +129,30 @@ func (gw *WebSocketGateway) unregisterClient(clientType, trackingID string) {
 }
 
 func (gw *WebSocketGateway) HandleConnection(c *gin.Context) {
+	// 1. Authenticate JWT token before connection upgrade
+	token := c.Query("token")
+	if token == "" {
+		token = strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
+	}
+	if token == "" {
+		token = c.Query("jwt")
+	}
+
+	if token == "" {
+		log.Printf("[WS Auth] Handshake rejected: missing JWT token")
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized: missing token"})
+		return
+	}
+
+	tid, role, err := sharedAuth.ParseJWT(token)
+	if err != nil {
+		log.Printf("[WS Auth] Handshake rejected: invalid JWT token: %v", err)
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized: " + err.Error()})
+		return
+	}
+	authTrackingID := tid
+	authRole := role
+
 	ws, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Printf("Failed to upgrade websocket: %v", err)
@@ -127,11 +160,24 @@ func (gw *WebSocketGateway) HandleConnection(c *gin.Context) {
 	}
 	defer ws.Close()
 
+	// SP-GO-30: liveness deadlines. Without these a half-open TCP peer (e.g.
+	// phone losing signal) blocks ReadMessage for the OS default (~2h) and
+	// its entry stays in the registry. Clients must send any frame (the app
+	// sends heartbeat pings) at least every 90s; pong responses reset it too.
+	const readDeadline = 90 * time.Second
+	_ = ws.SetReadDeadline(time.Now().Add(readDeadline))
+	ws.SetPongHandler(func(string) error {
+		return ws.SetReadDeadline(time.Now().Add(readDeadline))
+	})
+
 	ctx := context.Background()
 
 	// Track which client type owns this connection so unregister uses the right map.
-	var clientType string
-	var trackingID string
+	var clientType string = authRole
+	var trackingID string = authTrackingID
+	if clientType != "" && trackingID != "" {
+		gw.registerClient(clientType, trackingID, ws)
+	}
 
 	// Set up a final cleanup once we know the binding.
 	var finalizeOnce sync.Once
@@ -155,14 +201,28 @@ func (gw *WebSocketGateway) HandleConnection(c *gin.Context) {
 			log.Printf("WebSocket error or closed: %v", err)
 			return
 		}
+		// SP-GO-30: any inbound frame proves liveness — extend the deadline.
+		_ = ws.SetReadDeadline(time.Now().Add(readDeadline))
 
 		// Try to parse as a registration envelope first.
 		var env RegisterEnvelope
 		if firstFrame {
 			firstFrame = false
-			if err := json.Unmarshal(raw, &env); err == nil && env.Type == "register" && env.ClientType != "" && env.TrackingID != "" {
+			if err := json.Unmarshal(raw, &env); err == nil && env.Type == "register" && env.ClientType != "" {
+				// SP-GO-28: identity comes from the authenticated JWT, never
+				// from the client envelope. A client may only pick its
+				// channel type; claiming another user's tracking_id would let
+				// it intercept that user's broadcasts/orders.
+				if authTrackingID == "" {
+					log.Printf("[WS Auth] register rejected: unauthenticated connection cannot claim identity")
+					return
+				}
+				if env.TrackingID != "" && env.TrackingID != authTrackingID {
+					log.Printf("[WS Auth] register rejected: claimed id %s != authenticated %s", env.TrackingID, authTrackingID)
+					return
+				}
 				clientType = env.ClientType
-				trackingID = env.TrackingID
+				trackingID = authTrackingID
 				gw.registerClient(clientType, trackingID, ws)
 				log.Printf("WebSocket registered: type=%s id=%s", clientType, trackingID)
 				continue
@@ -174,6 +234,11 @@ func (gw *WebSocketGateway) HandleConnection(c *gin.Context) {
 		if err := json.Unmarshal(raw, &payload); err != nil {
 			// Could be a heartbeat ping; ignore silently.
 			continue
+		}
+
+		// Enforce rider identity from authenticated token to prevent spoofing
+		if authTrackingID != "" {
+			payload.RiderID = authTrackingID
 		}
 
 		// Promote to rider registration if we haven't bound yet.
@@ -270,6 +335,7 @@ type BroadcastMessage struct {
 	TrackingID         string  `json:"tracking_id"`
 	OrderTrackingID    string  `json:"order_tracking_id"`
 	VendorStoreTrackID string  `json:"vendor_store_tracking_id"`
+	CustomerTrackID    string  `json:"customer_tracking_id"`
 	PickupLat          float64 `json:"pickup_lat"`
 	PickupLng          float64 `json:"pickup_lng"`
 	DropoffLat         float64 `json:"dropoff_lat"`
@@ -289,6 +355,7 @@ func (gw *WebSocketGateway) handleBroadcast(data []byte) {
 		TrackingID:         gig.TrackingID,
 		OrderTrackingID:    gig.OrderTrackingID,
 		VendorStoreTrackID: gig.VendorStoreTrackID,
+		CustomerTrackID:    gig.CustomerTrackID,
 		PickupLat:          gig.PickupLat,
 		PickupLng:          gig.PickupLng,
 		DropoffLat:         gig.DropoffLat,
@@ -298,18 +365,25 @@ func (gw *WebSocketGateway) handleBroadcast(data []byte) {
 
 	payload, _ := json.Marshal(msg)
 
-	gw.mu.Lock()
-	defer gw.mu.Unlock()
+	type target struct {
+		id   string
+		conn *websocket.Conn
+	}
+	var targets []target
 
+	gw.mu.Lock()
 	for _, riderID := range gig.EligibleRiders {
-		conn, ok := gw.riders[riderID]
-		if !ok {
-			continue
+		if conn, ok := gw.riders[riderID]; ok {
+			targets = append(targets, target{id: riderID, conn: conn})
 		}
-		if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
-			log.Printf("Failed to send GIG_BROADCAST to rider %s: %v", riderID, err)
-			conn.Close()
-			delete(gw.riders, riderID)
+	}
+	gw.mu.Unlock()
+
+	for _, t := range targets {
+		if err := t.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+			log.Printf("Failed to send GIG_BROADCAST to rider %s: %v", t.id, err)
+			t.conn.Close()
+			gw.unregisterClient("rider", t.id)
 		}
 	}
 }
@@ -348,18 +422,25 @@ func (gw *WebSocketGateway) handleRideBroadcast(data []byte) {
 
 	payload, _ := json.Marshal(msg)
 
-	gw.mu.Lock()
-	defer gw.mu.Unlock()
+	type target struct {
+		id   string
+		conn *websocket.Conn
+	}
+	var targets []target
 
+	gw.mu.Lock()
 	for _, driverID := range broadcast.EligibleDrivers {
-		conn, ok := gw.riders[driverID]
-		if !ok {
-			continue
+		if conn, ok := gw.riders[driverID]; ok {
+			targets = append(targets, target{id: driverID, conn: conn})
 		}
-		if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
-			log.Printf("Failed to send RIDE_BROADCAST to driver %s: %v", driverID, err)
-			conn.Close()
-			delete(gw.riders, driverID)
+	}
+	gw.mu.Unlock()
+
+	for _, t := range targets {
+		if err := t.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+			log.Printf("Failed to send RIDE_BROADCAST to driver %s: %v", t.id, err)
+			t.conn.Close()
+			gw.unregisterClient("rider", t.id)
 		}
 	}
 }
@@ -396,22 +477,34 @@ func (gw *WebSocketGateway) dispatchChatBroadcast(raw []byte) {
 		return
 	}
 
-	gw.mu.Lock()
-	defer gw.mu.Unlock()
+	type target struct {
+		id         string
+		conn       *websocket.Conn
+		clientType string
+	}
+	var targets []target
 
-	// Look up the receiver across rider/customer/vendor maps.
-	for _, m := range []map[string]*websocket.Conn{gw.riders, gw.customers, gw.vendors} {
-		if conn, ok := m[chatMsg.ReceiverID]; ok {
-			if err := conn.WriteMessage(websocket.TextMessage, raw); err != nil {
-				conn.Close()
-				delete(m, chatMsg.ReceiverID)
-			}
+	gw.mu.Lock()
+	for _, id := range []string{chatMsg.ReceiverID, chatMsg.SenderID} {
+		if id == "" {
+			continue
 		}
-		if conn, ok := m[chatMsg.SenderID]; ok {
-			if err := conn.WriteMessage(websocket.TextMessage, raw); err != nil {
-				conn.Close()
-				delete(m, chatMsg.SenderID)
-			}
+		if conn, ok := gw.riders[id]; ok {
+			targets = append(targets, target{id: id, conn: conn, clientType: "rider"})
+		}
+		if conn, ok := gw.customers[id]; ok {
+			targets = append(targets, target{id: id, conn: conn, clientType: "customer"})
+		}
+		if conn, ok := gw.vendors[id]; ok {
+			targets = append(targets, target{id: id, conn: conn, clientType: "vendor"})
+		}
+	}
+	gw.mu.Unlock()
+
+	for _, t := range targets {
+		if err := t.conn.WriteMessage(websocket.TextMessage, raw); err != nil {
+			t.conn.Close()
+			gw.unregisterClient(t.clientType, t.id)
 		}
 	}
 }
@@ -455,23 +548,30 @@ func (gw *WebSocketGateway) dispatchTelemetryBroadcast(ctx context.Context, raw 
 	}
 	payload, _ := json.Marshal(envelope)
 
-	gw.mu.Lock()
-	defer gw.mu.Unlock()
+	type target struct {
+		id         string
+		conn       *websocket.Conn
+		clientType string
+	}
+	var targets []target
 
+	gw.mu.Lock()
 	if customerID != "" {
 		if conn, ok := gw.customers[customerID]; ok {
-			if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
-				conn.Close()
-				delete(gw.customers, customerID)
-			}
+			targets = append(targets, target{id: customerID, conn: conn, clientType: "customer"})
 		}
 	}
 	if vendorID != "" {
 		if conn, ok := gw.vendors[vendorID]; ok {
-			if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
-				conn.Close()
-				delete(gw.vendors, vendorID)
-			}
+			targets = append(targets, target{id: vendorID, conn: conn, clientType: "vendor"})
+		}
+	}
+	gw.mu.Unlock()
+
+	for _, t := range targets {
+		if err := t.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+			t.conn.Close()
+			gw.unregisterClient(t.clientType, t.id)
 		}
 	}
 }

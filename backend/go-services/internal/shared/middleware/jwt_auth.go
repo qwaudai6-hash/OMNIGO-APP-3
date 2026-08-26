@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"log"
 	"net/http"
 	"strings"
 
@@ -50,9 +51,10 @@ func JWTAuth() gin.HandlerFunc {
 
 		trackingID, role, err := auth.ParseJWT(tokenString)
 		if err != nil {
+			log.Printf("[WARN] JWT parsing failed: %v", err)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"error":   "AUTH_TOKEN_INVALID",
-				"message": err.Error(),
+				"message": "invalid or expired authentication token",
 			})
 			return
 		}

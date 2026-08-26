@@ -1,0 +1,41 @@
+# HIGH-16/17: Persistent storage for stateful services.
+# Postgres (all business data) and TigerBeetle (financial ledger) previously
+# used emptyDir volumes — every pod restart DESTROYED all data. These PVCs
+# bind to the cluster's default StorageClass; adjust storageClassName for
+# your environment if needed.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: omnigo-postgres-data
+  namespace: omnigo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: omnigo-tigerbeetle-data
+  namespace: omnigo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: omnigo-uploads-data
+  namespace: omnigo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi

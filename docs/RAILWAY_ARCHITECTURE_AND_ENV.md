@@ -38,12 +38,12 @@ REDIS_ADDRS="${{Redis.REDIS_URL}}"
 
 CLICKHOUSE_ADDR="clickhouse.railway.internal:9000"
 CLICKHOUSE_USER="default"
-CLICKHOUSE_PASSWORD="3x4j22220mby3ujtd7w292j5uvgwzbob9sb"
+CLICKHOUSE_PASSWORD="changeme_clickhouse_password"
 CLICKHOUSE_DATABASE="default"
 
 NEO4J_URI="neo4j+s://32442466.databases.neo4j.io"
 NEO4J_USER="32442466"
-NEO4J_PASSWORD="AZtq1wLwibLswVAsgjpZuMGi4bdRH1zCAcQmEUEme3c"
+NEO4J_PASSWORD="changeme_neo4j_password"
 NEO4J_DATABASE="32442466"
 AURA_INSTANCEID="32442466"
 AURA_INSTANCENAME="OMNIGO APP"
@@ -53,9 +53,9 @@ KAFKA_BROKERS="kafka.railway.internal:9092"
 
 # Security & Secrets
 JWT_ISSUER="omnigo-platform"
-JWT_SECRET_KEY="csiPLQIJqstuH6rIa6ulOdjl30RMYqwfk2cwTPoj2nAVHykMdWixUJnwVt6NovAyUDMqLoryPxQOSPM6jr6MlQ=="
-HMAC_SECRET="XLZg8xSIgUncVPqiObww9hRzOVc5Y68E+5xjB0+ac7c="
-ADMIN_API_KEY_ENCRYPTION_KEY="/N6AKevpb5gqQ7TpEndfYJ9bHvBU54hQV8I2w+ealsQ="
+JWT_SECRET_KEY="changeme_generate_with_openssl_rand_base64_64"
+HMAC_SECRET="changeme_generate_with_openssl_rand_base64_32"
+ADMIN_API_KEY_ENCRYPTION_KEY="changeme_generate_with_openssl_rand_base64_32"
 
 # Internal Monolith Service Loopbacks
 SERVICE_NAME="monolith"

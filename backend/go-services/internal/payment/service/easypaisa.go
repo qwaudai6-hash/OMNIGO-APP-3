@@ -151,7 +151,8 @@ func (s *EasyPaisaService) Refund(ctx context.Context, transactionID string, amo
 	return nil
 }
 
-// VerifyWebhook validates EasyPaisa callback.
+// VerifyWebhook validates EasyPaisa callback by verifying the HMAC-SHA256
+// signature against the merchant hash key. This prevents forged payment callbacks.
 func (s *EasyPaisaService) VerifyWebhook(payload []byte, signature string) (WebhookEvent, error) {
 	if !s.IsConfigured() {
 		return WebhookEvent{}, errors.New("easypaisa is not configured")
@@ -169,6 +170,23 @@ func (s *EasyPaisaService) VerifyWebhook(payload []byte, signature string) (Webh
 				data[k] = v[0]
 			}
 		}
+	}
+
+	// The hash never covers itself — drop it before recomputing.
+	inBodySignature := data["merchantHashedReq"]
+	delete(data, "merchantHashedReq")
+
+	// Verify HMAC-SHA256 to prevent forged callbacks. The signature may
+	// arrive via header or embedded in the payload as merchantHashedReq.
+	expectedHash := createEasyPaisaHash(data, s.hashKey)
+	if signature == "" && inBodySignature != "" {
+		signature = inBodySignature
+	}
+	if signature == "" {
+		return WebhookEvent{}, errors.New("missing easypaisa webhook signature")
+	}
+	if !hmac.Equal([]byte(expectedHash), []byte(signature)) {
+		return WebhookEvent{}, errors.New("easypaisa webhook signature mismatch")
 	}
 
 	status := "FAILED"

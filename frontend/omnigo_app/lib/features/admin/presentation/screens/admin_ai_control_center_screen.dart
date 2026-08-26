@@ -110,9 +110,9 @@ class _AdminAiControlCenterScreenState extends State<AdminAiControlCenterScreen>
                   margin: const EdgeInsets.only(bottom: 10),
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.05),
+                    color: Colors.white.withValues(alpha: 0.05),
                     borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Colors.white.withOpacity(0.1)),
+                    border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -127,11 +127,11 @@ class _AdminAiControlCenterScreenState extends State<AdminAiControlCenterScreen>
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                             decoration: BoxDecoration(
-                              color: Colors.green.withOpacity(0.2),
+                              color: Colors.green.withValues(alpha: 0.2),
                               borderRadius: BorderRadius.circular(8),
                             ),
                             child: Text(
-                              log['status']?.toString() ?? 'SUCCESS',
+                              log['status']?.toString() ?? 'UNKNOWN',
                               style: const TextStyle(color: Colors.greenAccent, fontSize: 10, fontWeight: FontWeight.bold),
                             ),
                           ),
@@ -208,9 +208,9 @@ class _AdminAiControlCenterScreenState extends State<AdminAiControlCenterScreen>
                         ],
                       ),
                       borderRadius: BorderRadius.circular(24),
-                      border: Border.all(color: AppTheme.limeAccent.withOpacity(0.3)),
+                      border: Border.all(color: AppTheme.limeAccent.withValues(alpha: 0.3)),
                       boxShadow: [
-                        BoxShadow(color: AppTheme.limeAccent.withOpacity(0.05), blurRadius: 15, spreadRadius: 2),
+                        BoxShadow(color: AppTheme.limeAccent.withValues(alpha: 0.05), blurRadius: 15, spreadRadius: 2),
                       ],
                     ),
                     child: Column(
@@ -229,12 +229,12 @@ class _AdminAiControlCenterScreenState extends State<AdminAiControlCenterScreen>
                             Container(
                               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                               decoration: BoxDecoration(
-                                color: Colors.greenAccent.withOpacity(0.2),
+                                color: Colors.greenAccent.withValues(alpha: 0.2),
                                 borderRadius: BorderRadius.circular(16),
                                 border: Border.all(color: Colors.greenAccent),
                               ),
                               child: Text(
-                                '${_auditData?['security_score'] ?? 99.8}% HEALTHY',
+                                '${_auditData?['security_score']?.toString() ?? '—'}',
                                 style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12),
                               ),
                             ),
@@ -242,7 +242,7 @@ class _AdminAiControlCenterScreenState extends State<AdminAiControlCenterScreen>
                         ),
                         const SizedBox(height: 12),
                         Text(
-                          'Active Engine: ${_auditData?['active_ai_engine'] ?? 'Gemini 1.5 Cloud + Local Circuit Breaker'}',
+                          'Active Engine: ${_auditData?['active_ai_engine']?.toString() ?? 'unknown'}',
                           style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
                         ),
                       ],
@@ -283,7 +283,7 @@ class _AdminAiControlCenterScreenState extends State<AdminAiControlCenterScreen>
                         decoration: BoxDecoration(
                           color: const Color(0xFF1E1E2C),
                           borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: Colors.redAccent.withOpacity(0.3)),
+                          border: Border.all(color: Colors.redAccent.withValues(alpha: 0.3)),
                         ),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -295,14 +295,14 @@ class _AdminAiControlCenterScreenState extends State<AdminAiControlCenterScreen>
                                   children: [
                                     const Icon(Icons.warning_amber_rounded, color: Colors.redAccent, size: 20),
                                     const SizedBox(width: 8),
-                                    Text(log['type']?.toString() ?? 'FRAUD_ALERT',
+                                    Text(log['type']?.toString() ?? 'EVENT',
                                         style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14),),
                                   ],
                                 ),
                                 Container(
                                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                                   decoration: BoxDecoration(
-                                    color: Colors.redAccent.withOpacity(0.2),
+                                    color: Colors.redAccent.withValues(alpha: 0.2),
                                     borderRadius: BorderRadius.circular(8),
                                   ),
                                   child: Text('HGNN Risk: ${(log['risk_score'] as num?)?.toStringAsFixed(2) ?? "0.90"}',
@@ -347,7 +347,7 @@ class _AdminAiControlCenterScreenState extends State<AdminAiControlCenterScreen>
                           decoration: BoxDecoration(
                             color: const Color(0xFF1E1E2C),
                             borderRadius: BorderRadius.circular(16),
-                            border: Border.all(color: Colors.amber.withOpacity(0.4)),
+                            border: Border.all(color: Colors.amber.withValues(alpha: 0.4)),
                           ),
                           child: Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -381,7 +381,7 @@ class _AdminAiControlCenterScreenState extends State<AdminAiControlCenterScreen>
                     decoration: BoxDecoration(
                       color: const Color(0xFF1E1E2C),
                       borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: Colors.blueAccent.withOpacity(0.3)),
+                      border: Border.all(color: Colors.blueAccent.withValues(alpha: 0.3)),
                     ),
                     child: Column(
                       children: [
@@ -389,7 +389,7 @@ class _AdminAiControlCenterScreenState extends State<AdminAiControlCenterScreen>
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
                             const Text('Audited Transactions', style: TextStyle(color: Colors.grey, fontSize: 13)),
-                            Text('${payout?['total_audited_transactions'] ?? 14920}', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13)),
+                            Text('${payout?['total_audited_transactions']?.toString() ?? '—'}', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13)),
                           ],
                         ),
                         const Divider(color: Colors.white10),
@@ -397,7 +397,7 @@ class _AdminAiControlCenterScreenState extends State<AdminAiControlCenterScreen>
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
                             const Text('Vendor Payouts Matched', style: TextStyle(color: Colors.grey, fontSize: 13)),
-                            Text(payout?['vendor_payouts_matched']?.toString() ?? '100%', style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 13)),
+                            Text(payout?['vendor_payouts_matched']?.toString() ?? '—', style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 13)),
                           ],
                         ),
                         const Divider(color: Colors.white10),
@@ -405,7 +405,7 @@ class _AdminAiControlCenterScreenState extends State<AdminAiControlCenterScreen>
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
                             const Text('Admin Commission Reconciled', style: TextStyle(color: Colors.grey, fontSize: 13)),
-                            Text(payout?['admin_commission_reconciled']?.toString() ?? '100%', style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 13)),
+                            Text(payout?['admin_commission_reconciled']?.toString() ?? '—', style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 13)),
                           ],
                         ),
                       ],

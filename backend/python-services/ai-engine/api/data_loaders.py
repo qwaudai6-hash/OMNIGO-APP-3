@@ -1,3 +1,15 @@
+
+
+import os as _os
+_DUMP_CSVS = _os.getenv("OMNIGO_DUMP_TRAINING_CSVS", "0") == "1"
+
+def _maybe_dump(df, path):
+    """SP-PY-07: writing raw production rows to container disk on every boot
+    filled disks and exposed PII. Enabled only via OMNIGO_DUMP_TRAINING_CSVS=1."""
+    if not _DUMP_CSVS:
+        return
+    df.to_csv(path, index=False)
+
 """Real data loaders — fetch live data from PostgreSQL.
 
 Replaces the old synthetic_data.py which generated fake CSVs.
@@ -52,8 +64,8 @@ async def load_fraud_graph_data(pool: asyncpg.Pool, num_users: int = 5000) -> tu
         # Deduplicate edges
         edges = df_edges[["user_id", "device_id"]].drop_duplicates()
 
-        edges.to_csv(os.path.join(DATA_DIR, "fraud_graph_edges.csv"), index=False)
-        nodes.to_csv(os.path.join(DATA_DIR, "fraud_graph_nodes.csv"), index=False)
+        _maybe_dump(edges, os.path.join(DATA_DIR, "fraud_graph_edges.csv"))
+        _maybe_dump(nodes, os.path.join(DATA_DIR, "fraud_graph_nodes.csv"))
 
         # Encode string IDs to integer indices for PyG
         user_map = {uid: i for i, uid in enumerate(nodes["user_id"].unique())}
@@ -80,12 +92,12 @@ async def load_surge_rl_data(pool: asyncpg.Pool, num_days: int = 30) -> pd.DataF
                     EXTRACT(HOUR FROM created_at)::int AS hour
                 FROM orders o
                 LEFT JOIN deliveries d ON d.order_tracking_id = o.order_tracking_id
-                WHERE o.created_at > NOW() - INTERVAL '%s days'
+                WHERE o.created_at > NOW() - ($1 || ' days')::INTERVAL
                 GROUP BY 1, 4
                 ORDER BY 1
             )
             SELECT active_orders, available_riders, hour FROM hourly
-        """ % num_days)
+        """, str(int(num_days)))
 
         if not rows:
             logger.warning("No order data found — surge model will use fallback heuristic")
@@ -109,7 +121,7 @@ async def load_surge_rl_data(pool: asyncpg.Pool, num_days: int = 30) -> pd.DataF
         df["reward"] = (df["action"] == optimal).astype(int) * 2 - 1
 
         df.rename(columns={"active_orders": "orders", "available_riders": "riders"}, inplace=True)
-        df.to_csv(os.path.join(DATA_DIR, "surge_rl_transitions.csv"), index=False)
+        _maybe_dump(df, os.path.join(DATA_DIR, "surge_rl_transitions.csv"))
 
         logger.info(f"Loaded surge RL data: {len(df)} hourly transitions over {num_days} days")
         return df[["orders", "riders", "hour", "action", "reward"]]
@@ -161,7 +173,7 @@ async def load_sasrec_sequences(pool: asyncpg.Pool, num_users: int = 2000, seq_l
 
         cols = ["user_id"] + [f"item_{i}" for i in range(seq_len)]
         seq_df = pd.DataFrame(sequences, columns=cols)
-        seq_df.to_csv(os.path.join(DATA_DIR, "sasrec_sequences.csv"), index=False)
+        _maybe_dump(seq_df, os.path.join(DATA_DIR, "sasrec_sequences.csv"))
 
         # Save product map for decoding recommendations back to tracking IDs
         import json

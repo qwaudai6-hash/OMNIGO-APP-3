@@ -16,6 +16,7 @@ import (
 	"github.com/omnigo/backend/internal/ledger"
 	"github.com/omnigo/backend/internal/payment_orchestrator"
 	"github.com/omnigo/backend/internal/shared/database"
+	"github.com/omnigo/backend/internal/shared/middleware"
 	"github.com/omnigo/backend/internal/shared/security"
 )
 
@@ -253,14 +254,22 @@ func (h *CODHandler) Settlement(c *gin.Context) {
 	var riderID string
 	var orderID string
 	var storeID string
+	var vendorTrackID string
 	err := h.db.QueryRow(ctx,
-		`SELECT c.amount_owed, c.rider_tracking_id, c.order_tracking_id, o.store_tracking_id
+		`SELECT c.amount_owed, c.rider_tracking_id, c.order_tracking_id, o.store_tracking_id, COALESCE(o.vendor_tracking_id, '')
 		 FROM cod_debts c JOIN orders o ON c.order_tracking_id = o.order_tracking_id
 		 WHERE c.id = $1`,
 		req.CodDebtID,
-	).Scan(&amountOwed, &riderID, &orderID, &storeID)
+	).Scan(&amountOwed, &riderID, &orderID, &storeID, &vendorTrackID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "COD debt not found"})
+		return
+	}
+
+	callerRole := middleware.GetRole(c)
+	callerID := middleware.GetTrackingID(c)
+	if callerRole != "admin" && (callerRole != "rider" || callerID != riderID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "unauthorized settlement access"})
 		return
 	}
 
@@ -274,11 +283,12 @@ func (h *CODHandler) Settlement(c *gin.Context) {
 	// Execute ledger transfers:
 	// 1. Clear rider COD debt: debit rider_cod_debt, credit cash_receivable (receivable settled)
 	// 2. Split the settled funds: debit cash_receivable, credit admin_revenue (DB commission rate + COD surcharge)
-	// 3. Split the settled funds: debit cash_receivable, credit vendor_locked_escrow (98.5%)
+	// 3. Split the settled funds: debit cash_receivable, credit vendor_locked_escrow (product portion)
+	// 4. Split the settled funds: debit cash_receivable, credit central_escrow (delivery fee portion)
 	// NOTE: cash_receivable is a transit account — it goes negative on Confirm, then back to
-	// zero on Settlement. Never touches central_escrow (which holds real online payment funds).
+	// zero on Settlement (Sum(Debits) == Sum(Credits)).
 	idempotencyKey := fmt.Sprintf("cod:settle:%s", req.WebhookEventID)
-	txID, err := h.ledger.MultiTransfer(ctx, []ledger.TransferRequest{
+	transferReqs := []ledger.TransferRequest{
 		{
 			DebitAccount:   ledger.AccountRiderCODDebt,
 			CreditAccount:  ledger.AccountCashReceivable,
@@ -306,7 +316,21 @@ func (h *CODHandler) Settlement(c *gin.Context) {
 			Description:    fmt.Sprintf("COD vendor escrow for order %s", orderID),
 			IdempotencyKey: idempotencyKey + ":vendor",
 		},
-	})
+	}
+
+	if split.DeliveryEscrow > 0 {
+		transferReqs = append(transferReqs, ledger.TransferRequest{
+			DebitAccount:   ledger.AccountCashReceivable,
+			CreditAccount:  ledger.AccountCentralEscrow,
+			Amount:         split.DeliveryEscrow,
+			ReferenceType:  "cod_delivery_escrow",
+			ReferenceID:    orderID,
+			Description:    fmt.Sprintf("COD delivery fee escrow for order %s", orderID),
+			IdempotencyKey: idempotencyKey + ":delivery_escrow",
+		})
+	}
+
+	txID, err := h.ledger.MultiTransfer(ctx, transferReqs)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "ledger multi-transfer failed: " + err.Error()})
 		return
@@ -322,8 +346,14 @@ func (h *CODHandler) Settlement(c *gin.Context) {
 		return
 	}
 
+	// Decrement rider cash_in_hand in rider_wallet table
+	_, _ = h.db.Exec(ctx,
+		`UPDATE rider_wallet SET cash_in_hand = GREATEST(0, cash_in_hand - $1), updated_at = NOW() WHERE rider_tracking_id = $2`,
+		amountOwed, riderID,
+	)
+
 	// Create escrow hold for vendor portion
-	h.escrow.CreateHold(ctx, orderID, storeID, split.VendorEscrow)
+	h.escrow.CreateHold(ctx, orderID, vendorFallback(vendorTrackID, storeID), split.VendorEscrow)
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":         "settled",
@@ -381,11 +411,20 @@ func (h *CODHandler) ListDebts(c *gin.Context) {
 
 // RegisterRoutes registers COD payment endpoints.
 func (h *CODHandler) RegisterRoutes(router *gin.Engine) {
-	payments := router.Group("/api/v1/payments")
+	payments := router.Group("/api/v1/payments", middleware.JWTAuth())
 	{
-		payments.POST("/cod/confirm", h.Confirm)
-		payments.POST("/cod/pay-now", h.PayNow)
-		payments.POST("/cod/settlement", h.Settlement)
+		payments.POST("/cod/confirm", middleware.RoleRequired("rider", "admin"), h.Confirm)
+		payments.POST("/cod/pay-now", middleware.RoleRequired("rider", "admin"), h.PayNow)
+		payments.POST("/cod/settlement", middleware.RoleRequired("rider", "admin"), h.Settlement)
 		payments.GET("/cod/debts", h.ListDebts)
 	}
+}
+
+// vendorFallback prefers the vendor USER id, falling back to the store id for
+// legacy rows that never carried it.
+func vendorFallback(vendorID, storeID string) string {
+	if vendorID != "" {
+		return vendorID
+	}
+	return storeID
 }

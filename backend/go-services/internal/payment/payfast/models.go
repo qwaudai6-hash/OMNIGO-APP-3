@@ -76,12 +76,33 @@ type AuthTokenRequest struct {
 }
 
 // AuthTokenResponse represents the authentication response from PayFast API token endpoint.
+// Supports standard IPG ("token", "refresh_token", "expiry") and APPS UAT ("ACCESS_TOKEN", "access_token").
 type AuthTokenResponse struct {
-	Code         string `json:"code,omitempty"`
-	Token        string `json:"token,omitempty"`
-	RefreshToken string `json:"refresh_token,omitempty"`
-	ExpiresIn    string `json:"expiry,omitempty"` // Wait, docs say "expiry": "<no.ofseconds>"
-	Message      string `json:"message,omitempty"`
+	Code             string `json:"code,omitempty"`
+	Token            string `json:"token,omitempty"`
+	AccessToken      string `json:"access_token,omitempty"`
+	AccessTokenUpper string `json:"ACCESS_TOKEN,omitempty"`
+	RefreshToken     string `json:"refresh_token,omitempty"`
+	ExpiresIn        string `json:"expiry,omitempty"`
+	Message          string `json:"message,omitempty"`
+}
+
+// GetToken returns the resolved access token regardless of parameter casing.
+func (r *AuthTokenResponse) GetToken() string {
+	if r.Token != "" {
+		return r.Token
+	}
+	if r.AccessToken != "" {
+		return r.AccessToken
+	}
+	return r.AccessTokenUpper
+}
+
+// IsSuccessCode returns true if the status or error code represents a successful transaction.
+// PayFast APPS uses both "00" (APIs) and "000" (IPN callbacks & transaction inquiries).
+func IsSuccessCode(code string) bool {
+	c := strings.TrimSpace(code)
+	return c == "00" || c == "000"
 }
 
 // TokenCache holds in-memory cached OAuth/Auth tokens with thread-safe expiration checks.
@@ -211,17 +232,18 @@ type TemporaryTokenRequest struct {
 	CustomerIP       string `json:"customer_ip"`
 	SecuredHash      string `json:"secured_hash"`
 
-	// Card specific (never persist)
-	CardNumber         string `json:"card_number,omitempty"`
-	ExpiryMonth        string `json:"expiry_month,omitempty"`
-	ExpiryYear         string `json:"expiry_year,omitempty"`
-	CVV                string `json:"cvv,omitempty"`
+	// Card specific (never persist, never serialize — json:"-" keeps PAN/CVV out of
+	// any accidental json.Marshal in debug/logging paths)
+	CardNumber         string `json:"-"`
+	ExpiryMonth        string `json:"-"`
+	ExpiryYear         string `json:"-"`
+	CVV                string `json:"-"`
 	Data3DSPagemode    string `json:"data_3ds_pagemode,omitempty"`
 	Data3DSCallbackURL string `json:"data_3ds_callback_url,omitempty"`
 
-	// Bank/Wallet specific (never persist)
-	AccountNumber      string `json:"account_number,omitempty"`
-	CNICNumber         string `json:"cnic_number,omitempty"`
+	// Bank/Wallet specific (never persist, never serialize)
+	AccountNumber string `json:"-"`
+	CNICNumber    string `json:"-"`
 }
 
 func (t TemporaryTokenRequest) String() string {
@@ -246,7 +268,10 @@ type TemporaryTokenResponse struct {
 
 // TokenizedTransactionRequest is for POST /transaction/tokenized
 type TokenizedTransactionRequest struct {
-	InstrumentToken  string `json:"instrument_token"`
+	// InstrumentToken and Otp are credentials: json:"-" keeps them out of any
+	// accidental json.Marshal (logs, error wrappers). The API client sends them
+	// via form-encoding, not JSON, so this has no wire-format impact.
+	InstrumentToken  string `json:"-"`
 	TransactionID    string `json:"transaction_id"`
 	MerchantUserId   string `json:"merchant_user_id"`
 	CustomerMobileNo string `json:"user_mobile_number"`
@@ -254,13 +279,13 @@ type TokenizedTransactionRequest struct {
 	OrderDate        string `json:"order_date"`
 	TxnDesc          string `json:"txndesc"`
 	TxnAmt           string `json:"txnamt"`
-	Otp              string `json:"otp,omitempty"`
+	Otp              string `json:"-"`
 	CustomerIP       string `json:"customer_ip"`
 	MerCatCode       string `json:"merCatCode"`
 	ECI              string `json:"eci,omitempty"`
 	Data3DSSecureID  string `json:"data_3ds_secureid,omitempty"`
 	Data3DSPaRes     string `json:"data_3ds_pares,omitempty"`
-	SecuredHash      string `json:"secured_hash"`
+	SecuredHash      string `json:"-"`
 }
 
 func (t TokenizedTransactionRequest) String() string {
@@ -275,4 +300,16 @@ type TokenizedTransactionResponse struct {
 	BasketID      string `json:"basket_id"`
 	TransactionID string `json:"transaction_id"`
 	Code          string `json:"code"`
+
+	// 3DS step-up challenge fields. Some issuer/bank combinations demand a 3DS
+	// verification even on tokenized (saved-card) transactions; when present, the
+	// merchant must render the challenge and resume via the 3DS callback instead of
+	// treating the transaction as settled or declined.
+	OtpRequired                  FlexibleBool   `json:"otp_required"`
+	ECI                          FlexibleString `json:"eci"`
+	Data3DSAcsURL                string         `json:"data_3ds_acsurl"`
+	Data3DSPaReq                 string         `json:"data_3ds_pareq"`
+	Data3DSHTML                  string         `json:"data_3ds_html"`
+	Data3DSSecureID              string         `json:"data_3ds_secureid"`
+	Data3DSGatewayRecommendation string         `json:"data_3ds_gatewayrecommendation"`
 }

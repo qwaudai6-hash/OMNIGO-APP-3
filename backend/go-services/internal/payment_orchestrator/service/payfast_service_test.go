@@ -1,6 +1,8 @@
 package service
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -122,4 +124,49 @@ func TestMDSignatureVerification(t *testing.T) {
 			t.Errorf("expected malformed MD to fail verification")
 		}
 	})
+}
+
+func TestIdempotentReplayResponse(t *testing.T) {
+	cases := []struct {
+		name       string
+		dbStatus   string
+		wantStatus string
+	}{
+		{"settlement_pending maps to settlement_pending", "settlement_pending", "settlement_pending"},
+		{"captured maps to settlement_pending", "captured", "settlement_pending"},
+		{"3ds_required maps to in_progress with 3DS action", "3ds_required", "in_progress"},
+		{"gateway_pending passes through", "gateway_pending", "gateway_pending"},
+		{"processing maps to in_progress", "processing", "in_progress"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := idempotentReplayResponse(tc.dbStatus, "ord_1", "pf_txn_1")
+			if resp.Status != tc.wantStatus {
+				t.Errorf("status = %q, want %q", resp.Status, tc.wantStatus)
+			}
+			if resp.OrderID != "ord_1" || resp.TransactionID != "pf_txn_1" {
+				t.Errorf("replay response must echo original order/txn ids, got %+v", resp)
+			}
+			if resp.Message == "" {
+				t.Errorf("replay responses must always carry an explanatory message")
+			}
+		})
+	}
+}
+
+func TestClassificationSentinelsAreDistinct(t *testing.T) {
+	sentinels := []error{ErrValidation, ErrNotFound, ErrForbidden, ErrConflict}
+	seen := make(map[string]bool, len(sentinels))
+	for _, s := range sentinels {
+		msg := s.Error()
+		if seen[msg] {
+			t.Errorf("sentinel message duplicated: %s", msg)
+		}
+		seen[msg] = true
+
+		wrapped := fmt.Errorf("%w: extra context", s)
+		if !errors.Is(wrapped, s) {
+			t.Errorf("wrapped %q must satisfy errors.Is", msg)
+		}
+	}
 }

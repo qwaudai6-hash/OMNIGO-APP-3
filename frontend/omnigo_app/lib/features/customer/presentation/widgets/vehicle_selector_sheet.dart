@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import '../../../../core/di/service_locator.dart';
 import '../../../../core/network/api_client.dart';
 import '../../../../core/network/websocket_client.dart';
@@ -111,6 +112,18 @@ class _VehicleSelectorSheetState extends State<VehicleSelectorSheet> with Single
     });
 
     try {
+      // Fetch actual GPS coordinates instead of hardcoded values.
+      final permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        final req = await Geolocator.requestPermission();
+        if (req == LocationPermission.denied) {
+          throw Exception('Location permission denied');
+        }
+      }
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+      );
+
       // Step 1: create the ride so we have a tracking_id. The backend's
       // POST /rides endpoint returns {tracking_id, ...}.
       final rideResp = await ApiClient().post('/rides/', {
@@ -118,10 +131,10 @@ class _VehicleSelectorSheetState extends State<VehicleSelectorSheet> with Single
             SessionRegistry.instance.trackingId ?? 'CUST-UNKNOWN',
         'vehicle_type': _selectedVehicle,
         'service_type': _serviceType,
-        'pickup_lat': 31.5204,
-        'pickup_lng': 74.3587,
-        'dropoff_lat': 31.5600,
-        'dropoff_lng': 74.3400,
+        'pickup_lat': position.latitude,
+        'pickup_lng': position.longitude,
+        'dropoff_lat': position.latitude,
+        'dropoff_lng': position.longitude,
         'fare_amount': _negotiatedFare,
         'currency': 'PKR',
       });
@@ -166,7 +179,7 @@ class _VehicleSelectorSheetState extends State<VehicleSelectorSheet> with Single
             padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
             decoration: BoxDecoration(
               color: const Color(0xE6121212), // Deep dark glassmorphism base
-              border: Border.all(color: Colors.white.withOpacity(0.08), width: 1.5),
+              border: Border.all(color: Colors.white.withValues(alpha: 0.08), width: 1.5),
               borderRadius: const BorderRadius.vertical(top: Radius.circular(36)),
             ),
             child: _buildBiddingContent(),
@@ -254,14 +267,14 @@ class _VehicleSelectorSheetState extends State<VehicleSelectorSheet> with Single
                 return Container(
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.04),
+                    color: Colors.white.withValues(alpha: 0.04),
                     borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: Colors.white.withOpacity(0.08)),
+                    border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
                   ),
                   child: Row(
                     children: [
                       CircleAvatar(
-                        backgroundColor: const Color(0xFFCAFF33).withOpacity(0.15),
+                        backgroundColor: const Color(0xFFCAFF33).withValues(alpha: 0.15),
                         child: const Icon(Icons.person, color: Color(0xFFCAFF33)),
                       ),
                       const SizedBox(width: 14),
@@ -285,14 +298,14 @@ class _VehicleSelectorSheetState extends State<VehicleSelectorSheet> with Single
                         crossAxisAlignment: CrossAxisAlignment.end,
                         children: [
                           Text(
-                            'PKR ${offer['fare'].toStringAsFixed(0)}',
+                            'PKR ${((offer['fare'] as num?) ?? 0).toStringAsFixed(0)}',
                             style: const TextStyle(color: Color(0xFFCAFF33), fontWeight: FontWeight.w900, fontSize: 16),
                           ),
                           const SizedBox(height: 6),
                           ElevatedButton(
                             onPressed: () {
                               Navigator.pop(context);
-                              widget.onBookRide(_selectedVehicle, offer['fare'] as double);
+                              widget.onBookRide(_selectedVehicle, ((offer['fare'] as num?) ?? 0).toDouble());
                             },
                             style: ElevatedButton.styleFrom(
                               backgroundColor: const Color(0xFFCAFF33),
@@ -325,7 +338,7 @@ class _VehicleSelectorSheetState extends State<VehicleSelectorSheet> with Single
             width: 48,
             height: 5,
             decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.2),
+              color: Colors.white.withValues(alpha: 0.2),
               borderRadius: BorderRadius.circular(10),
             ),
           ),
@@ -340,7 +353,7 @@ class _VehicleSelectorSheetState extends State<VehicleSelectorSheet> with Single
                 child: Container(
                   padding: const EdgeInsets.symmetric(vertical: 12),
                   decoration: BoxDecoration(
-                    color: _serviceType == 'passenger' ? const Color(0xFFCAFF33) : Colors.white.withOpacity(0.05),
+                    color: _serviceType == 'passenger' ? const Color(0xFFCAFF33) : Colors.white.withValues(alpha: 0.05),
                     borderRadius: BorderRadius.circular(15),
                   ),
                   child: Row(
@@ -368,7 +381,7 @@ class _VehicleSelectorSheetState extends State<VehicleSelectorSheet> with Single
                 child: Container(
                   padding: const EdgeInsets.symmetric(vertical: 12),
                   decoration: BoxDecoration(
-                    color: _serviceType == 'courier' ? const Color(0xFFCAFF33) : Colors.white.withOpacity(0.05),
+                    color: _serviceType == 'courier' ? const Color(0xFFCAFF33) : Colors.white.withValues(alpha: 0.05),
                     borderRadius: BorderRadius.circular(15),
                   ),
                   child: Row(
@@ -424,13 +437,13 @@ class _VehicleSelectorSheetState extends State<VehicleSelectorSheet> with Single
               margin: const EdgeInsets.symmetric(vertical: 6),
               decoration: BoxDecoration(
                 color: isSelected 
-                    ? const Color(0xFFCAFF33).withOpacity(0.15)
-                    : Colors.white.withOpacity(0.03),
+                    ? const Color(0xFFCAFF33).withValues(alpha: 0.15)
+                    : Colors.white.withValues(alpha: 0.03),
                 borderRadius: BorderRadius.circular(20),
                 border: Border.all(
                   color: isSelected 
                       ? const Color(0xFFCAFF33) 
-                      : Colors.white.withOpacity(0.06),
+                      : Colors.white.withValues(alpha: 0.06),
                   width: 2,
                 ),
               ),
@@ -455,7 +468,7 @@ class _VehicleSelectorSheetState extends State<VehicleSelectorSheet> with Single
                         decoration: BoxDecoration(
                           color: isSelected 
                               ? const Color(0xFFCAFF33) 
-                              : Colors.white.withOpacity(0.06),
+                              : Colors.white.withValues(alpha: 0.06),
                           borderRadius: BorderRadius.circular(14),
                         ),
                         child: Icon(
@@ -485,9 +498,9 @@ class _VehicleSelectorSheetState extends State<VehicleSelectorSheet> with Single
                                   Container(
                                     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                                     decoration: BoxDecoration(
-                                      color: Colors.amber.withOpacity(0.2),
+                                      color: Colors.amber.withValues(alpha: 0.2),
                                       borderRadius: BorderRadius.circular(8),
-                                      border: Border.all(color: Colors.amber.withOpacity(0.4)),
+                                      border: Border.all(color: Colors.amber.withValues(alpha: 0.4)),
                                     ),
                                     child: Text(
                                       'Surge ${surge.toStringAsFixed(1)}x',
@@ -505,7 +518,7 @@ class _VehicleSelectorSheetState extends State<VehicleSelectorSheet> with Single
                             Text(
                               _serviceType == 'passenger' ? 'ETA: $etaMin mins' : 'ETA: $etaMin mins • Courier Delivery',
                               style: TextStyle(
-                                color: Colors.white.withOpacity(0.5),
+                                color: Colors.white.withValues(alpha: 0.5),
                                 fontSize: 11,
                                 fontFamily: 'Outfit',
                               ),
@@ -637,7 +650,7 @@ class _VehicleSelectorSheetState extends State<VehicleSelectorSheet> with Single
           style: ElevatedButton.styleFrom(
             backgroundColor: const Color(0xFFCAFF33),
             foregroundColor: Colors.black,
-            disabledBackgroundColor: Colors.white.withOpacity(0.1),
+            disabledBackgroundColor: Colors.white.withValues(alpha: 0.1),
             minimumSize: const Size(double.infinity, 56),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(20),

@@ -80,7 +80,7 @@ func (w *ReconciliationWorker) RunReconciliation(ctx context.Context) (*Reconcil
 	// 1. Fetch total completed orders & volume from PostgreSQL
 	var totalOrders int64
 	var totalVolume float64
-	queryOrders := `SELECT COUNT(*), COALESCE(SUM(total_amount), 0.0) FROM orders WHERE payment_status = 'completed'`
+	queryOrders := `SELECT COUNT(*), COALESCE(SUM(total_amount), 0.0) FROM orders WHERE payment_status = 'paid'`
 	err := w.db.QueryRow(ctx, queryOrders).Scan(&totalOrders, &totalVolume)
 	if err != nil {
 		log.Printf("[ReconciliationWorker] Error fetching postgres order totals: %v", err)

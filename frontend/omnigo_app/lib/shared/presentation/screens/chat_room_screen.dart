@@ -206,7 +206,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Icon(Icons.chat_bubble_outline,
-                              size: 56, color: Colors.grey.shade400),
+                              size: 56, color: Colors.grey.shade400,),
                           const SizedBox(height: 12),
                           const Text(
                             'No messages yet. Say hello!',

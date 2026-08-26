@@ -5,12 +5,10 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"math"
 	"math/big"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -86,7 +84,13 @@ func (s *DeliveryService) StartKafkaConsumer(ctx context.Context) {
 		return
 	}
 
-	s.kafka.Client.AddConsumeTopics("orders.created")
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[CRITICAL RECOVER] Delivery StartKafkaConsumer panicked: %v", r)
+		}
+	}()
+
+	s.kafka.Client.AddConsumeTopics("orders.created", "orders.cancelled")
 
 	for {
 		fetches := s.kafka.Client.PollFetches(ctx)
@@ -98,13 +102,39 @@ func (s *DeliveryService) StartKafkaConsumer(ctx context.Context) {
 		for !iter.Done() {
 			record := iter.Next()
 
+			if record.Topic == "orders.cancelled" {
+				var cancelPayload struct {
+					OrderTrackingID string `json:"order_tracking_id"`
+					OrderID         string `json:"order_id"`
+					Reason          string `json:"reason"`
+				}
+				if err := json.Unmarshal(record.Value, &cancelPayload); err == nil {
+					orderID := cancelPayload.OrderTrackingID
+					if orderID == "" {
+						orderID = cancelPayload.OrderID
+					}
+					if orderID != "" {
+						log.Printf("[Delivery] Order %s cancelled. Cancelling active/pending delivery gigs.", orderID)
+						_ = s.repo.CancelDeliveryForOrder(ctx, orderID)
+					}
+				}
+				continue
+			}
+
 			var orderEvent models.OrderEvent
 			if err := json.Unmarshal(record.Value, &orderEvent); err != nil {
 				log.Printf("Failed to unmarshal order event: %v", err)
 				continue
 			}
 
-			s.HandleNewOrder(ctx, orderEvent)
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("[RECOVER] HandleNewOrder panicked for order %s: %v", orderEvent.OrderID, r)
+					}
+				}()
+				s.HandleNewOrder(ctx, orderEvent)
+			}()
 		}
 	}
 }
@@ -169,34 +199,50 @@ func (s *DeliveryService) HandleNewOrder(ctx context.Context, order models.Order
 
 	var riders []string
 	var mu sync.Mutex
-	var wg sync.WaitGroup
 
-	// Get immediate neighbors (k-ring 1 contains center hex and its 6 neighbors)
-	neighbors := h3.KRing(vendorHex, 1)
-
-	// 1. Parallel Live Redis Geospatial Queries on Sharded keys (5km radius)
+	// 1. Dynamic Parallel Live Redis Geospatial Queries (k=1 up to k=5, 5km to 25km radius)
 	if s.redis != nil {
-		for _, hex := range neighbors {
-			wg.Add(1)
-			go func(h h3.H3Index) {
-				defer wg.Done()
-				key := fmt.Sprintf("riders:locations:h3:%x", h)
-				res, err := s.redis.GeoRadius(ctx, key, pickupLng, pickupLat, &redis.GeoRadiusQuery{
-					Radius: 5,
-					Unit:   "km",
-				}).Result()
+		for k := 1; k <= 5; k++ {
+			neighbors := h3.KRing(vendorHex, k)
+			radiusKm := float64(k * 5)
+			var wg sync.WaitGroup
 
-				if err == nil && len(res) > 0 {
-					mu.Lock()
-					for _, loc := range res {
-						riders = append(riders, loc.Name)
+			for _, hex := range neighbors {
+				wg.Add(1)
+				go func(h h3.H3Index) {
+					defer wg.Done()
+					key := fmt.Sprintf("riders:locations:h3:%x", h)
+					res, err := s.redis.GeoRadius(ctx, key, pickupLng, pickupLat, &redis.GeoRadiusQuery{
+						Radius: radiusKm,
+						Unit:   "km",
+					}).Result()
+
+					if err == nil && len(res) > 0 {
+						mu.Lock()
+						for _, loc := range res {
+							// Avoid duplicates
+							found := false
+							for _, r := range riders {
+								if r == loc.Name {
+									found = true
+									break
+								}
+							}
+							if !found {
+								riders = append(riders, loc.Name)
+							}
+						}
+						mu.Unlock()
 					}
-					mu.Unlock()
-				}
-			}(hex)
+				}(hex)
+			}
+			wg.Wait()
+
+			if len(riders) > 0 {
+				log.Printf("Redis Sharded Matches Found: %d riders located within %.0fkm (k=%d ring)", len(riders), radiusKm, k)
+				break
+			}
 		}
-		wg.Wait()
-		log.Printf("Redis Sharded Matches Found: %d riders located within 5km across neighboring hexagons", len(riders))
 	}
 
 	if len(riders) == 0 {
@@ -232,16 +278,23 @@ func (s *DeliveryService) AcceptGig(ctx context.Context, req *models.AcceptGigRe
 		}
 	}
 
-	// Resolve rider's last known H3 hex from the sync-worker's res-5 index.
-	// This key must match the one written in internal/syncworker/worker.go.
+	// Resolve rider's last known H3 hex from the sync-worker's res-5 index with coordinate fallback.
 	var riderHex h3.H3Index
 	if s.redis != nil {
 		lastHexHex, err := s.redis.Get(ctx, fmt.Sprintf("rider:last_h5:%s", req.RiderTrackID)).Result()
-		if err != nil {
-			return fmt.Errorf("conflict: rider location not available")
-		}
-		if _, err := fmt.Sscanf(lastHexHex, "%x", &riderHex); err != nil {
-			return fmt.Errorf("conflict: invalid rider location")
+		if err == nil && lastHexHex != "" {
+			_, _ = fmt.Sscanf(lastHexHex, "%x", &riderHex)
+		} else {
+			// Fallback to rider:coords
+			if coordsJSON, err := s.redis.Get(ctx, fmt.Sprintf("rider:coords:%s", req.RiderTrackID)).Result(); err == nil && coordsJSON != "" {
+				var riderLoc struct {
+					Lat float64 `json:"lat"`
+					Lng float64 `json:"lng"`
+				}
+				if json.Unmarshal([]byte(coordsJSON), &riderLoc) == nil && riderLoc.Lat != 0 && riderLoc.Lng != 0 {
+					riderHex = h3.FromGeo(h3.GeoCoord{Latitude: riderLoc.Lat, Longitude: riderLoc.Lng}, 5)
+				}
+			}
 		}
 	}
 
@@ -341,6 +394,11 @@ func (s *DeliveryService) UpdateGigStatus(ctx context.Context, trackingID string
 				log.Printf("Warning: failed to add COD collection to wallet for rider %s: %v", assignedRider, err)
 			}
 
+			// Ensure active debt record is created so the rider sees it and can settle via JazzCash/EasyPaisa
+			if err := s.repo.RecordCODDebt(ctx, gig.OrderTrackingID, assignedRider, gig.OrderTotal); err != nil {
+				log.Printf("Warning: failed to record COD debt for rider %s: %v", assignedRider, err)
+			}
+
 			// Move collected cash into central escrow so the platform can split it.
 			if s.codService != nil {
 				if err := s.codService.OnCashCollected(ctx, gig.OrderTrackingID, gig.OrderTotal); err != nil {
@@ -359,6 +417,21 @@ func (s *DeliveryService) UpdateGigStatus(ctx context.Context, trackingID string
 					gig.RiderEarning,
 				); err != nil {
 					log.Printf("Warning: COD release after delivery failed for order %s: %v", gig.OrderTrackingID, err)
+				}
+
+				// CLAIM-2/3 FIX: credit the vendor wallet + write the paid_out
+				// escrow audit row + auto-create the rider's cod_debts row so
+				// the Pay Now flow has a bill to settle.
+				if err := s.repo.SettleCODVendorAndDebt(
+					ctx,
+					gig.OrderTrackingID,
+					gig.VendorStoreTrackID,
+					assignedRider,
+					gig.OrderTotal,
+					gig.AdminCommission,
+					gig.RiderEarning,
+				); err != nil {
+					log.Printf("CRITICAL: COD vendor settlement/debt recording failed for order %s: %v", gig.OrderTrackingID, err)
 				}
 			}
 		}
@@ -448,18 +521,29 @@ func (s *DeliveryService) GetRoute(ctx context.Context, trackingID string) (*mod
 	}
 
 	coords := fmt.Sprintf("%f,%f;%f,%f", originLng, originLat, destLng, destLat)
-	osrmURL := fmt.Sprintf("%s/route/v1/driving/%s?overview=full&geometries=geojson", s.osrmURL, url.PathEscape(coords))
+	osrmURL := fmt.Sprintf("%s/route/v1/driving/%s?overview=full&geometries=geojson", s.osrmURL, coords)
 
 	resp, err := s.httpClient.Get(osrmURL)
-	if err != nil {
-		return nil, fmt.Errorf("osrm request failed: %w", err)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		// Haversine geometric fallback
+		distKm := haversineKm(originLat, originLng, destLat, destLng)
+		etaSec := (distKm / 30.0) * 3600.0 // average 30 km/h city riding speed
+		result := &models.RouteResponse{
+			DistanceMeters:  distKm * 1000.0,
+			DurationSeconds: etaSec,
+			Coordinates:     [][]float64{{originLng, originLat}, {destLng, destLat}},
+			Source:          "haversine_fallback",
+		}
+		if s.redis != nil {
+			cachedBytes, _ := json.Marshal(result)
+			s.redis.Set(ctx, cacheKey, string(cachedBytes), 15*time.Second)
+		}
+		return result, nil
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("osrm returned HTTP %d: %s", resp.StatusCode, string(body))
-	}
 
 	var osrmResp struct {
 		Code   string `json:"code"`
@@ -473,10 +557,22 @@ func (s *DeliveryService) GetRoute(ctx context.Context, trackingID string) (*mod
 		} `json:"routes"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&osrmResp); err != nil {
-		return nil, fmt.Errorf("failed to decode osrm response: %w", err)
+		distKm := haversineKm(originLat, originLng, destLat, destLng)
+		return &models.RouteResponse{
+			DistanceMeters:  distKm * 1000.0,
+			DurationSeconds: (distKm / 30.0) * 3600.0,
+			Coordinates:     [][]float64{{originLng, originLat}, {destLng, destLat}},
+			Source:          "haversine_fallback",
+		}, nil
 	}
 	if osrmResp.Code != "Ok" || len(osrmResp.Routes) == 0 {
-		return nil, fmt.Errorf("osrm could not compute route: code=%s", osrmResp.Code)
+		distKm := haversineKm(originLat, originLng, destLat, destLng)
+		return &models.RouteResponse{
+			DistanceMeters:  distKm * 1000.0,
+			DurationSeconds: (distKm / 30.0) * 3600.0,
+			Coordinates:     [][]float64{{originLng, originLat}, {destLng, destLat}},
+			Source:          "haversine_fallback",
+		}, nil
 	}
 
 	route := osrmResp.Routes[0]
@@ -570,18 +666,18 @@ func (s *DeliveryService) EstimateRide(ctx context.Context, req *models.RideEsti
 
 func (s *DeliveryService) estimateDistanceAndETA(ctx context.Context, pickupLng, pickupLat, dropoffLng, dropoffLat float64) (km, seconds float64, coords [][]float64, err error) {
 	coordsStr := fmt.Sprintf("%f,%f;%f,%f", pickupLng, pickupLat, dropoffLng, dropoffLat)
-	osrmURL := fmt.Sprintf("%s/route/v1/driving/%s?overview=full&geometries=geojson", s.osrmURL, url.PathEscape(coordsStr))
+	osrmURL := fmt.Sprintf("%s/route/v1/driving/%s?overview=full&geometries=geojson", s.osrmURL, coordsStr)
 
 	resp, err := s.httpClient.Get(osrmURL)
-	if err != nil {
-		return 0, 0, nil, err
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		distKm := haversineKm(pickupLat, pickupLng, dropoffLat, dropoffLng)
+		etaSec := (distKm / 30.0) * 3600.0
+		return distKm, etaSec, [][]float64{{pickupLng, pickupLat}, {dropoffLng, dropoffLat}}, nil
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return 0, 0, nil, fmt.Errorf("osrm returned HTTP %d: %s", resp.StatusCode, string(body))
-	}
 
 	var osrmResp struct {
 		Code   string `json:"code"`
@@ -594,11 +690,10 @@ func (s *DeliveryService) estimateDistanceAndETA(ctx context.Context, pickupLng,
 			} `json:"geometry"`
 		} `json:"routes"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&osrmResp); err != nil {
-		return 0, 0, nil, err
-	}
-	if osrmResp.Code != "Ok" || len(osrmResp.Routes) == 0 {
-		return 0, 0, nil, fmt.Errorf("osrm could not compute route: code=%s", osrmResp.Code)
+	if err := json.NewDecoder(resp.Body).Decode(&osrmResp); err != nil || osrmResp.Code != "Ok" || len(osrmResp.Routes) == 0 {
+		distKm := haversineKm(pickupLat, pickupLng, dropoffLat, dropoffLng)
+		etaSec := (distKm / 30.0) * 3600.0
+		return distKm, etaSec, [][]float64{{pickupLng, pickupLat}, {dropoffLng, dropoffLat}}, nil
 	}
 
 	route := osrmResp.Routes[0]
@@ -710,7 +805,7 @@ func (s *DeliveryService) GetSurgeHeatmap(ctx context.Context) ([]models.SurgeHe
 			geoBoundary := h3.ToGeoBoundary(hex)
 			var boundary [][]float64
 			for _, coord := range geoBoundary {
-				boundary = append(boundary, []float64{coord.Latitude, coord.Longitude})
+				boundary = append(boundary, []float64{coord.Longitude, coord.Latitude})
 			}
 
 			results = append(results, models.SurgeHex{
@@ -825,28 +920,36 @@ func (s *DeliveryService) DisputeGig(ctx context.Context, req *models.DisputeOrd
 		return err
 	}
 
-	// 3. Dispute Resolution Algorithm:
-	// Evidence-based scoring — each signal adds weight toward rider or vendor guilt.
+	// 3. Evidence-based scoring — each signal adds weight toward rider or vendor guilt.
 	riderScore, vendorScore := 0, 0
-
-	// Signal 1: Photo mismatch — different pickup and delivery photos suggest tampering
-	if gig.PickupPhotoURL != "" && gig.DeliveryPhotoURL != "" && gig.PickupPhotoURL != gig.DeliveryPhotoURL {
-		riderScore += 30
-		vendorScore += 10
-	}
-
-	// Signal 2: Dispute reason keywords
 	lowerReason := strings.ToLower(req.Reason)
-	if strings.Contains(lowerReason, "rider") || strings.Contains(lowerReason, "wrong item") || strings.Contains(lowerReason, "missing") {
-		riderScore += 20
-	}
-	if strings.Contains(lowerReason, "vendor") || strings.Contains(lowerReason, "expired") || strings.Contains(lowerReason, "quality") {
-		vendorScore += 30
+
+	// Signal 1: Missing proof of delivery dropoff photo
+	if gig.DeliveryPhotoURL == "" {
+		riderScore += 35
 	}
 
-	// Signal 3: No delivery photo uploaded → rider likely at fault
-	if gig.DeliveryPhotoURL == "" {
-		riderScore += 25
+	// Signal 2: Rider mishandling / transit damage / stolen items
+	if strings.Contains(lowerReason, "damaged") || strings.Contains(lowerReason, "broken") ||
+		strings.Contains(lowerReason, "spilled") || strings.Contains(lowerReason, "crushed") ||
+		strings.Contains(lowerReason, "rider") || strings.Contains(lowerReason, "not delivered") {
+		riderScore += 30
+	}
+
+	// Signal 3: Vendor product defect / expired item / wrong item packed
+	if strings.Contains(lowerReason, "vendor") || strings.Contains(lowerReason, "expired") ||
+		strings.Contains(lowerReason, "quality") || strings.Contains(lowerReason, "wrong item") ||
+		strings.Contains(lowerReason, "defective") {
+		vendorScore += 35
+	}
+
+	// Signal 4: Customer uploaded photo proof
+	if req.PhotoURL != "" {
+		if riderScore > vendorScore {
+			riderScore += 15
+		} else if vendorScore > riderScore {
+			vendorScore += 15
+		}
 	}
 
 	// Threshold: need clear evidence (score >= 40) to assign guilt

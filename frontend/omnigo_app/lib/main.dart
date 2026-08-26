@@ -73,7 +73,9 @@ void main() async {
 
   await SentryFlutter.init(
     (options) {
-      options.dsn = 'https://03e0839e99a8b13867c29e1eb040e34b@o4507116744572928.ingest.us.sentry.io/4507116746866688';
+      // Inject via build arg: --dart-define=SENTRY_DSN=https://...
+      // Never commit the DSN in source control.
+      options.dsn = const String.fromEnvironment('SENTRY_DSN');
       // Set tracesSampleRate to 1.0 to capture 100% of transactions for performance monitoring.
       // We recommend adjusting this value in production.
       options.tracesSampleRate = 1.0;
@@ -146,6 +148,7 @@ class _OmnigoAppState extends State<OmnigoApp> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'OMNIGO',
+      navigatorKey: NotificationService.navigatorKey,
       theme: AppTheme.lightTheme,
       debugShowCheckedModeBanner: false,
       initialRoute: '/',
@@ -206,9 +209,32 @@ class _OmnigoAppState extends State<OmnigoApp> with WidgetsBindingObserver {
           }
         }
 
+        // Admin Route Guard
+        if (name == '/admin-surveillance' || name == '/admin-finance' || name == '/admin-ai-control') {
+          if (!isLoggedIn) {
+            return MaterialPageRoute(
+              builder: (context) => const DynamicSignupScreen(startInLoginMode: true),
+            );
+          }
+          if (role != 'admin' && role != 'super_admin') {
+            return MaterialPageRoute(
+              builder: (context) => role == 'rider'
+                  ? RiderMapScreen(trackingId: trackingId ?? '')
+                  : role == 'vendor'
+                      ? VendorDashboardScreen(trackingId: trackingId ?? 'VEND-0000')
+                      : CustomerDashboardScreen(trackingId: trackingId ?? 'CUST-0000'),
+            );
+          }
+        }
+
         if (settings.name == '/login') {
           return MaterialPageRoute(
             builder: (context) => LoginScreen(role: args ?? 'customer'),
+          );
+        }
+        if (settings.name == '/signup') {
+          return MaterialPageRoute(
+            builder: (context) => const DynamicSignupScreen(),
           );
         }
         if (settings.name == '/customer-dashboard') {
@@ -271,9 +297,6 @@ class _OmnigoAppState extends State<OmnigoApp> with WidgetsBindingObserver {
       },
       routes: {
         '/': (context) => const DynamicSignupScreen(),
-        '/admin-surveillance': (context) => const AdminSurveillanceScreen(),
-        '/admin-finance': (context) => const AdminFinanceScreen(),
-        '/admin-ai-control': (context) => const AdminAiControlCenterScreen(),
       },
     );
   }

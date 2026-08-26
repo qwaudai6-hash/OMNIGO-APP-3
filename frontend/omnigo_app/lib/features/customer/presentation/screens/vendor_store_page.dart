@@ -208,9 +208,9 @@ class _VendorStorePageState extends State<VendorStorePage>
           controller: _tabController,
           children: [
             _buildProductGrid(
-                _filtered.where((p) => !p.isFeatured).toList()),
+                _filtered.where((p) => !p.isFeatured).toList(),),
             _buildProductGrid(
-                _filtered.where((p) => p.isFeatured).toList()),
+                _filtered.where((p) => p.isFeatured).toList(),),
           ],
         ),
       ),
@@ -240,7 +240,7 @@ class _VendorStorePageState extends State<VendorStorePage>
                   style: const TextStyle(
                       color: Colors.white,
                       fontWeight: FontWeight.bold,
-                      fontSize: 16),
+                      fontSize: 16,),
                 ),
               ],
             )
@@ -280,7 +280,7 @@ class _VendorStorePageState extends State<VendorStorePage>
         gradient: LinearGradient(
           colors: [
             AppTheme.blackAccent,
-            AppTheme.limeAccent.withOpacity(0.7),
+            AppTheme.limeAccent.withValues(alpha: 0.7),
           ],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
@@ -310,7 +310,7 @@ class _VendorStorePageState extends State<VendorStorePage>
                       border: Border.all(color: Colors.white, width: 3),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.black.withOpacity(0.12),
+                          color: Colors.black.withValues(alpha: 0.12),
                           blurRadius: 12,
                         ),
                       ],
@@ -329,7 +329,7 @@ class _VendorStorePageState extends State<VendorStorePage>
                               style: const TextStyle(
                                   fontWeight: FontWeight.bold,
                                   fontSize: 28,
-                                  color: AppTheme.blackAccent),
+                                  color: AppTheme.blackAccent,),
                             )
                           : null,
                     ),
@@ -354,7 +354,7 @@ class _VendorStorePageState extends State<VendorStorePage>
                         children: [
                           Container(
                             padding: const EdgeInsets.symmetric(
-                                horizontal: 8, vertical: 3),
+                                horizontal: 8, vertical: 3,),
                             decoration: BoxDecoration(
                               color: Colors.green.shade50,
                               borderRadius: BorderRadius.circular(20),
@@ -364,14 +364,14 @@ class _VendorStorePageState extends State<VendorStorePage>
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 Icon(Icons.verified_outlined,
-                                    size: 12, color: Colors.green.shade700),
+                                    size: 12, color: Colors.green.shade700,),
                                 const SizedBox(width: 4),
                                 Text(
                                   'Verified Seller',
                                   style: TextStyle(
                                       fontSize: 11,
                                       color: Colors.green.shade700,
-                                      fontWeight: FontWeight.w600),
+                                      fontWeight: FontWeight.w600,),
                                 ),
                               ],
                             ),
@@ -380,7 +380,7 @@ class _VendorStorePageState extends State<VendorStorePage>
                             const SizedBox(width: 6),
                             Container(
                               padding: const EdgeInsets.symmetric(
-                                  horizontal: 8, vertical: 3),
+                                  horizontal: 8, vertical: 3,),
                               decoration: BoxDecoration(
                                 color: Colors.amber.shade50,
                                 borderRadius: BorderRadius.circular(20),
@@ -407,7 +407,7 @@ class _VendorStorePageState extends State<VendorStorePage>
                           Text(
                             '${_allProducts.length} products',
                             style: const TextStyle(
-                                fontSize: 12, color: Colors.grey),
+                                fontSize: 12, color: Colors.grey,),
                           ),
                           ],
                         ),
@@ -432,7 +432,7 @@ class _VendorStorePageState extends State<VendorStorePage>
                     style: const TextStyle(
                         fontSize: 11,
                         color: Colors.grey,
-                        fontFamily: 'monospace'),
+                        fontFamily: 'monospace',),
                   ),
                 ),
               ],
@@ -506,7 +506,7 @@ class _VendorStorePageState extends State<VendorStorePage>
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 200),
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 14, vertical: 6),
+                            horizontal: 14, vertical: 6,),
                         decoration: BoxDecoration(
                           color: selected
                               ? AppTheme.blackAccent
@@ -564,7 +564,7 @@ class _VendorStorePageState extends State<VendorStorePage>
   Widget _buildProductGrid(List<Product> products) {
     if (_isLoadingProducts) {
       return const Center(
-          child: CircularProgressIndicator(color: AppTheme.blackAccent));
+          child: CircularProgressIndicator(color: AppTheme.blackAccent),);
     }
 
     if (products.isEmpty) {
@@ -573,7 +573,7 @@ class _VendorStorePageState extends State<VendorStorePage>
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Icon(Icons.inventory_2_outlined,
-                size: 64, color: Colors.grey.shade300),
+                size: 64, color: Colors.grey.shade300,),
             const SizedBox(height: 12),
             Text(
               _searchQuery.isNotEmpty
@@ -616,7 +616,7 @@ class _VendorStorePageState extends State<VendorStorePage>
           borderRadius: BorderRadius.circular(18),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.06),
+              color: Colors.black.withValues(alpha: 0.06),
               blurRadius: 10,
               offset: const Offset(0, 4),
             ),
@@ -639,13 +639,13 @@ class _VendorStorePageState extends State<VendorStorePage>
                           errorBuilder: (_, __, ___) => Container(
                             color: Colors.grey.shade100,
                             child: const Icon(Icons.shopping_bag_outlined,
-                                size: 48, color: Colors.grey),
+                                size: 48, color: Colors.grey,),
                           ),
                         )
                       : Container(
                           color: Colors.grey.shade100,
                           child: const Icon(Icons.shopping_bag_outlined,
-                              size: 48, color: Colors.grey),
+                              size: 48, color: Colors.grey,),
                         ),
                   if (product.isFeatured)
                     Positioned(
@@ -653,25 +653,25 @@ class _VendorStorePageState extends State<VendorStorePage>
                       left: 8,
                       child: Container(
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 7, vertical: 3),
+                            horizontal: 7, vertical: 3,),
                         decoration: BoxDecoration(
                           color: Colors.amber,
                           borderRadius: BorderRadius.circular(8),
                         ),
                         child: const Text('⭐ Featured',
                             style: TextStyle(
-                                fontSize: 9, fontWeight: FontWeight.bold)),
+                                fontSize: 9, fontWeight: FontWeight.bold,),),
                       ),
                     ),
                   if (product.stock == 0)
                     Container(
-                      color: Colors.black.withOpacity(0.45),
+                      color: Colors.black.withValues(alpha: 0.45),
                       child: const Center(
                         child: Text('Out of Stock',
                             style: TextStyle(
                                 color: Colors.white,
                                 fontWeight: FontWeight.bold,
-                                fontSize: 12)),
+                                fontSize: 12,),),
                       ),
                     ),
                 ],
@@ -722,7 +722,7 @@ class _VendorStorePageState extends State<VendorStorePage>
                                           const Duration(milliseconds: 800),
                                       shape: RoundedRectangleBorder(
                                           borderRadius:
-                                              BorderRadius.circular(12)),
+                                              BorderRadius.circular(12),),
                                     ),
                                   );
                                 }
@@ -772,7 +772,7 @@ class _TabBarDelegate extends SliverPersistentHeaderDelegate {
 
   @override
   Widget build(
-      BuildContext context, double shrinkOffset, bool overlapsContent) {
+      BuildContext context, double shrinkOffset, bool overlapsContent,) {
     return Container(color: Colors.white, child: tabBar);
   }
 

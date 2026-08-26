@@ -1,0 +1,36 @@
+{
+  "options": {
+    "paths": {
+      "root": "/data",
+      "fonts": "fonts",
+      "sprites": "styles/streets",
+      "styles": "styles",
+      "mbtiles": ""
+    },
+    "domains": [
+      "localhost:8080",
+      "omnigo-tileserver-gl:8080",
+      "*"
+    ],
+    "formatQuality": {
+      "jpeg": 80,
+      "webp": 90
+    },
+    "maxSize": 2048,
+    "pbfAlias": "pbf"
+  },
+  "styles": {
+    "streets": {
+      "style": "style.json",
+      "tilejson": {
+        "type": "overlay",
+        "bounds": [60.872, 23.634, 77.84, 37.084]
+      }
+    }
+  },
+  "data": {
+    "v3": {
+      "mbtiles": "pakistan.mbtiles"
+    }
+  }
+}

@@ -51,6 +51,10 @@ type OrderEvent struct {
 	VendorStoreTrackID string      `json:"vendor_store_tracking_id"`
 	Items              []OrderItem `json:"items"`
 	TotalAmount        float64     `json:"total_amount"`
+	IsCOD              bool        `json:"is_cod"`
+	CustomerPhone      string      `json:"customer_phone"`
+	Tips               float64     `json:"tips"`
+	PetrolAllowance    float64     `json:"petrol_allowance"`
 	DropoffLat         float64     `json:"dropoff_lat"`
 	DropoffLng         float64     `json:"dropoff_lng"`
 	Timestamp          int64       `json:"timestamp"`

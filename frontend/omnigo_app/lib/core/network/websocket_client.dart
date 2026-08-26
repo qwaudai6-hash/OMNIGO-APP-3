@@ -46,7 +46,9 @@ class WebSocketClient {
   late final String _baseWsUrl;
 
   WebSocketChannel? _channel;
-  StreamController<dynamic>? _broadcastController;
+  final StreamController<dynamic> _broadcastController =
+      StreamController<dynamic>.broadcast();
+  Stream<dynamic> get stream => _broadcastController.stream;
   StreamSubscription<dynamic>? _internalSub;
   Timer? _reconnectTimer;
   Timer? _heartbeatTimer;
@@ -120,7 +122,7 @@ class WebSocketClient {
     _connectAttempts++;
     _setState(_connectAttempts == 1
         ? WSConnectionState.connecting
-        : WSConnectionState.reconnecting);
+        : WSConnectionState.reconnecting,);
 
     final uri = Uri.parse('$_baseWsUrl?token=$_activeToken');
     try {
@@ -131,12 +133,11 @@ class WebSocketClient {
       return;
     }
 
-    _broadcastController = StreamController<dynamic>.broadcast();
     _internalSub = _channel!.stream.listen(
       (message) {
         _markMessageReceived();
-        if (!_broadcastController!.isClosed) {
-          _broadcastController!.add(message);
+        if (!_broadcastController.isClosed) {
+          _broadcastController.add(message);
         }
         // Server-driven "hello" frame (sent by the proxy on connect) or any
         // pong/pong echo counts as a heartbeat round-trip success.
@@ -148,8 +149,8 @@ class WebSocketClient {
       },
       onError: (Object error) {
         debugLog('WebSocket Error: $error');
-        if (!_broadcastController!.isClosed) {
-          _broadcastController!.addError(error);
+        if (!_broadcastController.isClosed) {
+          _broadcastController.addError(error);
         }
         _stopHeartbeat();
         _scheduleReconnect();
@@ -186,7 +187,7 @@ class WebSocketClient {
         'type': 'register',
         'client_type': _clientType,
         'tracking_id': _trackingId,
-      }));
+      }),);
     } catch (_) {
       // Sink probably already closed; onDone will fire.
     }
@@ -202,7 +203,7 @@ class WebSocketClient {
           DateTime.now().difference(_lastMessageAt!) > wsStaleThreshold) {
         _heartbeatsMissed++;
         debugLog(
-            'heartbeat stale for >${wsStaleThreshold.inSeconds}s — forcing reconnect (missed=$_heartbeatsMissed)');
+            'heartbeat stale for >${wsStaleThreshold.inSeconds}s — forcing reconnect (missed=$_heartbeatsMissed)',);
         if (_heartbeatsMissed >= 2) {
           _teardownChannel();
           _setState(WSConnectionState.reconnecting);
@@ -226,7 +227,7 @@ class WebSocketClient {
       sink.add(jsonEncode({
         'type': 'ping',
         'ts': DateTime.now().toUtc().toIso8601String(),
-      }));
+      }),);
       _heartbeatsSent++;
       _emitHealth();
     } catch (_) {
@@ -276,12 +277,6 @@ class WebSocketClient {
     }
   }
 
-  /// Broadcast stream that UI widgets can safely subscribe to.
-  Stream<dynamic> get stream {
-    _broadcastController ??= StreamController<dynamic>.broadcast();
-    return _broadcastController!.stream;
-  }
-
   /// Sends a message to the gateway. No-op if not connected.
   void sendMessage(String message) {
     final ch = _channel;
@@ -319,10 +314,6 @@ class WebSocketClient {
       _channel?.sink.close();
     } catch (_) {}
     _channel = null;
-    if (_broadcastController != null && !_broadcastController!.isClosed) {
-      _broadcastController!.close();
-    }
-    _broadcastController = null;
   }
 
   void debugLog(String msg) {
@@ -335,6 +326,9 @@ class WebSocketClient {
   /// Release all resources. Call only on app teardown.
   Future<void> dispose() async {
     disconnect();
+    if (!_broadcastController.isClosed) {
+      await _broadcastController.close();
+    }
     await _stateController.close();
     await _healthController.close();
   }

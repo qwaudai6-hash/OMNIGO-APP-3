@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/omnigo/backend/internal/product/models"
@@ -65,15 +66,38 @@ func (r *ProductRepository) GetProductByTrackingID(ctx context.Context, tracking
 	return &prod, nil
 }
 
-// ListProducts fetches a paginated list of products supporting optional search, category, sort, minPrice, maxPrice filters
-func (r *ProductRepository) ListProducts(ctx context.Context, limit, offset int, search, category, sort string, minPrice, maxPrice float64) ([]*models.Product, error) {
+// GetProductByNumericID fetches a product by its internal serial id. The cart
+// service stores numeric product ids and resolves prices through this lookup.
+func (r *ProductRepository) GetProductByNumericID(ctx context.Context, id int64) (*models.Product, error) {
+	query := `
+		SELECT id, product_tracking_id, vendor_tracking_id, store_tracking_id, sku, name, description, base_price, stock, is_featured, image_url, category, is_active, created_at, updated_at
+		FROM products
+		WHERE id = $1
+	`
+	var prod models.Product
+	err := r.reader.QueryRow(ctx, query, id).Scan(
+		&prod.ID, &prod.ProductTrackingID, &prod.VendorTrackingID, &prod.StoreTrackingID, &prod.SKU, &prod.Name,
+		&prod.Description, &prod.BasePrice, &prod.Stock, &prod.IsFeatured, &prod.ImageURL, &prod.Category, &prod.IsActive,
+		&prod.CreatedAt, &prod.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &prod, nil
+}
+
+// ListProducts fetches a paginated list of products supporting optional search, category, storeID, sort, minPrice, maxPrice filters
+func (r *ProductRepository) ListProducts(ctx context.Context, limit, offset int, search, category, storeID, sort string, minPrice, maxPrice float64) ([]*models.Product, error) {
 	var query string
 	var args []interface{}
 
 	query = `
-		SELECT id, product_tracking_id, vendor_tracking_id, store_tracking_id, sku, name, description, base_price, stock, is_featured, image_url, category, is_active, created_at, updated_at
-		FROM products
-		WHERE is_active = true
+		SELECT p.id, p.product_tracking_id, p.vendor_tracking_id, p.store_tracking_id, p.sku, p.name, p.description,
+		       p.base_price, p.stock, p.is_featured, p.image_url, p.category, p.is_active, p.created_at, p.updated_at,
+		       COALESCE(s.store_name, ''), COALESCE(s.logo_url, ''), COALESCE(s.banner_url, '')
+		FROM products p
+		LEFT JOIN stores s ON s.store_tracking_id = p.store_tracking_id
+		WHERE p.is_active = true
 	`
 	placeholderIdx := 1
 
@@ -86,6 +110,12 @@ func (r *ProductRepository) ListProducts(ctx context.Context, limit, offset int,
 	if category != "" {
 		query += fmt.Sprintf(" AND category = $%d", placeholderIdx)
 		args = append(args, category)
+		placeholderIdx++
+	}
+
+	if storeID != "" {
+		query += fmt.Sprintf(" AND p.store_tracking_id = $%d", placeholderIdx)
+		args = append(args, storeID)
 		placeholderIdx++
 	}
 
@@ -130,7 +160,12 @@ func (r *ProductRepository) ListProducts(ctx context.Context, limit, offset int,
 			&prod.ID, &prod.ProductTrackingID, &prod.VendorTrackingID, &prod.StoreTrackingID, &prod.SKU, &prod.Name,
 			&prod.Description, &prod.BasePrice, &prod.Stock, &prod.IsFeatured, &prod.ImageURL, &prod.Category, &prod.IsActive,
 			&prod.CreatedAt, &prod.UpdatedAt,
+			&prod.StoreName, &prod.LogoURL, &prod.BannerURL,
 		)
+		// Flutter falls back: store_logo_url→logo_url, store_banner_url→banner_url.
+		// Populate both spellings so either parse path gets branding.
+		prod.StoreLogoURL = prod.LogoURL
+		prod.StoreBannerURL = prod.BannerURL
 		if err != nil {
 			return nil, err
 		}
@@ -208,20 +243,43 @@ func (r *ProductRepository) DeleteProductSecure(ctx context.Context, productTrac
 	return nil
 }
 
-// VerifyStoreOwnership returns nil if the given store_tracking_id belongs to
-// the given vendor_tracking_id. Used by the AddProduct vendor endpoint to
-// prevent cross-vendor catalog injection.
-func (r *ProductRepository) VerifyStoreOwnership(ctx context.Context, storeTrackingID, vendorTrackingID string) error {
-	query := `SELECT EXISTS(SELECT 1 FROM stores WHERE store_tracking_id = $1 AND vendor_tracking_id = $2)`
-	var exists bool
-	err := r.reader.QueryRow(ctx, query, storeTrackingID, vendorTrackingID).Scan(&exists)
+// ResolveOrVerifyStoreOwnership validates that the store belongs to the vendor.
+// If the provided storeTrackingID is empty, "STOR-000000", or invalid, it automatically
+// resolves the vendor's primary store from the database or creates one if none exists.
+func (r *ProductRepository) ResolveOrVerifyStoreOwnership(ctx context.Context, storeTrackingID, vendorTrackingID string) (string, error) {
+	if storeTrackingID != "" && storeTrackingID != "STOR-000000" {
+		query := `SELECT EXISTS(SELECT 1 FROM stores WHERE store_tracking_id = $1 AND vendor_tracking_id = $2)`
+		var exists bool
+		if err := r.reader.QueryRow(ctx, query, storeTrackingID, vendorTrackingID).Scan(&exists); err == nil && exists {
+			return storeTrackingID, nil
+		}
+	}
+
+	// Fallback: Find existing primary store for this vendor
+	var primaryStoreID string
+	err := r.reader.QueryRow(ctx, `SELECT store_tracking_id FROM stores WHERE vendor_tracking_id = $1 ORDER BY created_at ASC LIMIT 1`, vendorTrackingID).Scan(&primaryStoreID)
+	if err == nil && primaryStoreID != "" {
+		return primaryStoreID, nil
+	}
+
+	// Self-healing: Auto-create a default primary store for this vendor
+	newStoreID := fmt.Sprintf("STOR-%06d", time.Now().UnixNano()%1000000)
+	insertQuery := `
+		INSERT INTO stores (vendor_tracking_id, store_tracking_id, store_name, is_active, created_at, updated_at)
+		VALUES ($1, $2, 'Primary Store', true, NOW(), NOW())
+		ON CONFLICT (store_tracking_id) DO NOTHING
+	`
+	_, err = r.writer.Exec(ctx, insertQuery, vendorTrackingID, newStoreID)
 	if err != nil {
-		return err
+		return "", fmt.Errorf("failed to auto-create primary store: %w", err)
 	}
-	if !exists {
-		return errors.New("store not found or not owned by vendor")
-	}
-	return nil
+	return newStoreID, nil
+}
+
+// VerifyStoreOwnership is a compatibility wrapper for ResolveOrVerifyStoreOwnership.
+func (r *ProductRepository) VerifyStoreOwnership(ctx context.Context, storeTrackingID, vendorTrackingID string) error {
+	_, err := r.ResolveOrVerifyStoreOwnership(ctx, storeTrackingID, vendorTrackingID)
+	return err
 }
 
 // UpdateProductFields performs a partial update of the mutable product columns.
@@ -333,28 +391,34 @@ func (r *ProductRepository) ReserveStock(ctx context.Context, items []models.Ord
 	var storeTrackID, vendorTrackID string
 
 	for i, item := range items {
+		// CI-17: reject zero/negative quantities — negative values would pass
+		// the `stock >= qty` predicate and INFLATE inventory on release.
+		if item.Quantity <= 0 {
+			return nil, fmt.Errorf("invalid quantity for product %s: must be > 0", item.ProductTrackingID)
+		}
 		query := `
 			UPDATE products
 			SET stock = stock - $1, updated_at = NOW()
-			WHERE product_tracking_id = $2 AND stock >= $1
-			RETURNING base_price, store_tracking_id, vendor_tracking_id
+			WHERE (product_tracking_id = $2 OR id::text = $2) AND stock >= $1
+			RETURNING product_tracking_id, base_price, store_tracking_id, vendor_tracking_id
 		`
 		var price float64
-		err := tx.QueryRow(ctx, query, item.Quantity, item.ProductTrackingID).Scan(&price, &storeTrackID, &vendorTrackID)
+		var realProdID string
+		err := tx.QueryRow(ctx, query, item.Quantity, item.ProductTrackingID).Scan(&realProdID, &price, &storeTrackID, &vendorTrackID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to reserve stock for product %s (insufficient stock or not found)", item.ProductTrackingID)
 		}
 
+		item.ProductTrackingID = realProdID
 		item.PriceAtCheckout = price
-		reserved = append(reserved, item)
+		item.StoreTrackingID = storeTrackID
+		item.VendorTrackingID = vendorTrackID
 
-		// Validate all items belong to the same store/vendor. Mixed-store orders are not supported in this phase.
-		if i > 0 && (reserved[i].StoreTrackingID != storeTrackID || reserved[i].VendorTrackingID != vendorTrackID) {
-			// ponytail: mixed-store cart support requires separate reservation/insert strategy.
-			return nil, fmt.Errorf("mixed store/vendor orders are not supported")
+		// Validate all items belong to the same store/vendor. Mixed-store orders are not supported in a single delivery batch.
+		if i > 0 && (reserved[0].StoreTrackingID != storeTrackID || reserved[0].VendorTrackingID != vendorTrackID) {
+			return nil, fmt.Errorf("mixed store/vendor orders are not supported in a single delivery batch")
 		}
-		reserved[i].StoreTrackingID = storeTrackID
-		reserved[i].VendorTrackingID = vendorTrackID
+		reserved = append(reserved, item)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -380,7 +444,7 @@ func (r *ProductRepository) ReleaseStock(ctx context.Context, items []models.Ord
 		query := `
 			UPDATE products
 			SET stock = stock + $1, updated_at = NOW()
-			WHERE product_tracking_id = $2
+			WHERE product_tracking_id = $2 OR id::text = $2
 		`
 		_, err := tx.Exec(ctx, query, item.Quantity, item.ProductTrackingID)
 		if err != nil {

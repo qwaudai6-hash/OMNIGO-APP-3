@@ -33,20 +33,21 @@ class _VendorWalletScreenState extends State<VendorWalletScreen> {
       final token = prefs.getString('jwt_token') ?? '';
       final headers = {'Authorization': 'Bearer $token'};
 
-      // Fetch wallet, escrow holds, and payouts in parallel
-      // Payment Orchestrator runs on port 8092
+      // Fetch wallet, escrow holds, and payouts in parallel.
+      // All vendor money endpoints live under /payments on the gateway
+      // (payment-orchestrator) — see ApiEndpoints registry constants.
       final paymentBase = ApiEndpoints.paymentBase;
       final results = await Future.wait([
         http.get(
-          Uri.parse('$paymentBase/vendor/wallet/${widget.vendorTrackingId}'),
+          Uri.parse('$paymentBase/payments/vendor/wallet/${widget.vendorTrackingId}'),
           headers: headers,
         ).timeout(const Duration(seconds: 8)),
         http.get(
-          Uri.parse('$paymentBase/escrow/holds/${widget.vendorTrackingId}'),
+          Uri.parse('$paymentBase/payments/escrow/holds/${widget.vendorTrackingId}'),
           headers: headers,
         ).timeout(const Duration(seconds: 8)),
         http.get(
-          Uri.parse('$paymentBase/vendor/payouts/${widget.vendorTrackingId}'),
+          Uri.parse('$paymentBase/payments/vendor/payouts/${widget.vendorTrackingId}'),
           headers: headers,
         ).timeout(const Duration(seconds: 8)),
       ]);
@@ -82,7 +83,7 @@ class _VendorWalletScreenState extends State<VendorWalletScreen> {
       final token = prefs.getString('jwt_token') ?? '';
 
       final response = await http.post(
-        Uri.parse('${ApiEndpoints.paymentBase}/vendor/withdraw'),
+        Uri.parse('${ApiEndpoints.paymentBase}/payments/vendor/withdraw'),
         headers: {
           'Authorization': 'Bearer $token',
           'Content-Type': 'application/json',
@@ -102,10 +103,17 @@ class _VendorWalletScreenState extends State<VendorWalletScreen> {
           );
           await _fetchAll();
         } else {
-          final errorBody = jsonDecode(response.body) as Map<String, dynamic>;
-          final errorMsg = errorBody['error'] ?? 'Withdrawal failed';
+          String errorMsg = 'Withdrawal failed';
+          try {
+            final errorBody = jsonDecode(response.body);
+            if (errorBody is Map && errorBody['error'] != null) {
+              errorMsg = errorBody['error'].toString();
+            }
+          } catch (_) {
+            errorMsg = 'Withdrawal failed (${response.statusCode})';
+          }
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(errorMsg.toString())),
+            SnackBar(content: Text(errorMsg)),
           );
         }
       }
@@ -459,8 +467,8 @@ class _VendorWalletScreenState extends State<VendorWalletScreen> {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.black.withOpacity(0.05)),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 10, offset: const Offset(0, 4))],
+        border: Border.all(color: Colors.black.withValues(alpha: 0.05)),
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10, offset: const Offset(0, 4))],
       ),
       child: Row(
         children: [
@@ -480,7 +488,7 @@ class _VendorWalletScreenState extends State<VendorWalletScreen> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
             decoration: BoxDecoration(
-              color: statusColor.withOpacity(0.1),
+              color: statusColor.withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(8),
             ),
             child: Text(status, style: TextStyle(color: statusColor, fontSize: 11, fontWeight: FontWeight.bold)),

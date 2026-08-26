@@ -24,6 +24,7 @@ import (
 	paymentHandlers "github.com/omnigo/backend/internal/payment/handlers"
 	paymentRepo "github.com/omnigo/backend/internal/payment/repository"
 	paymentSvc "github.com/omnigo/backend/internal/payment/service"
+	payment_orchestrator "github.com/omnigo/backend/internal/payment_orchestrator"
 	"github.com/omnigo/backend/internal/product/pb"
 	ratingHandlers "github.com/omnigo/backend/internal/rating/handlers"
 	"github.com/omnigo/backend/internal/shared/cache"
@@ -129,10 +130,16 @@ func main() {
 
 	// Initialize Payment Orchestrator (loads keys from env)
 	paymentOrchestrator := paymentSvc.NewOrchestrator()
+	commissionCalculator := payment_orchestrator.NewCommissionCalculator(db.Writer)
 
 	customerWalletSvc := walletSvc.NewCustomerWalletService(db.Writer, ledgerSvc)
-	newCheckoutHandler := paymentHandlers.NewCheckoutHandler(paymentOrchestrator, customerWalletSvc)
-	webhookHandler := paymentHandlers.NewWebhookHandler(paymentOrchestrator, ledgerSvc, paymentTxnRepo)
+	newCheckoutHandler := paymentHandlers.NewCheckoutHandler(paymentOrchestrator, customerWalletSvc, repo)
+
+	var rdbForWebhook redis.UniversalClient
+	if redisClient != nil {
+		rdbForWebhook = redisClient.Client
+	}
+	webhookHandler := paymentHandlers.NewWebhookHandler(paymentOrchestrator, ledgerSvc, paymentTxnRepo, repo, commissionCalculator, db.Writer, rdbForWebhook)
 	refundHandler := paymentHandlers.NewRefundHandler(paymentOrchestrator, ledgerSvc, paymentTxnRepo, repo, svc)
 
 	// 4. Setup Router
@@ -158,24 +165,38 @@ func main() {
 
 	h.RegisterRoutes(router)
 
-	// Cart endpoints
-	router.GET("/api/v1/cart", cartHandler.GetCart)
-	router.POST("/api/v1/cart/items", cartHandler.AddItem)
-	router.PUT("/api/v1/cart/items/:product_id", cartHandler.UpdateItem)
-	router.DELETE("/api/v1/cart/items/:product_id", cartHandler.RemoveItem)
-	router.DELETE("/api/v1/cart", cartHandler.ClearCart)
+	// Cart endpoints (JWT-protected; handlers read tracking_id from context)
+	cartGroup := router.Group("/api/v1/cart", middleware.JWTAuth())
+	{
+		cartGroup.GET("", cartHandler.GetCart)
+		cartGroup.POST("/items", cartHandler.AddItem)
+		cartGroup.PUT("/items/:product_id", cartHandler.UpdateItem)
+		cartGroup.DELETE("/items/:product_id", cartHandler.RemoveItem)
+		cartGroup.DELETE("", cartHandler.ClearCart)
+	}
 
-	// Register Checkout, Webhook, Refund and Cancellation endpoints
-	router.POST("/api/v1/payment/checkout", newCheckoutHandler.CreateCheckout)
+	// Register Checkout, Webhook, Refund and Cancellation endpoints.
+	// Checkout is JWT-protected so wallet deductions are tied to the
+	// authenticated customer, never a body-supplied ID. Webhooks stay public
+	// (gateway callbacks verify signatures in-handler).
+	router.POST("/api/v1/payment/checkout", middleware.JWTAuth(), newCheckoutHandler.CreateCheckout)
 	router.POST("/api/v1/payment/webhook/:gateway", webhookHandler.HandleWebhook)
 	refundHandler.RegisterRefundRoutes(router)
 
 	// Register mobile wallet endpoints (JazzCash/EasyPaisa scaffolding)
+	var rdbForWallet redis.UniversalClient
+	if redisClient != nil {
+		rdbForWallet = redisClient.Client
+	}
 	walletH := walletHandler.NewWalletHandler().
 		WithRiderWallet(walletSvc.NewRiderWalletService(db.Writer)).
 		WithCustomerWallet(customerWalletSvc).
 		WithOrderService(svc).
-		WithKafka(kafkaClient)
+		WithKafka(kafkaClient).
+		WithRedis(rdbForWallet)
+	if rdbForWallet == nil {
+		log.Println("Warning: wallet top-up callbacks are DISABLED without redis (pending-load verification unavailable)")
+	}
 	walletH.RegisterRoutes(router)
 
 	// Register Ratings endpoints (POST /api/v1/ratings/, GET /api/v1/ratings/:tracking_id)
@@ -202,7 +223,7 @@ func main() {
 
 	// 5. Start Server with Graceful Shutdown
 	srv := &http.Server{
-		Addr:    fmt.Sprintf("127.0.0.1:%d", cfg.Port), // Service runs on 9005
+		Addr:    fmt.Sprintf("%s:%d", config.BindHost(), cfg.Port), // Service runs on 9005
 		Handler: router,
 	}
 
@@ -213,17 +234,18 @@ func main() {
 		}
 	}()
 
-	// Start Outbox Poller
+	// Outbox Poller
 	pollerCtx, pollerCancel := context.WithCancel(context.Background())
 	go svc.StartOutboxPoller(pollerCtx)
 
-	// Start 48-hour Escrow Release Cron Job
-	escrowCronSvc := service.NewEscrowCronService(db.Writer, ledgerSvc, 0.10) // 10% commission
-	go escrowCronSvc.Start(pollerCtx, 1*time.Hour)                            // Run every hour
+	// Note: Escrow releases are centrally handled by payment_orchestrator's
+	// EscrowReleaserWorker (with dispute checks and single commission deduction).
+	// Duplicate escrowCronSvc has been decommissioned to prevent double deductions.
 
 	// Start Delivery Status Consumer — syncs delivery events to order status
 	if kafkaClient != nil {
 		go startDeliveryStatusConsumer(ctx, cfg.KafkaBrokers, repo)
+		go startGigAcceptedConsumer(ctx, cfg.KafkaBrokers, repo)
 	}
 
 	// Wait for interrupt signal to gracefully shutdown
@@ -307,6 +329,53 @@ func startDeliveryStatusConsumer(ctx context.Context, brokers []string, repo *re
 				continue
 			}
 			log.Printf("Order %s status updated to %s (from delivery event)", event.OrderTrackingID, orderStatus)
+		}
+	}
+}
+
+// startGigAcceptedConsumer listens to deliveries.accepted and moves the order
+// from pending/paid to accepted as soon as a rider claims the gig. Without
+// this consumer the order sat in pending until pickup, skipping the accepted
+// step in the customer-facing timeline and breaking RecordVendorHandover
+// (which requires status IN ('accepted','shipped','in_transit')).
+func startGigAcceptedConsumer(ctx context.Context, brokers []string, repo *repository.OrderRepository) {
+	consumer, err := kgo.NewClient(
+		kgo.SeedBrokers(brokers...),
+		kgo.ConsumerGroup("order-service-gig-accepted"),
+		kgo.ConsumeTopics("deliveries.accepted"),
+	)
+	if err != nil {
+		log.Printf("Warning: Failed to create gig accepted consumer: %v", err)
+		return
+	}
+	defer consumer.Close()
+
+	log.Println("Gig accepted consumer started — listening to deliveries.accepted")
+
+	for {
+		fetches := consumer.PollFetches(ctx)
+		if fetches.IsClientClosed() {
+			return
+		}
+		iter := fetches.RecordIter()
+		for !iter.Done() {
+			record := iter.Next()
+			var event struct {
+				OrderTrackingID string `json:"order_tracking_id"`
+				Status          string `json:"status"`
+			}
+			if err := json.Unmarshal(record.Value, &event); err != nil {
+				log.Printf("Failed to unmarshal gig accepted event: %v", err)
+				continue
+			}
+			if event.OrderTrackingID == "" {
+				continue
+			}
+			if err := repo.UpdateOrderStatus(ctx, event.OrderTrackingID, "accepted"); err != nil {
+				log.Printf("Failed to update order %s status to accepted: %v", event.OrderTrackingID, err)
+				continue
+			}
+			log.Printf("Order %s status updated to accepted (from gig accept)", event.OrderTrackingID)
 		}
 	}
 }

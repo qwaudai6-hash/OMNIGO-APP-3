@@ -1,12 +1,14 @@
 package handlers
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/omnigo/backend/internal/ledger"
+	middleware "github.com/omnigo/backend/internal/shared/middleware"
 	"github.com/omnigo/backend/internal/order/repository"
 	orderSvc "github.com/omnigo/backend/internal/order/service"
 	paymentRepo "github.com/omnigo/backend/internal/payment/repository"
@@ -55,10 +57,15 @@ func (h *RefundHandler) ProcessRefund(c *gin.Context) {
 		return
 	}
 
-	order, err := h.orderRepo.GetOrderByTrackingID(c.Request.Context(), req.OrderID)
+	resp, code, _ := h.executeRefund(c.Request.Context(), req)
+	c.JSON(code, resp)
+}
+
+// executeRefund encapsulates the core refund business logic independently of gin.Context.
+func (h *RefundHandler) executeRefund(ctx context.Context, req RefundRequest) (gin.H, int, error) {
+	order, err := h.orderRepo.GetOrderByTrackingID(ctx, req.OrderID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
-		return
+		return gin.H{"error": "order not found"}, http.StatusNotFound, err
 	}
 
 	refundAmount := req.Amount
@@ -68,12 +75,11 @@ func (h *RefundHandler) ProcessRefund(c *gin.Context) {
 
 	// Idempotency: one successful refund per order for now.
 	idempotencyKey := fmt.Sprintf("refund:%s", req.OrderID)
-	if existing, err := h.txnRepo.GetByIDempotencyKey(c.Request.Context(), idempotencyKey); err == nil && existing != nil {
-		c.JSON(http.StatusOK, gin.H{
+	if existing, err := h.txnRepo.GetByIDempotencyKey(ctx, idempotencyKey); err == nil && existing != nil {
+		return gin.H{
 			"status":         "already_processed",
 			"transaction_id": existing.TransactionID,
-		})
-		return
+		}, http.StatusOK, nil
 	}
 
 	gateway := order.PaymentGateway
@@ -83,16 +89,19 @@ func (h *RefundHandler) ProcessRefund(c *gin.Context) {
 
 	var gatewayTxnID string
 	// Look up the captured payment transaction to get the gateway reference.
-	if paymentTxn, err := h.txnRepo.GetByOrderID(c.Request.Context(), req.OrderID, paymentRepo.KindPayment); err == nil && paymentTxn != nil {
+	if paymentTxn, err := h.txnRepo.GetByOrderID(ctx, req.OrderID, paymentRepo.KindPayment); err == nil && paymentTxn != nil {
 		gatewayTxnID = paymentTxn.GatewayTxnID
+		
+		if paymentTxn.Amount > 0 && refundAmount > paymentTxn.Amount {
+			refundAmount = paymentTxn.Amount
+		}
 	}
 
 	// Call gateway refund for online payments. COD is handled as a reversal.
 	if gateway != "cod" && gateway != "wallet" {
 		if h.orchestrator != nil {
-			if err := h.orchestrator.Refund(c.Request.Context(), gateway, gatewayTxnID, refundAmount); err != nil {
-				c.JSON(http.StatusBadGateway, gin.H{"error": "gateway refund failed: " + err.Error()})
-				return
+			if err := h.orchestrator.Refund(ctx, gateway, gatewayTxnID, refundAmount); err != nil {
+				return gin.H{"error": "gateway refund failed: " + err.Error()}, http.StatusBadGateway, err
 			}
 		}
 	}
@@ -113,9 +122,8 @@ func (h *RefundHandler) ProcessRefund(c *gin.Context) {
 			"refund_to":    req.RefundTo,
 		},
 	}
-	if _, err := h.txnRepo.Create(c.Request.Context(), txn); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record refund transaction: " + err.Error()})
-		return
+	if _, err := h.txnRepo.Create(ctx, txn); err != nil {
+		return gin.H{"error": "failed to record refund transaction: " + err.Error()}, http.StatusInternalServerError, err
 	}
 
 	// Ledger movement: central_escrow / gateway_clearing → customer_refund_account
@@ -124,7 +132,7 @@ func (h *RefundHandler) ProcessRefund(c *gin.Context) {
 		creditAccount = ledger.AccountCustomerWallet
 	}
 
-	_, err = h.ledgerSvc.Transfer(c.Request.Context(), ledger.TransferRequest{
+	_, err = h.ledgerSvc.Transfer(ctx, ledger.TransferRequest{
 		DebitAccount:   ledger.AccountCentralEscrow,
 		CreditAccount:  creditAccount,
 		Amount:         refundAmount,
@@ -135,36 +143,33 @@ func (h *RefundHandler) ProcessRefund(c *gin.Context) {
 		IdempotencyKey: idempotencyKey,
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "ledger refund transfer failed: " + err.Error()})
-		return
+		return gin.H{"error": "ledger refund transfer failed: " + err.Error()}, http.StatusInternalServerError, err
 	}
 
 	// Release reserved stock before finalising refund.
 	if h.orderSvc != nil {
-		if err := h.orderSvc.ReleaseStockForOrder(c.Request.Context(), order); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "refund recorded but stock release failed: " + err.Error()})
-			return
+		if err := h.orderSvc.ReleaseStockForOrder(ctx, order); err != nil {
+			return gin.H{"error": "refund recorded but stock release failed: " + err.Error()}, http.StatusInternalServerError, err
 		}
 	}
 
 	// Update order status to refunded via order repo.
-	if err := h.orderRepo.UpdateOrderStatus(c.Request.Context(), req.OrderID, "refunded"); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "refund recorded but order status update failed: " + err.Error()})
-		return
+	if err := h.orderRepo.UpdateOrderStatus(ctx, req.OrderID, "refunded"); err != nil {
+		return gin.H{"error": "refund recorded but order status update failed: " + err.Error()}, http.StatusInternalServerError, err
 	}
 
 	// Notify dependent services (notification, SMS, email) of the refund.
 	if h.orderSvc != nil {
-		h.orderSvc.EmitRefundEvent(c.Request.Context(), req.OrderID, req.Reason, refundAmount, order.Currency)
+		h.orderSvc.EmitRefundEvent(ctx, req.OrderID, req.Reason, refundAmount, order.Currency)
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	return gin.H{
 		"status":         "refunded",
-		"transaction_id": txn.TransactionID,
 		"order_id":       req.OrderID,
 		"amount":         refundAmount,
 		"currency":       order.Currency,
-	})
+		"transaction_id": txn.TransactionID,
+	}, http.StatusOK, nil
 }
 
 // ProcessCancellation handles POST /api/v1/finance/cancel.
@@ -223,7 +228,7 @@ func (h *RefundHandler) ProcessCancellation(c *gin.Context) {
 		// If paid, issue refund. If still pending, record a reversal instead.
 		paymentTxn, _ := h.txnRepo.GetByOrderID(c.Request.Context(), req.OrderID, paymentRepo.KindPayment)
 		if paymentTxn != nil && paymentTxn.Status == paymentRepo.TxnCaptured {
-			// Delegate to gateway refund logic.
+			// Delegate directly to executeRefund without re-binding the HTTP request body.
 			refundReq := RefundRequest{
 				OrderID:     req.OrderID,
 				Reason:      req.Reason,
@@ -231,9 +236,8 @@ func (h *RefundHandler) ProcessCancellation(c *gin.Context) {
 				RefundTo:    "original",
 				RequestedBy: "system_cancellation",
 			}
-			// Reuse ProcessRefund by mutating the request context.
-			c.Set("_cancel_redirect", refundReq)
-			h.ProcessRefund(c)
+			resp, code, _ := h.executeRefund(c.Request.Context(), refundReq)
+			c.JSON(code, resp)
 			return
 		}
 
@@ -306,9 +310,10 @@ func (h *RefundHandler) GetRefundStatus(c *gin.Context) {
 	})
 }
 
-// RegisterRefundRoutes attaches finance endpoints.
+// RegisterRefundRoutes attaches finance endpoints. These move real money, so
+// they require an authenticated admin (or internal service) — never public.
 func (h *RefundHandler) RegisterRefundRoutes(router *gin.Engine) {
-	finance := router.Group("/api/v1/finance")
+	finance := router.Group("/api/v1/finance", middleware.JWTAuth(), middleware.RoleRequired("admin"))
 	{
 		finance.POST("/refund", h.ProcessRefund)
 		finance.POST("/cancel", h.ProcessCancellation)

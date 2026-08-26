@@ -1,0 +1,119 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omnigo-postgres
+  namespace: omnigo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: omnigo-postgres
+  template:
+    metadata:
+      labels:
+        app: omnigo-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15-alpine
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: omnigo-secrets
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: pgdata
+          persistentVolumeClaim:
+            claimName: omnigo-postgres-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: omnigo-postgres
+  namespace: omnigo
+spec:
+  ports:
+    - port: 5432
+      targetPort: 5432
+  selector:
+    app: omnigo-postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omnigo-redis
+  namespace: omnigo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: omnigo-redis
+  template:
+    metadata:
+      labels:
+        app: omnigo-redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.0-alpine
+          ports:
+            - containerPort: 6379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: omnigo-redis
+  namespace: omnigo
+spec:
+  ports:
+    - port: 6379
+      targetPort: 6379
+  selector:
+    app: omnigo-redis
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omnigo-tigerbeetle
+  namespace: omnigo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: omnigo-tigerbeetle
+  template:
+    metadata:
+      labels:
+        app: omnigo-tigerbeetle
+    spec:
+      containers:
+        - name: tigerbeetle
+          image: ghcr.io/tigerbeetle/tigerbeetle:latest
+          command:
+            - "sh"
+            - "-c"
+            - "if [ ! -f /data/0_0.tigerbeetle ]; then ./tigerbeetle format --cluster=0 --replica=0 --replica-count=1 /data/0_0.tigerbeetle; fi && ./tigerbeetle start --addresses=0.0.0.0:3000 /data/0_0.tigerbeetle"
+          ports:
+            - containerPort: 3000
+          volumeMounts:
+            - name: tbdata
+              mountPath: /data
+      volumes:
+        - name: tbdata
+          persistentVolumeClaim:
+            claimName: omnigo-tigerbeetle-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: omnigo-tigerbeetle
+  namespace: omnigo
+spec:
+  ports:
+    - port: 3000
+      targetPort: 3000
+  selector:
+    app: omnigo-tigerbeetle

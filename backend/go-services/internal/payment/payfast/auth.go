@@ -93,8 +93,17 @@ func (tm *TokenManager) fetchToken(ctx context.Context) (string, string, error) 
 		return "", "", ErrNotConfigured
 	}
 
-	// Official API endpoint: /token
+	// Official API endpoint: /token or /Transaction/GetAccessToken (APPS net.pk IPG)
 	authURL := tm.baseURL + "/token"
+	if strings.Contains(tm.baseURL, "apps.net.pk") {
+		if strings.HasSuffix(tm.baseURL, "/GetAccessToken") {
+			authURL = tm.baseURL
+		} else if strings.HasSuffix(tm.baseURL, "/Transaction") {
+			authURL = tm.baseURL + "/GetAccessToken"
+		} else {
+			authURL = tm.baseURL + "/Transaction/GetAccessToken"
+		}
+	}
 	formData := url.Values{}
 	formData.Set("merchant_id", tm.merchantID)
 	formData.Set("grant_type", "client_credentials")
@@ -156,15 +165,15 @@ func (tm *TokenManager) fetchToken(ctx context.Context) (string, string, error) 
 	}
 
 	var res AuthTokenResponse
-	if err := json.Unmarshal(body, &res); err == nil && res.Token != "" {
-		if res.Code != "" && res.Code != "00" {
+	if err := json.Unmarshal(body, &res); err == nil && res.GetToken() != "" {
+		if res.Code != "" && !IsSuccessCode(res.Code) {
 			return "", "", &GatewayError{
 				StatusCode: resp.StatusCode,
 				Message:    "Authentication rejected by gateway",
 				StatusMsg:  fmt.Sprintf("code=%s msg=%s", res.Code, res.Message),
 			}
 		}
-		return res.Token, res.ExpiresIn, nil
+		return res.GetToken(), res.ExpiresIn, nil
 	}
 
 	return "", "", ErrAuthFailed

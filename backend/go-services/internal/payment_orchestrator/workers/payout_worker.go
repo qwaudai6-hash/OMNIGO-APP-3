@@ -61,7 +61,7 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 	}
 	// 1. Find all vendors with released escrow holds
 	rows, err := w.db.Query(ctx,
-		`SELECT vendor_tracking_id, SUM(amount) as total_released
+		`SELECT vendor_tracking_id, COALESCE(SUM(amount), 0)::float8 as total_released
 		 FROM escrow_holds
 		 WHERE status = 'released'
 		 GROUP BY vendor_tracking_id`,
@@ -116,54 +116,127 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 			continue
 		}
 
-		// 3. Create vendor_payouts record
-		payoutID := uuid.New()
-		_, err = w.db.Exec(ctx,
-			`INSERT INTO vendor_payouts (id, vendor_tracking_id, amount, status, batch_id)
-			 VALUES ($1, $2, $3, 'pending_disbursement', $4)`,
-			payoutID, vendorID, totalReleased, batchID,
-		)
+		// 3. Process payout inside an atomic database transaction
+		tx, err := w.db.Begin(ctx)
 		if err != nil {
-			fmt.Printf("[PayoutWorker] Error creating payout for %s: %v\n", vendorID, err)
+			fmt.Printf("[PayoutWorker] Error starting transaction for %s: %v\n", vendorID, err)
 			continue
 		}
 
+		// Calculate the exact amount to be paid out inside transaction and lock the escrow holds
+		var totalReleasedInTx float64
+		err = tx.QueryRow(ctx,
+			`SELECT COALESCE(SUM(amount), 0)::float8
+			 FROM escrow_holds
+			 WHERE vendor_tracking_id = $1 AND status = 'released'
+			 FOR UPDATE`,
+			vendorID,
+		).Scan(&totalReleasedInTx)
+		if err != nil || totalReleasedInTx <= 0 {
+			tx.Rollback(ctx)
+			continue
+		}
+
+		// DOUBLE-SPEND GUARD: the vendor may have already withdrawn part or
+		// all of this balance via POST /payments/vendor/withdraw, which
+		// debits vendor_wallet.balance immediately. Only sweep what is still
+		// actually present in the wallet — never drive the balance negative
+		// or pay out the same money twice. Holds always progress to
+		// 'paid_out' so they are not re-swept on the next tick.
+		var walletBalance float64
+		err = tx.QueryRow(ctx,
+			`SELECT COALESCE(balance, 0)::float8 FROM vendor_wallet WHERE vendor_tracking_id = $1 FOR UPDATE`,
+			vendorID,
+		).Scan(&walletBalance)
+		if err != nil {
+			walletBalance = 0 // no wallet row = nothing withdrawable
+		}
+		sweepAmount := totalReleasedInTx
+		if sweepAmount > walletBalance {
+			sweepAmount = walletBalance
+			if sweepAmount < 0 {
+				sweepAmount = 0
+			}
+			fmt.Printf("[PayoutWorker] Vendor %s: released %.2f but wallet only has %.2f (manual withdrawal already debited) — sweeping %.2f\n",
+				vendorID, totalReleasedInTx, walletBalance, sweepAmount)
+		}
+
+		payoutID := uuid.New()
+		if sweepAmount > 0 {
+			_, err = tx.Exec(ctx,
+				`INSERT INTO vendor_payouts (id, vendor_tracking_id, amount, status, batch_id)
+				 VALUES ($1, $2, $3, 'pending_disbursement', $4)`,
+				payoutID, vendorID, sweepAmount, batchID,
+			)
+			if err != nil {
+				tx.Rollback(ctx)
+				fmt.Printf("[PayoutWorker] Error creating payout for %s: %v\n", vendorID, err)
+				continue
+			}
+		} else {
+			payoutID = uuid.Nil // fully withdrawn manually — reconciliation-only tick
+		}
+
 		// Mark the processed escrow holds as 'paid_out' to prevent duplicate payouts in future hourly ticks
-		_, err = w.db.Exec(ctx,
+		_, err = tx.Exec(ctx,
 			`UPDATE escrow_holds SET status = 'paid_out' WHERE vendor_tracking_id = $1 AND status = 'released'`,
 			vendorID,
 		)
 		if err != nil {
+			tx.Rollback(ctx)
 			fmt.Printf("[PayoutWorker] Error marking escrow holds as paid_out for %s: %v\n", vendorID, err)
 			continue
 		}
 
-		// 4. Execute ledger transfer: vendor_withdrawable → vendor's external account
+		// 4. Update vendor_wallet in the same transaction (only the swept amount)
+		if sweepAmount > 0 {
+			_, err = tx.Exec(ctx,
+				`UPDATE vendor_wallet
+				 SET total_payouts = total_payouts + $2, balance = balance - $2, updated_at = NOW()
+				 WHERE vendor_tracking_id = $1`,
+				vendorID, sweepAmount,
+			)
+			if err != nil {
+				tx.Rollback(ctx)
+				fmt.Printf("[PayoutWorker] Error updating vendor wallet for %s: %v\n", vendorID, err)
+				continue
+			}
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			fmt.Printf("[PayoutWorker] Error committing payout transaction for %s: %v\n", vendorID, err)
+			continue
+		}
+
+		if sweepAmount == 0 {
+			fmt.Printf("[PayoutWorker] Vendor %s: %.2f released escrow reconciled (already paid out via manual withdrawal)\n",
+				vendorID, totalReleasedInTx)
+			continue
+		}
+
+		// 5. Execute ledger transfer: vendor_withdrawable → vendor's external account
 		idempotencyKey := fmt.Sprintf("payout:%s:%s", payoutID, vendorID)
 		_, err = w.ledger.Transfer(ctx, ledger.TransferRequest{
 			DebitAccount:   ledger.AccountVendorWithdrawable,
 			CreditAccount:  ledger.AccountVendorBankPayout,
-			Amount:         totalReleased,
+			Amount:         sweepAmount,
 			ReferenceType:  "vendor_payout",
 			ReferenceID:    vendorID,
 			Description:    fmt.Sprintf("Vendor payout for %s — batch %s", vendorID, batchID),
 			IdempotencyKey: idempotencyKey,
 		})
 		if err != nil {
-			fmt.Printf("[PayoutWorker] Ledger transfer failed for %s: %v\n", vendorID, err)
+			// DB says paid but the double-entry ledger does not — surface it
+			// on the payout row so finance can reconcile instead of silently
+			// diverging from TigerBeetle.
+			fmt.Printf("[PayoutWorker] Warning: Ledger transfer failed for %s: %v\n", vendorID, err)
+			if _, uerr := w.db.Exec(ctx,
+				`UPDATE vendor_payouts SET status = 'ledger_failed', updated_at = NOW() WHERE id = $1`,
+				payoutID,
+			); uerr != nil {
+				fmt.Printf("[PayoutWorker] CRITICAL: failed to flag payout %s as ledger_failed: %v\n", payoutID, uerr)
+			}
 			continue
-		}
-
-		// 5. Update vendor_wallet
-		_, err = w.db.Exec(ctx,
-			`INSERT INTO vendor_wallet (vendor_tracking_id, balance, lifetime_earnings, total_payouts)
-			 VALUES ($1, 0, 0, $2)
-			 ON CONFLICT (vendor_tracking_id)
-			 DO UPDATE SET total_payouts = vendor_wallet.total_payouts + $2, balance = vendor_wallet.balance - $2`,
-			vendorID, totalReleased,
-		)
-		if err != nil {
-			fmt.Printf("[PayoutWorker] Error updating vendor wallet for %s: %v\n", vendorID, err)
 		}
 
 		payoutsCreated++
@@ -174,7 +247,7 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 		}
 
 		fmt.Printf("[PayoutWorker] Paid out %.2f %s to vendor %s (batch %s)\n",
-			totalReleased, currency, vendorID, batchID)
+			sweepAmount, currency, vendorID, batchID)
 	}
 
 	if payoutsCreated > 0 {

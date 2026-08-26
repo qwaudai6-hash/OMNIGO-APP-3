@@ -16,6 +16,10 @@ class _AdminFinanceScreenState extends State<AdminFinanceScreen> {
   Map<String, dynamic>? _kpis;
   List<dynamic> _payments = [];
   List<dynamic> _dailyRevenue = [];
+  Map<String, dynamic>? _payfastSummary;
+  List<dynamic> _payfastTransactions = [];
+  String _payfastFilter = 'all';
+  int _selectedFinanceTab = 0; // 0: TigerBeetle Ledger & GMV, 1: PayFast Gateway Transactions
   bool _isLoading = true;
 
   int _daysFilter = 7;
@@ -46,7 +50,7 @@ class _AdminFinanceScreenState extends State<AdminFinanceScreen> {
       
       // Fetch KPIs
       final kpiRes = await http.get(
-        Uri.parse('$_adminBase/finance/ledger-kpis'),
+        Uri.parse('$_adminBase/admin/finance/ledger-kpis'),
         headers: headers,
       ).timeout(const Duration(seconds: 8));
       
@@ -56,7 +60,7 @@ class _AdminFinanceScreenState extends State<AdminFinanceScreen> {
 
       // Fetch Daily Revenue for Chart
       final revenueRes = await http.get(
-        Uri.parse('$_adminBase/finance/daily-revenue?days=$_daysFilter&payment_method=$_paymentFilter'),
+        Uri.parse('$_adminBase/admin/finance/daily-revenue?days=$_daysFilter&payment_method=$_paymentFilter'),
         headers: headers,
       ).timeout(const Duration(seconds: 8));
 
@@ -66,13 +70,35 @@ class _AdminFinanceScreenState extends State<AdminFinanceScreen> {
 
       // Fetch Payments
       final payRes = await http.get(
-        Uri.parse('$_adminBase/finance/payments?limit=50'),
+        Uri.parse('$_adminBase/admin/finance/payments?limit=50'),
         headers: headers,
       ).timeout(const Duration(seconds: 8));
 
       if (payRes.statusCode == 200) {
         _payments = (jsonDecode(payRes.body) as Map<String, dynamic>)['payments'] as List<dynamic>? ?? [];
       }
+
+      // Fetch PayFast Summary
+      try {
+        final pfSummaryRes = await http.get(
+          Uri.parse(ApiEndpoints.adminPayFastSummary()),
+          headers: headers,
+        ).timeout(const Duration(seconds: 8));
+        if (pfSummaryRes.statusCode == 200) {
+          _payfastSummary = jsonDecode(pfSummaryRes.body) as Map<String, dynamic>?;
+        }
+      } catch (_) {}
+
+      // Fetch PayFast Transactions
+      try {
+        final pfTxnRes = await http.get(
+          Uri.parse(ApiEndpoints.adminPayFastTransactions(status: _payfastFilter, limit: 50)),
+          headers: headers,
+        ).timeout(const Duration(seconds: 8));
+        if (pfTxnRes.statusCode == 200) {
+          _payfastTransactions = (jsonDecode(pfTxnRes.body) as Map<String, dynamic>)['transactions'] as List<dynamic>? ?? [];
+        }
+      } catch (_) {}
       
     } catch (e) {
       if (mounted) {
@@ -104,28 +130,32 @@ class _AdminFinanceScreenState extends State<AdminFinanceScreen> {
     );
   }
 
-  Widget _buildKPICard(String title, double amount, Color color, IconData icon) {
+  Widget _buildKPICard(String title, double amount, Color color, IconData icon, {String? subtitle}) {
     return Expanded(
       child: Container(
-        padding: const EdgeInsets.all(20),
+        padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
           color: Colors.white,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: color.withOpacity(0.3)),
-          boxShadow: [BoxShadow(color: color.withOpacity(0.1), blurRadius: 10, offset: const Offset(0, 4))],
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: color.withValues(alpha: 0.3)),
+          boxShadow: [BoxShadow(color: color.withValues(alpha: 0.08), blurRadius: 8, offset: const Offset(0, 3))],
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
-                Icon(icon, color: color, size: 24),
+                Icon(icon, color: color, size: 20),
                 const SizedBox(width: 8),
-                Expanded(child: Text(title, style: TextStyle(color: Colors.grey.shade600, fontWeight: FontWeight.bold, fontSize: 13), overflow: TextOverflow.ellipsis)),
+                Expanded(child: Text(title, style: TextStyle(color: Colors.grey.shade700, fontWeight: FontWeight.bold, fontSize: 12), overflow: TextOverflow.ellipsis)),
               ],
             ),
-            const SizedBox(height: 12),
-            Text('\$${amount.toStringAsFixed(2)}', style: TextStyle(color: color, fontWeight: FontWeight.w900, fontSize: 24)),
+            const SizedBox(height: 10),
+            Text('PKR ${amount.toStringAsFixed(0)}', style: TextStyle(color: color, fontWeight: FontWeight.w900, fontSize: 18)),
+            if (subtitle != null) ...[
+              const SizedBox(height: 4),
+              Text(subtitle, style: TextStyle(color: Colors.grey.shade500, fontSize: 11, fontWeight: FontWeight.w600)),
+            ],
           ],
         ),
       ),
@@ -156,7 +186,7 @@ class _AdminFinanceScreenState extends State<AdminFinanceScreen> {
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: Colors.grey.shade300),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 10, offset: const Offset(0, 4))],
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 10, offset: const Offset(0, 4))],
       ),
       child: LineChart(
         LineChartData(
@@ -172,7 +202,7 @@ class _AdminFinanceScreenState extends State<AdminFinanceScreen> {
               barWidth: 4,
               isStrokeCapRound: true,
               dotData: const FlDotData(show: true),
-              belowBarData: BarAreaData(show: true, color: Colors.deepPurpleAccent.withOpacity(0.2)),
+              belowBarData: BarAreaData(show: true, color: Colors.deepPurpleAccent.withValues(alpha: 0.2)),
             ),
           ],
           titlesData: FlTitlesData(
@@ -207,7 +237,7 @@ class _AdminFinanceScreenState extends State<AdminFinanceScreen> {
                 return touchedSpots.map((spot) {
                   final rev = _dailyRevenue[spot.x.toInt()];
                   return LineTooltipItem(
-                    '\$${spot.y.toStringAsFixed(2)}\n${rev['order_count']} orders',
+                    'PKR ${spot.y.toStringAsFixed(2)}\n${rev['order_count']} orders',
                     const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
                   );
                 }).toList();
@@ -252,105 +282,297 @@ class _AdminFinanceScreenState extends State<AdminFinanceScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text('Global Ledger (TigerBeetle)', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: Colors.black87)),
+                        // Tab Selector
+                        Container(
+                          margin: const EdgeInsets.only(bottom: 16),
+                          decoration: BoxDecoration(
+                            color: Colors.grey.shade200,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: GestureDetector(
+                                  onTap: () => setState(() => _selectedFinanceTab = 0),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(vertical: 12),
+                                    decoration: BoxDecoration(
+                                      color: _selectedFinanceTab == 0 ? Colors.black87 : Colors.transparent,
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    alignment: Alignment.center,
+                                    child: Text(
+                                      'Ledger & GMV',
+                                      style: TextStyle(
+                                        color: _selectedFinanceTab == 0 ? Colors.white : Colors.black87,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              Expanded(
+                                child: GestureDetector(
+                                  onTap: () => setState(() => _selectedFinanceTab = 1),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(vertical: 12),
+                                    decoration: BoxDecoration(
+                                      color: _selectedFinanceTab == 1 ? Colors.deepOrange : Colors.transparent,
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    alignment: Alignment.center,
+                                    child: Text(
+                                      'PayFast Gateway Hub',
+                                      style: TextStyle(
+                                        color: _selectedFinanceTab == 1 ? Colors.white : Colors.black87,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+
+                        // PayFast Realtime Status Banner (Always Visible)
+                        const Text('PayFast Gateway Live Analytics', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: Colors.black87)),
                         const SizedBox(height: 12),
                         Row(
                           children: [
-                            _buildKPICard('Platform Revenue', (_kpis?['admin_revenue'] as num?)?.toDouble() ?? 0.0, Colors.green, Icons.account_balance),
+                            _buildKPICard('Passed / Captured', (_payfastSummary?['passed_volume'] as num?)?.toDouble() ?? 0.0, Colors.green, Icons.check_circle, subtitle: '${_payfastSummary?['passed_count'] ?? 0} txns'),
                             const SizedBox(width: 12),
-                            _buildKPICard('Pending Escrow', (_kpis?['central_escrow'] as num?)?.toDouble() ?? 0.0, Colors.orange, Icons.lock_clock),
+                            _buildKPICard('Failed Payments', (_payfastSummary?['failed_volume'] as num?)?.toDouble() ?? 0.0, Colors.redAccent, Icons.cancel, subtitle: '${_payfastSummary?['failed_count'] ?? 0} txns'),
                             const SizedBox(width: 12),
-                            _buildKPICard('Rider Cash Float', (_kpis?['rider_cash_debt'] as num?)?.toDouble() ?? 0.0, Colors.redAccent, Icons.money_off),
+                            _buildKPICard('In-Flight / Script', (_payfastSummary?['in_flight_volume'] as num?)?.toDouble() ?? 0.0, Colors.amber.shade800, Icons.hourglass_top, subtitle: '${_payfastSummary?['in_flight_count'] ?? 0} txns'),
                           ],
                         ),
                         const SizedBox(height: 24),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            const Text('Historical GMV', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: Colors.black87)),
-                            Row(
-                              children: [
-                                DropdownButton<int>(
-                                  value: _daysFilter,
-                                  underline: const SizedBox(),
-                                  icon: const Icon(Icons.calendar_today, size: 16),
-                                  items: const [
-                                    DropdownMenuItem(value: 7, child: Text('7 Days')),
-                                    DropdownMenuItem(value: 30, child: Text('30 Days')),
-                                  ],
-                                  onChanged: (val) {
-                                    if (val != null) {
-                                      setState(() => _daysFilter = val);
-                                      _fetchFinanceData();
-                                    }
-                                  },
-                                ),
-                                const SizedBox(width: 16),
-                                DropdownButton<String>(
-                                  value: _paymentFilter,
-                                  underline: const SizedBox(),
-                                  icon: const Icon(Icons.filter_list, size: 16),
-                                  items: const [
-                                    DropdownMenuItem(value: 'all', child: Text('All Methods')),
-                                    DropdownMenuItem(value: 'cod', child: Text('Cash on Delivery')),
-                                    DropdownMenuItem(value: 'card', child: Text('Credit Card')),
-                                  ],
-                                  onChanged: (val) {
-                                    if (val != null) {
-                                      setState(() => _paymentFilter = val);
-                                      _fetchFinanceData();
-                                    }
-                                  },
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 12),
-                        _buildRevenueChart(),
-                        const SizedBox(height: 24),
-                        const Text('Recent Payments', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: Colors.black87)),
-                        const SizedBox(height: 12),
+
+                        if (_selectedFinanceTab == 0) ...[
+                          const Text('Global Ledger (TigerBeetle)', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: Colors.black87)),
+                          const SizedBox(height: 12),
+                          Row(
+                            children: [
+                              _buildKPICard('Platform Revenue', (_kpis?['admin_revenue'] as num?)?.toDouble() ?? 0.0, Colors.green, Icons.account_balance),
+                              const SizedBox(width: 12),
+                              _buildKPICard('Pending Escrow', (_kpis?['central_escrow'] as num?)?.toDouble() ?? 0.0, Colors.orange, Icons.lock_clock),
+                              const SizedBox(width: 12),
+                              _buildKPICard('Rider Cash Float', (_kpis?['rider_cash_debt'] as num?)?.toDouble() ?? 0.0, Colors.redAccent, Icons.money_off),
+                            ],
+                          ),
+                          const SizedBox(height: 24),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text('Historical GMV', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: Colors.black87)),
+                              Row(
+                                children: [
+                                  DropdownButton<int>(
+                                    value: _daysFilter,
+                                    underline: const SizedBox(),
+                                    icon: const Icon(Icons.calendar_today, size: 16),
+                                    items: const [
+                                      DropdownMenuItem(value: 7, child: Text('7 Days')),
+                                      DropdownMenuItem(value: 30, child: Text('30 Days')),
+                                    ],
+                                    onChanged: (val) {
+                                      if (val != null) {
+                                        setState(() => _daysFilter = val);
+                                        _fetchFinanceData();
+                                      }
+                                    },
+                                  ),
+                                  const SizedBox(width: 16),
+                                  DropdownButton<String>(
+                                    value: _paymentFilter,
+                                    underline: const SizedBox(),
+                                    icon: const Icon(Icons.filter_list, size: 16),
+                                    items: const [
+                                      DropdownMenuItem(value: 'all', child: Text('All Methods')),
+                                      DropdownMenuItem(value: 'cod', child: Text('Cash on Delivery')),
+                                      DropdownMenuItem(value: 'card', child: Text('Credit Card')),
+                                    ],
+                                    onChanged: (val) {
+                                      if (val != null) {
+                                        setState(() => _paymentFilter = val);
+                                        _fetchFinanceData();
+                                      }
+                                    },
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                          _buildRevenueChart(),
+                          const SizedBox(height: 24),
+                          const Text('Recent Orders & Payments', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: Colors.black87)),
+                          const SizedBox(height: 12),
+                        ] else ...[
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text('PayFast Transactions', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: Colors.black87)),
+                              DropdownButton<String>(
+                                value: _payfastFilter,
+                                underline: const SizedBox(),
+                                icon: const Icon(Icons.filter_list, size: 16),
+                                items: const [
+                                  DropdownMenuItem(value: 'all', child: Text('All Transactions')),
+                                  DropdownMenuItem(value: 'captured', child: Text('Passed (Captured)')),
+                                  DropdownMenuItem(value: 'failed', child: Text('Failed')),
+                                  DropdownMenuItem(value: 'in_flight', child: Text('In-Flight (Script/3DS)')),
+                                ],
+                                onChanged: (val) {
+                                  if (val != null) {
+                                    setState(() => _payfastFilter = val);
+                                    _fetchFinanceData();
+                                  }
+                                },
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                        ],
                       ],
                     ),
                   ),
-                  SliverList(
-                    delegate: SliverChildBuilderDelegate(
-                      (context, index) {
-                        final pay = _payments[index];
-                        final status = (pay['payment_status'] as String?) ?? 'unknown';
-                        final method = (pay['payment_method'] as String?) ?? 'unknown';
-                        final amount = (pay['total_amount'] as num?)?.toDouble() ?? 0.0;
-                        final isCompleted = status == 'completed';
 
-                        return Container(
-                          margin: const EdgeInsets.only(bottom: 8),
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: Colors.grey.shade200),
-                          ),
-                          child: ListTile(
-                            leading: CircleAvatar(
-                              backgroundColor: isCompleted ? Colors.green.shade100 : Colors.orange.shade100,
-                              child: Icon(isCompleted ? Icons.check_circle : Icons.pending, color: isCompleted ? Colors.green : Colors.orange),
+                  // If Tab 0 -> Order payments list
+                  if (_selectedFinanceTab == 0)
+                    SliverList(
+                      delegate: SliverChildBuilderDelegate(
+                        (context, index) {
+                          final pay = _payments[index];
+                          final status = (pay['payment_status'] as String?) ?? 'unknown';
+                          final method = (pay['payment_method'] as String?) ?? 'unknown';
+                          final amount = (pay['total_amount'] as num?)?.toDouble() ?? 0.0;
+                          final isCompleted = status == 'completed';
+
+                          return Container(
+                            margin: const EdgeInsets.only(bottom: 8),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.grey.shade200),
                             ),
-                            title: Text((pay['customer_name'] as String?) ?? 'N/A', style: const TextStyle(fontWeight: FontWeight.bold)),
-                            subtitle: Text('Order: ${(pay['order_id'] as String?) ?? 'N/A'} • ${method.toUpperCase()}'),
-                            trailing: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              crossAxisAlignment: CrossAxisAlignment.end,
-                              children: [
-                                Text('\$${amount.toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-                                Text(status.toUpperCase(), style: TextStyle(color: isCompleted ? Colors.green : Colors.orange, fontSize: 10, fontWeight: FontWeight.bold)),
-                              ],
+                            child: ListTile(
+                              leading: CircleAvatar(
+                                backgroundColor: isCompleted ? Colors.green.shade100 : Colors.orange.shade100,
+                                child: Icon(isCompleted ? Icons.check_circle : Icons.pending, color: isCompleted ? Colors.green : Colors.orange),
+                              ),
+                              title: Text((pay['customer_name'] as String?) ?? 'N/A', style: const TextStyle(fontWeight: FontWeight.bold)),
+                              subtitle: Text('Order: ${(pay['order_id'] as String?) ?? 'N/A'} • ${method.toUpperCase()}'),
+                              trailing: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                crossAxisAlignment: CrossAxisAlignment.end,
+                                children: [
+                                  Text('PKR ${amount.toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                                  Text(status.toUpperCase(), style: TextStyle(color: isCompleted ? Colors.green : Colors.orange, fontSize: 10, fontWeight: FontWeight.bold)),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                        childCount: _payments.length,
+                      ),
+                    )
+                  else
+                    // Tab 1 -> PayFast Detailed Gateway Transactions
+                    _payfastTransactions.isEmpty
+                        ? const SliverToBoxAdapter(
+                            child: Padding(
+                              padding: EdgeInsets.all(32.0),
+                              child: Center(child: Text('No PayFast transactions found for this filter.', style: TextStyle(color: Colors.grey))),
+                            ),
+                          )
+                        : SliverList(
+                            delegate: SliverChildBuilderDelegate(
+                              (context, index) {
+                                final txn = _payfastTransactions[index];
+                                final status = (txn['status'] as String?) ?? 'unknown';
+                                final amount = (txn['amount'] as num?)?.toDouble() ?? 0.0;
+                                final orderId = (txn['order_id'] as String?) ?? 'N/A';
+                                final gatewayTxnId = (txn['gateway_txn_id'] as String?) ?? '';
+                                final errorMsg = (txn['error_message'] as String?) ?? '';
+                                final customerName = (txn['customer_name'] as String?) ?? 'Customer';
+                                final createdAt = (txn['created_at'] as String?) ?? '';
+
+                                Color statusColor = Colors.grey;
+                                IconData statusIcon = Icons.help_outline;
+                                if (status == 'captured') {
+                                  statusColor = Colors.green;
+                                  statusIcon = Icons.check_circle;
+                                } else if (status == 'failed') {
+                                  statusColor = Colors.redAccent;
+                                  statusIcon = Icons.cancel;
+                                } else if (status == '3ds_required') {
+                                  statusColor = Colors.purple;
+                                  statusIcon = Icons.security;
+                                } else if (status == 'settlement_pending' || status == 'processing' || status == 'gateway_pending') {
+                                  statusColor = Colors.orange;
+                                  statusIcon = Icons.sync;
+                                }
+
+                                return Container(
+                                  margin: const EdgeInsets.only(bottom: 10),
+                                  padding: const EdgeInsets.all(12),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white,
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(color: statusColor.withValues(alpha: 0.3)),
+                                    boxShadow: [
+                                      BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 4, offset: const Offset(0, 2)),
+                                    ],
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                        children: [
+                                          Row(
+                                            children: [
+                                              Icon(statusIcon, color: statusColor, size: 18),
+                                              const SizedBox(width: 6),
+                                              Container(
+                                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                                decoration: BoxDecoration(
+                                                  color: statusColor.withValues(alpha: 0.15),
+                                                  borderRadius: BorderRadius.circular(6),
+                                                ),
+                                                child: Text(
+                                                  status.toUpperCase(),
+                                                  style: TextStyle(color: statusColor, fontSize: 11, fontWeight: FontWeight.bold),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                          Text(
+                                            'PKR ${amount.toStringAsFixed(2)}',
+                                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Text('Order: $orderId • $customerName', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+                                      if (gatewayTxnId.isNotEmpty)
+                                        Text('PayFast Ref: $gatewayTxnId', style: TextStyle(color: Colors.grey.shade700, fontSize: 11)),
+                                      if (errorMsg.isNotEmpty)
+                                        Padding(
+                                          padding: const EdgeInsets.only(top: 4),
+                                          child: Text('Reason: $errorMsg', style: const TextStyle(color: Colors.redAccent, fontSize: 11, fontStyle: FontStyle.italic)),
+                                        ),
+                                      const SizedBox(height: 4),
+                                      Text(createdAt, style: TextStyle(color: Colors.grey.shade500, fontSize: 10)),
+                                    ],
+                                  ),
+                                );
+                              },
+                              childCount: _payfastTransactions.length,
                             ),
                           ),
-                        );
-                      },
-                      childCount: _payments.length,
-                    ),
-                  ),
                 ],
               ),
             ),

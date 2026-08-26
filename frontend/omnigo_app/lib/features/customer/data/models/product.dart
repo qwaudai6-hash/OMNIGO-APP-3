@@ -24,7 +24,7 @@ class Product {
 
     return Product(
       productTrackingId: (json['product_tracking_id'] ?? '') as String,
-      storeTrackingId: (json['store_tracking_id'] ?? 'STOR-001') as String,
+      storeTrackingId: (json['store_tracking_id'] ?? '') as String,
       name: (json['name'] ?? 'Unknown Product') as String,
       description: (json['description'] ?? '') as String,
       basePrice: (json['base_price'] as num?)?.toDouble() ?? 0.0,

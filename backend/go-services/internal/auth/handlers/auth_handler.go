@@ -3,6 +3,7 @@ package handlers
 import (
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -47,7 +48,8 @@ func (h *AuthHandler) Register(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"error": "This email address is already in use"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[ERROR] Register: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
 
@@ -78,7 +80,8 @@ func (h *AuthHandler) Login(c *gin.Context) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Your account is pending verification by admin"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[ERROR] Login: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
 
@@ -97,7 +100,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 func (h *AuthHandler) GetProfile(c *gin.Context) {
 	trackingID, err := h.extractTrackingID(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized: missing or invalid credentials"})
 		return
 	}
 
@@ -114,7 +117,7 @@ func (h *AuthHandler) GetProfile(c *gin.Context) {
 func (h *AuthHandler) UpdateProfile(c *gin.Context) {
 	trackingID, err := h.extractTrackingID(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized: missing or invalid credentials"})
 		return
 	}
 
@@ -126,7 +129,8 @@ func (h *AuthHandler) UpdateProfile(c *gin.Context) {
 
 	profile, err := h.svc.UpdateProfile(c.Request.Context(), trackingID, req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[ERROR] UpdateProfile: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
 
@@ -139,7 +143,7 @@ func (h *AuthHandler) UpdateProfile(c *gin.Context) {
 func (h *AuthHandler) RegisterDeviceToken(c *gin.Context) {
 	trackingID, err := h.extractTrackingID(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized: missing or invalid credentials"})
 		return
 	}
 
@@ -150,7 +154,8 @@ func (h *AuthHandler) RegisterDeviceToken(c *gin.Context) {
 	}
 
 	if err := h.svc.RegisterDeviceToken(c.Request.Context(), trackingID, req); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[ERROR] RegisterDeviceToken: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
 
@@ -168,14 +173,15 @@ var allowedKYCExtensions = map[string]bool{
 func (h *AuthHandler) UploadKYC(c *gin.Context) {
 	trackingID, err := h.extractTrackingID(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized: missing or invalid credentials"})
 		return
 	}
 
 	// Enforce upload scope: only riders and vendors need KYC documents.
 	role, err := h.svc.GetRole(c.Request.Context(), trackingID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[ERROR] UploadKYC: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
 	if role != "rider" && role != "vendor" {
@@ -246,7 +252,8 @@ func (h *AuthHandler) UploadKYC(c *gin.Context) {
 
 	isVerified, err := h.svc.UpdateKYCURLs(c.Request.Context(), trackingID, cnicURL, licenseURL, vehicleRegURL)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[ERROR] UploadKYC: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
 
@@ -263,7 +270,7 @@ func (h *AuthHandler) UploadKYC(c *gin.Context) {
 func (h *AuthHandler) VendorVerify(c *gin.Context) {
 	trackingID, err := h.extractTrackingID(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized: missing or invalid credentials"})
 		return
 	}
 
@@ -309,7 +316,8 @@ func (h *AuthHandler) VendorVerify(c *gin.Context) {
 
 	isVerified, err := h.svc.VendorVerify(c.Request.Context(), trackingID, fullName, businessName, ntnNumber, cnicFrontURL, cnicBackURL, licenseURL)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[ERROR] VendorVerify: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
 
@@ -362,7 +370,7 @@ func (h *AuthHandler) RegisterRoutes(router *gin.Engine) {
 func (h *AuthHandler) Logout(c *gin.Context) {
 	trackingID, err := h.extractTrackingID(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized: missing or invalid credentials"})
 		return
 	}
 
@@ -373,7 +381,8 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	}
 
 	if err := h.svc.Logout(c.Request.Context(), trackingID, req); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("[ERROR] Logout: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
 
@@ -403,7 +412,8 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Refresh token expired"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errStr})
+		log.Printf("[ERROR] Refresh: %v", errStr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
 

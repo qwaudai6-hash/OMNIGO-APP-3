@@ -101,6 +101,14 @@ func (s *CartService) AddItem(ctx context.Context, userID string, req models.Add
 		return errors.New("cart contains items from a different store. Please clear cart first.")
 	}
 
+	// SP-GO-20: sanity-bound quantity at the cart layer. Stock is still
+	// authoritatively checked at order creation (atomic reserve), but an
+	// unbounded cart quantity enables absurd payloads and noisy downstream
+	// failures. 0/negative and >999 are rejected outright.
+	if req.Quantity <= 0 || req.Quantity > 999 {
+		return fmt.Errorf("invalid quantity %d: must be between 1 and 999", req.Quantity)
+	}
+
 	// Fetch real price from Product Service
 	realPrice, err := s.fetchProductPrice(ctx, req.ProductID)
 	if err != nil {
@@ -112,6 +120,10 @@ func (s *CartService) AddItem(ctx context.Context, userID string, req models.Add
 
 // UpdateItemQuantity updates the quantity of a specific item
 func (s *CartService) UpdateItemQuantity(ctx context.Context, userID string, productID int64, quantity int) error {
+	// SP-GO-20: same bound as AddItem.
+	if quantity <= 0 || quantity > 999 {
+		return fmt.Errorf("invalid quantity %d: must be between 1 and 999", quantity)
+	}
 	cart, err := s.repo.GetCart(ctx, userID)
 	if err != nil {
 		return errors.New("cart not found")

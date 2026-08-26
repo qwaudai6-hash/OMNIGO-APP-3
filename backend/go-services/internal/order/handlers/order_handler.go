@@ -179,7 +179,25 @@ func (h *OrderHandler) GetOrdersByVendor(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, orders)
+	// MEDIUM-28: bound response size. Full pagination pushdown into the
+	// repository is tracked separately; this slice prevents unbounded
+	// payloads for high-volume vendors today.
+	limit := 100
+	if v, err := strconv.Atoi(c.DefaultQuery("limit", "100")); err == nil && v > 0 && v <= 500 {
+		limit = v
+	}
+	offset := 0
+	if v, err := strconv.Atoi(c.DefaultQuery("offset", "0")); err == nil && v > 0 {
+		offset = v
+	}
+	if offset > len(orders) {
+		offset = len(orders)
+	}
+	end := offset + limit
+	if end > len(orders) {
+		end = len(orders)
+	}
+	c.JSON(http.StatusOK, orders[offset:end])
 }
 
 // UpdateOrderStatus HTTP handler for PATCH /orders/:tracking_id/status

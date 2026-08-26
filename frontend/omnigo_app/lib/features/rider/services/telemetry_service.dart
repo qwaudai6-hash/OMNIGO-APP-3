@@ -94,12 +94,21 @@ void onStart(ServiceInstance service) async {
       if (queue.isEmpty) return;
 
       debugPrint('Background Isolate: Flushing ${queue.length} offline coordinates...');
+      int sentCount = 0;
       for (final point in queue) {
+        if (!isConnected || channel == null) break;
         channel!.sink.add(jsonEncode(point));
+        sentCount++;
         await Future<void>.delayed(const Duration(milliseconds: 50)); // Prevent socket congestion
       }
-      await prefs.remove('telemetry_offline_queue');
-      debugPrint('Background Isolate: Offline buffer successfully flushed and cleared.');
+
+      final String latestRaw = prefs.getString('telemetry_offline_queue') ?? '[]';
+      final List<dynamic> latestQueue = jsonDecode(latestRaw) as List<dynamic>;
+      if (latestQueue.length >= sentCount) {
+        final remaining = latestQueue.sublist(sentCount);
+        await prefs.setString('telemetry_offline_queue', jsonEncode(remaining));
+      }
+      debugPrint('Background Isolate: Offline buffer flushed ($sentCount sent).');
     } catch (e) {
       debugPrint('Background Isolate: Error flushing telemetry buffer: $e');
     }
@@ -116,10 +125,17 @@ void onStart(ServiceInstance service) async {
 
     // Proactive auto-refresh check
     if (_isTokenExpired(token) && refreshToken.isNotEmpty) {
-      debugPrint('Background Isolate: Access token expired. Triggering refresh...');
-      final newToken = await _refreshAccessToken(refreshToken);
-      if (newToken != null) {
-        token = newToken;
+      debugPrint('Background Isolate: Access token expired. Waiting for foreground refresh...');
+      await Future<void>.delayed(const Duration(seconds: 5));
+      await prefs.reload();
+      token = prefs.getString('jwt_token') ?? '';
+      
+      if (_isTokenExpired(token)) {
+        debugPrint('Background Isolate: Token still expired, triggering background refresh...');
+        final newToken = await _refreshAccessToken(refreshToken);
+        if (newToken != null) {
+          token = newToken;
+        }
       }
     }
 
@@ -162,7 +178,9 @@ void onStart(ServiceInstance service) async {
       final delaySeconds = reconnectAttempts > 6 ? 60 : reconnectAttempts * 10;
       debugPrint('Background Isolate: Attempting reconnect in $delaySeconds seconds...');
       await Future<void>.delayed(Duration(seconds: delaySeconds));
-      await connectWebSocket();
+      if (!isConnected && !isConnecting) {
+        await connectWebSocket();
+      }
     }
   });
 
@@ -208,7 +226,8 @@ void onStart(ServiceInstance service) async {
     final a = 0.5 - math.cos((lat2 - lat1) * p)/2 + 
           math.cos(lat1 * p) * math.cos(lat2 * p) * 
           (1 - math.cos((lon2 - lon1) * p))/2;
-    return 12742000.0 * math.asin(math.sqrt(a)); // 2 * R; R = 6371000 meters
+    final clampedA = a.clamp(0.0, 1.0);
+    return 12742000.0 * math.asin(math.sqrt(clampedA)); // 2 * R; R = 6371000 meters
   }
 
   Geolocator.getPositionStream(
@@ -253,8 +272,13 @@ void onStart(ServiceInstance service) async {
       final double dy = vy * timeDelta;
 
       // Local flat-Earth Mercator projection conversion
+      final double safeLat = lastSentLat!.clamp(-89.9999, 89.9999);
+      final double latRad = safeLat * math.pi / 180.0;
+      final double cosLat = math.cos(latRad).abs();
+      final double safeCosLat = cosLat < 1e-6 ? 1e-6 : cosLat;
+
       final double latChange = dy / 111111.0;
-      final double lngChange = dx / (111111.0 * math.cos(lastSentLat! * math.pi / 180.0));
+      final double lngChange = dx / (111111.0 * safeCosLat);
 
       final double predictedLat = lastSentLat! + latChange;
       final double predictedLng = lastSentLng! + lngChange;
@@ -383,6 +407,9 @@ class LocalKalmanFilter {
   bool get isInitialized => _initialized;
 
   double update(double measurement) {
+    if (measurement.isNaN || measurement.isInfinite) {
+      return _initialized ? _x : 0.0;
+    }
     if (!_initialized) {
       init(measurement);
       return measurement;
@@ -391,9 +418,17 @@ class LocalKalmanFilter {
     _p = _p + q;
 
     // Measurement Update (Correction)
-    final double k = _p / (_p + r);
+    final denom = _p + r;
+    if (denom == 0 || denom.isNaN || denom.isInfinite) {
+      _p = 1.0;
+      return _x;
+    }
+    final double k = _p / denom;
     _x = _x + k * (measurement - _x);
     _p = (1.0 - k) * _p;
+    if (_p < 0 || _p.isNaN || _p.isInfinite) {
+      _p = 1.0;
+    }
 
     return _x;
   }

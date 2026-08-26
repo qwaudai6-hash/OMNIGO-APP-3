@@ -59,6 +59,7 @@ func (s *EscrowCronService) ProcessPendingEscrows(ctx context.Context) {
 		  AND escrow_released = FALSE
 		  AND delivered_at IS NOT NULL
 		  AND delivered_at < NOW() - INTERVAL '48 hours'
+		  AND LOWER(COALESCE(payment_gateway, '')) != 'cod'
 		FOR UPDATE SKIP LOCKED
 	`
 
@@ -86,6 +87,9 @@ func (s *EscrowCronService) ProcessPendingEscrows(ctx context.Context) {
 			continue
 		}
 		toRelease = append(toRelease, r)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[EscrowCron] LOW-05: row iteration error before release phase: %v", err)
 	}
 	rows.Close() // close early so we can do updates
 

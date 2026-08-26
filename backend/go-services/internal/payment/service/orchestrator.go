@@ -17,6 +17,7 @@ type PaymentGateway interface {
 type CheckoutRequest struct {
 	OrderID       string
 	CustomerID    string
+	StoreID       string // STOR- tracking ID; forwarded as gateway metadata for settlement splits
 	Amount        float64
 	Currency      string
 	ReturnURL     string

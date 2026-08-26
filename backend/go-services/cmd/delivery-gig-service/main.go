@@ -98,7 +98,7 @@ func main() {
 
 	// 6. Start Server with Graceful Shutdown
 	srv := &http.Server{
-		Addr:    fmt.Sprintf("127.0.0.1:%d", cfg.Port), // Service runs on 9003
+		Addr:    fmt.Sprintf("%s:%d", config.BindHost(), cfg.Port), // Service runs on 9003
 		Handler: router,
 	}
 

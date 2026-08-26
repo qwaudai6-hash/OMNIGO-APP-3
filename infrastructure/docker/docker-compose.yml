@@ -1,6 +1,6 @@
 services:
   omnigo-postgres:
-    image: postgres:15-alpine
+    image: postgis/postgis:15-3.3-alpine
     container_name: omnigo-postgres
     environment:
       POSTGRES_USER: omnigo_user
@@ -39,7 +39,7 @@ services:
     image: redis:7.0-alpine
     container_name: redis-node-1
     network_mode: host
-    command: redis-server --port 6379 --cluster-enabled yes --cluster-config-file
+    command: redis-server --port 6379 --requirepass "${REDIS_PASSWORD:-changeme_redis_pw}" --cluster-enabled yes --cluster-config-file
       /tmp/nodes-1.conf --cluster-node-timeout 5000 --appendonly yes --bind 127.0.0.1
     healthcheck:
       test:
@@ -185,7 +185,7 @@ services:
       - 7474:7474
       - 7687:7687
     environment:
-      NEO4J_AUTH: neo4j/omnigo123
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-changeme_neo4j}
     volumes:
       - neo4jdata:/data
     healthcheck:
@@ -208,8 +208,8 @@ services:
     ports:
       - 5000:5000
     command: "bash -c \"\n  export MAP_FILE='pakistan-latest.osm.pbf'\n  export MAP_BASE='pakistan-latest.osrm'\n\
-      \n  if [ ! -f /data/$$MAP_BASE.hsgr ]; then\n    if [ ! -f /data/$$MAP_FILE\
-      \ ]; then echo 'Missing PBF file'; exit 1; fi &&\n    osrm-extract -p /opt/car.lua\
+      \n  if [ ! -f /data/$$MAP_BASE.partition ]; then\n    if [ ! -f /data/$$MAP_FILE\
+      \ ]; then echo 'Downloading Pakistan OSM extract...'; wget -q https://download.geofabrik.de/asia/pakistan-latest.osm.pbf -O /data/$$MAP_FILE; fi &&\n    osrm-extract -p /opt/car.lua\
       \ /data/$$MAP_FILE &&\n    osrm-partition /data/$$MAP_BASE &&\n    osrm-customize\
       \ /data/$$MAP_BASE;\n  fi &&\n  osrm-routed --algorithm mld --bind 0.0.0.0 --port\
       \ 5000 /data/$$MAP_BASE\n\"\n"
@@ -293,11 +293,14 @@ services:
     environment:
       - KAFKA_BROKERS=kafka-cluster:29092
       - DB_DSN=postgres://omnigo_user:omnigo_password@omnigo-postgres:5432/omnigo_db
+      - REDIS_ADDRS=redis-node-1:6379,redis-node-2:6380,redis-node-3:6381
       - FCM_SERVICE_ACCOUNT_PATH=/run/secrets/fcm_service_account.json
     depends_on:
       kafka-cluster:
         condition: service_healthy
       omnigo-postgres:
+        condition: service_healthy
+      redis-node-1:
         condition: service_healthy
     volumes:
       - ../../secrets/fcm_service_account.json:/run/secrets/fcm_service_account.json:ro
@@ -482,7 +485,7 @@ services:
       - KONG_ADMIN_ACCESS_LOG=/dev/stdout
       - KONG_PROXY_ERROR_LOG=/dev/stderr
       - KONG_ADMIN_ERROR_LOG=/dev/stderr
-      - KONG_ADMIN_LISTEN=0.0.0.0:8001
+      - KONG_ADMIN_LISTEN=127.0.0.1:8001
     ports:
       - 8001:8001
     volumes:
@@ -671,7 +674,8 @@ services:
       - discovery.type=single-node
       - bootstrap.memory_lock=true
       - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
-      - "DISABLE_SECURITY_PLUGIN=true"
+      - "# MEDIUM-21: TLS+auth demo config; flip to true ONLY behind a private network
+      DISABLE_SECURITY_PLUGIN=${OPENSEARCH_DISABLE_SECURITY:-false}"
     ulimits:
       memlock:
         soft: -1
@@ -701,6 +705,7 @@ services:
     ports:
       - 8080:8080
     volumes:
+      - ./openmaptiles/config.json:/data/config.json:ro
       - tileserver-data:/data
     environment:
       - ESLINT_NO_DEV_ERRORS=true

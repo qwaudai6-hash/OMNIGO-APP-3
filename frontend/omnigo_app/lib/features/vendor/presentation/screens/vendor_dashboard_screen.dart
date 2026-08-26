@@ -416,7 +416,7 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
                                 const Text('Earnings', style: TextStyle(color: AppTheme.blackAccent, fontSize: 13)),
                                 const SizedBox(height: 6),
                                 Text(
-                                  '\$${_totalRevenue.toStringAsFixed(2)}',
+                                  'PKR ${_totalRevenue.toStringAsFixed(2)}',
                                   style: const TextStyle(color: AppTheme.blackAccent, fontSize: 20, fontWeight: FontWeight.bold),
                                 ),
                               ],
@@ -539,7 +539,7 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
                             color: Colors.white,
                             borderRadius: BorderRadius.circular(24),
                             boxShadow: [
-                              BoxShadow(color: Colors.black.withOpacity(0.01), blurRadius: 10, offset: const Offset(0, 5)),
+                              BoxShadow(color: Colors.black.withValues(alpha: 0.01), blurRadius: 10, offset: const Offset(0, 5)),
                             ],
                           ),
                           child: Column(
@@ -549,7 +549,7 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
                                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                 children: [
                                   Text('Order #$orderId', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: AppTheme.blackAccent)),
-                                  Text('\$$price', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue)),
+                                  Text('PKR $price', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue)),
                                 ],
                               ),
                               const SizedBox(height: 8),
@@ -787,6 +787,14 @@ class _VendorProfileTabState extends State<VendorProfileTab> {
   void initState() {
     super.initState();
     _fetchStoreDetails();
+  }
+
+  @override
+  void dispose() {
+    _businessNameController.dispose();
+    _ntnController.dispose();
+    _fullNameController.dispose();
+    super.dispose();
   }
 
   Future<void> _fetchStoreDetails() async {
@@ -1042,7 +1050,7 @@ class _VendorProfileTabState extends State<VendorProfileTab> {
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                           decoration: BoxDecoration(
-                            color: isVerified ? Colors.green.withOpacity(0.2) : Colors.orange.withOpacity(0.2),
+                            color: isVerified ? Colors.green.withValues(alpha: 0.2) : Colors.orange.withValues(alpha: 0.2),
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(color: isVerified ? Colors.green : Colors.orange),
                           ),

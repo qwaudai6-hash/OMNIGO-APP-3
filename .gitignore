@@ -13,6 +13,8 @@ secrets/
 *.pem
 *.key
 *.crt
+payfast credianal files/
+*.mbtiles
 
 # OSRM and Map files (large binaries / databases)
 *.pbf

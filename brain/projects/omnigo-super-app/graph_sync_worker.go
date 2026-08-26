@@ -209,7 +209,7 @@ func main() {
 	brokers := []string{"localhost:9092"}
 	neo4jUri := "neo4j://localhost:7687"
 	username := "neo4j"
-	password := "omnigo123" // gitleaks:allow
+	password := os.Getenv("NEO4J_PASSWORD") // BRAIN-03: hardcoded secret removed
 	dbName := "neo4j"
 
 	worker, err := NewGraphSyncWorker(brokers, neo4jUri, username, password, dbName)

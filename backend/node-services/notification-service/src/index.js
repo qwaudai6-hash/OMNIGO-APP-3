@@ -6,7 +6,10 @@ const Redis = require('ioredis');
 
 // ── Configuration ───────────────────────────────────────────────
 const PORT = process.env.PORT || 8089;
-const KAFKA_BROKERS = (process.env.KAFKA_BROKERS || 'localhost:9092').split(',');
+// SP-NJ-08: fail fast — silently consuming nothing looks like a working service.
+const KAFKA_BROKERS = process.env.KAFKA_BROKERS
+  ? process.env.KAFKA_BROKERS.split(',')
+  : (() => { console.error('[FATAL] KAFKA_BROKERS env var is required'); process.exit(1); })();
 const DB_DSN =
   process.env.DB_DSN ||
   process.env.DATABASE_URL;
@@ -85,6 +88,22 @@ async function getCustomerTrackingIdForOrder(orderTrackingId) {
     [orderTrackingId]
   );
   return result.rows.length > 0 ? result.rows[0].customer_tracking_id : null;
+}
+
+
+// GAP-1 FIX: fetch the accepted rider's real identity so the customer push
+// says WHO is coming, not just that "a rider" accepted.
+async function getRiderInfoForGig(gigTrackingId) {
+  const result = await pgPool.query(
+    `SELECT u.full_name, COALESCE(u.vehicle_plate_number, '') AS vehicle_plate
+     FROM deliveries d
+     JOIN users u ON u.tracking_id = d.rider_tracking_id
+     WHERE d.tracking_id = $1`,
+    [gigTrackingId]
+  );
+  return result.rows.length > 0
+    ? { name: result.rows[0].full_name, plate: result.rows[0].vehicle_plate }
+    : null;
 }
 
 async function getOrderTrackingIdForGig(gigTrackingId) {
@@ -252,6 +271,36 @@ async function sendPushNotification(tokens, title, body) {
   }
 }
 
+
+// ── Token hygiene helpers ────────────────────────────────────────
+// SP-NJ-06: deactivate tokens FCM reports as dead so the registry self-cleans.
+async function markTokenDead(token) {
+  try {
+    const { rows } = await pgPool.query(
+      'UPDATE device_tokens SET is_active = false WHERE fcm_token = $1',
+      [token]
+    );
+    if (rows && process.env.NODE_ENV !== 'production') console.log(`[FCM] marked ${rows.rowCount ?? rows.length} stale token(s) inactive`);
+  } catch (err) {
+    console.error(`[FCM] failed to mark token dead: ${err.message}`);
+  }
+}
+
+// SP-NJ-09: single parameterized query for many riders.
+async function getDeviceTokensBatch(riderIds) {
+  if (!riderIds || riderIds.length === 0) return [];
+  try {
+    const { rows } = await pgPool.query(
+      'SELECT fcm_token FROM device_tokens WHERE user_tracking_id = ANY($1) AND is_active = true',
+      [riderIds]
+    );
+    return rows.map((r) => r.fcm_token).filter(Boolean);
+  } catch (err) {
+    console.error(`[FCM] batch token lookup failed: ${err.message}`);
+    return [];
+  }
+}
+
 // ── Kafka Consumer ──────────────────────────────────────────────
 const kafka = new Kafka({
   clientId: 'notification-service',
@@ -277,6 +326,7 @@ async function runKafkaConsumer() {
   await consumer.run({
     eachMessage: async ({ topic, partition, message }) => {
       try {
+        if (!message || !message.value) return;
         const payload = JSON.parse(message.value.toString());
         console.log(
           `[Notification] Received [${topic}]:`,
@@ -292,21 +342,18 @@ async function runKafkaConsumer() {
             if (redisClient && notif.pickupLat && notif.pickupLng) {
               try {
                 // Find all riders within 5 km of the pickup location
-                const riderIDs = await redisClient.georadius(
+                // SP-NJ-05: GEORADIUS is removed in Redis 7+ — use GEOSEARCH.
+                const riderIDs = await redisClient.geosearch(
                   'riders:live:gps',
-                  notif.pickupLng,
-                  notif.pickupLat,
-                  5,
-                  'km'
+                  'FROMLONLAT', notif.pickupLng, notif.pickupLat,
+                  'BYRADIUS', 5, 'km',
+                  'ASC'
                 );
                 console.log(`[FCM] Found ${riderIDs.length} nearby riders for broadcast:`, riderIDs);
 
                 if (riderIDs.length > 0) {
-                  let fcmTokens = [];
-                  for (const riderID of riderIDs) {
-                    const tokens = await getDeviceTokens(riderID);
-                    fcmTokens.push(...tokens);
-                  }
+                  // SP-NJ-09: one query for ALL riders (no N+1 lag spikes).
+                  const fcmTokens = await getDeviceTokensBatch(riderIDs);
                   if (fcmTokens.length > 0) {
                     await sendPushNotification(fcmTokens, notif.title, notif.body);
                   }
@@ -344,6 +391,13 @@ async function runKafkaConsumer() {
               if (customerId) {
                 tokens = await getDeviceTokens(customerId);
               }
+              // GAP-1: personalize with the rider's actual name + plate.
+              const rider = await getRiderInfoForGig(notif.gigTrackingId);
+              if (rider && rider.name) {
+                const platePart = rider.plate ? ` (Bike: ${rider.plate})` : '';
+                notif.title = 'Rider Assigned 🛵';
+                notif.body = `${rider.name}${platePart} has picked up your order route and is on the way.`;
+              }
             }
           }
 
@@ -372,3 +426,19 @@ app.listen(PORT, () => {
   );
   runKafkaConsumer().catch(console.error);
 });
+
+const gracefulShutdown = async (signal) => {
+  console.log(`[${signal}] Graceful shutdown initiated...`);
+  try {
+    if (consumer) await consumer.disconnect();
+    if (pgPool) await pgPool.end();
+    if (redisClient) await redisClient.quit();
+    console.log('Cleanup complete. Exiting.');
+    process.exit(0);
+  } catch (err) {
+    console.error('Shutdown error:', err);
+    process.exit(1);
+  }
+};
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));

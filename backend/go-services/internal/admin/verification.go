@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -141,7 +142,7 @@ func (s *VerificationService) ListPendingVerifications(ctx context.Context, limi
 	return users, total, rows.Err()
 }
 
-// ApproveVerification manually approves a user.
+// ApproveVerification manually approves a user and cascades activation to their store and products.
 func (s *VerificationService) ApproveVerification(ctx context.Context, trackingID, reason string) error {
 	query := `
 		UPDATE users
@@ -153,7 +154,21 @@ func (s *VerificationService) ApproveVerification(ctx context.Context, trackingI
 		WHERE tracking_id = $2
 	`
 	_, err := s.db.Exec(ctx, query, reason, trackingID)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Cascade activation to vendor stores and products so their catalog is
+	// immediately visible. Best-effort after the user is already verified,
+	// but failures are logged loudly for ops follow-up instead of swallowed.
+	if _, err := s.db.Exec(ctx, `UPDATE stores SET is_active = true, updated_at = NOW() WHERE vendor_tracking_id = $1`, trackingID); err != nil {
+		log.Printf("[ADMIN] CRITICAL: store activation cascade failed for vendor %s: %v", trackingID, err)
+	}
+	if _, err := s.db.Exec(ctx, `UPDATE products SET is_active = true, updated_at = NOW() WHERE vendor_tracking_id = $1`, trackingID); err != nil {
+		log.Printf("[ADMIN] CRITICAL: product activation cascade failed for vendor %s: %v", trackingID, err)
+	}
+
+	return nil
 }
 
 // RejectVerification manually rejects a user.

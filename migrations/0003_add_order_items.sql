@@ -1,5 +1,5 @@
 -- Remove old array column from orders
-ALTER TABLE orders DROP COLUMN product_tracking_ids;
+ALTER TABLE orders DROP COLUMN IF EXISTS product_tracking_ids;
 
 -- Create order_items table for frozen snapshots
 CREATE TABLE order_items (

@@ -12,25 +12,30 @@
 class ApiEndpoints {
   ApiEndpoints._();
 
-  // ── Host Resolution ──────────────────────────────────────────────
+  // ── Host Resolution (Railway Production) ────────────────────────
+  static const String _productionDomain = 'omnigo-app-production.up.railway.app';
   static final String _host = _resolveHost();
 
   static String _resolveHost() {
     const override = String.fromEnvironment('API_HOST');
     if (override.isNotEmpty) return override;
-
-    // Production Railway Domain
-    return 'omnigo-app-production.up.railway.app';
+    return _productionDomain;
   }
 
-  static bool get _isLocal =>
-      _host.contains('10.0.2.2') || _host.contains('127.0.0.1');
-
   // ── Service Base URLs ──────────────────────────────────────────
-  // Local: Gateway on port 8000 (HTTP) — use --dart-define=API_HOST=10.0.2.2
-  // Prod: Railway handles TLS (HTTPS) on default port 443
-  static String get gatewayBase =>
-      _isLocal ? 'http://$_host:8000' : 'https://$_host';
+  // Default: Railway Production Gateway (HTTPS on port 443)
+  static String get gatewayBase {
+    const customBase = String.fromEnvironment('API_BASE_URL');
+    if (customBase.isNotEmpty) {
+      return customBase.endsWith('/')
+          ? customBase.substring(0, customBase.length - 1)
+          : customBase;
+    }
+    if (_host.startsWith('http://') || _host.startsWith('https://')) {
+      return _host.endsWith('/') ? _host.substring(0, _host.length - 1) : _host;
+    }
+    return 'https://$_host';
+  }
 
   static String get authBase => '$gatewayBase/api/v1';
   static String get vendorBase => '$gatewayBase/api/v1';
@@ -42,9 +47,12 @@ class ApiEndpoints {
   static String get paymentBase => '$gatewayBase/api/v1';
   static String get geoBase => '$gatewayBase/api/v1';
 
-  // WebSocket goes through the gateway in both local and production.
-  static String get wsUrl =>
-      _isLocal ? 'ws://$_host:8000/ws' : 'wss://$_host/ws';
+  // WebSocket goes through the Railway gateway over secure WSS
+  static String get wsUrl {
+    const customWs = String.fromEnvironment('WS_URL');
+    if (customWs.isNotEmpty) return customWs;
+    return 'wss://$_productionDomain/ws';
+  }
 
   // ── Auth Service ─────────────────────────────────────────────────
   static String authLogin() => '$authBase/auth/login';
@@ -172,10 +180,12 @@ class ApiEndpoints {
   static String customerWalletLoad() => '$orderBase/wallet/customer/load';
   static String customerWalletLoadCallback() =>
       '$orderBase/wallet/customer/load/callback';
-  static String jazzcashInitiate() => '$paymentBase/payments/jazzcash/initiate';
-  static String jazzcashCallback() => '$paymentBase/payments/jazzcash/callback';
-  static String easypaisaInitiate() => '$paymentBase/payments/easypaisa/initiate';
-  static String easypaisaCallback() => '$paymentBase/payments/easypaisa/callback';
+  // NOTE: JazzCash/EasyPaisa hosted-checkout does NOT use orchestrator
+  // /payments/jazzcash|easypaisa/* paths (those never existed). The live flow
+  // is order-service wallet: POST /wallet/charge {gateway: 'jazzcash'|'easypaisa'}
+  // → redirect_url → confirmation at /wallet/callback. Use customerWalletLoad
+  // for top-ups and walletCharge below for product checkout.
+  static String walletCharge() => '$orderBase/wallet/charge';
   static String orderCheckout() => '$orderBase/orders/';
   static String orderConfirm() => '$orderBase/orders/confirm';
   static String orderHandover() => '$orderBase/orders/handover';
@@ -231,8 +241,9 @@ class ApiEndpoints {
 
   // ── Admin Disputes ─────────────────────────────────────────────
   static String adminDisputeList() => '$paymentBase/payments/disputes';
+  // Backend resolves via PATCH /api/v1/payments/disputes/:id (no /admin segment).
   static String adminDisputeResolve(String id) =>
-      '$paymentBase/admin/disputes/$id/resolve';
+      '$paymentBase/payments/disputes/$id';
 
   // ── Admin COD Settlement ──────────────────────────────────────
   static String adminCodSettle() => '$paymentBase/payments/cod/settlement';
@@ -275,11 +286,9 @@ class ApiEndpoints {
   static String codDebts(String riderId) =>
       '$paymentBase/payments/cod/debts?rider_id=$riderId';
 
-  // JazzCash & EasyPaisa status queries
-  static String jazzcashStatus(String txnRef) =>
-      '$paymentBase/payments/jazzcash/status/$txnRef';
-  static String easypaisaStatus(String txnRef) =>
-      '$paymentBase/payments/easypaisa/status/$txnRef';
+  // NOTE: jazzcashStatus/easypaisaStatus removed — those orchestrator paths
+  // never existed. Wallet payment state arrives via the /wallet/callback
+  // webhook; poll the order endpoint for confirmation instead.
 
   // Disputes
   static String disputeCreate() => '$paymentBase/payments/disputes';
@@ -321,6 +330,9 @@ class ApiEndpoints {
   static String adminFinanceApiKeySet() => '$adminBase/admin/finance/api-keys';
   static String adminFinanceApiKeyDelete(String provider, String keyName) =>
       '$adminBase/admin/finance/api-keys/$provider/$keyName';
+  static String adminPayFastSummary() => '$adminBase/admin/finance/payfast/summary';
+  static String adminPayFastTransactions({String status = 'all', int limit = 50, int offset = 0}) =>
+      '$adminBase/admin/finance/payfast/transactions?status=$status&limit=$limit&offset=$offset';
 
   // ── Map Service (MapLibre) ───────────────────────────────────────
   static String get mapBase => '$gatewayBase/api/v1/map';
@@ -352,7 +364,7 @@ class ApiEndpoints {
 
   // ── AI Security & Self-Healing Control Center ───────────────────
   static String adminAiAuditOverview() => '$adminBase/admin/ai/audit-overview';
-  static String adminAiAutoHeal() => '$adminBase/admin/i/auto-heal';
+  static String adminAiAutoHeal() => '$adminBase/admin/ai/auto-heal';
 
   // Geocoding — uses the dedicated geoBase (unified with vendor/admin)
   static String geocodingSearch(String q) =>

@@ -1,3 +1,7 @@
+-- ⚠️  MEDIUM-19: this seed uses a WELL-KNOWN password (admin123).
+-- Use ONLY for local development. For staging/production:
+--   1. Generate: python3 -c "import bcrypt;print(bcrypt.hashpw(input().encode(),bcrypt.gensalt()).decode())"
+--   2. Replace the hash below AND delete the plaintext comment.
 -- Seed script: Create default admin user
 -- Run: psql -U omnigo_user -d omnigo_db -f scripts/seed_admin.sql
 

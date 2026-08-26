@@ -8,10 +8,7 @@ class ConnectivityService {
   Future<bool> isOnline() async {
     try {
       final result = await _connectivity.checkConnectivity();
-      final connected = _evaluateConnection(result);
-      if (connected) return true;
-      // Fallback: If connectivity_plus reports none (common on Linux/Desktop), allow attempt
-      return true;
+      return _evaluateConnection(result);
     } catch (_) {
       return true; // Fallback to online so HTTP request can attempt
     }

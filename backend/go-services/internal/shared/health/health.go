@@ -2,6 +2,7 @@ package health
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"time"
 
@@ -25,7 +26,9 @@ func DBPool(pool *pgxpool.Pool) gin.HandlerFunc {
 		}
 
 		if err := pool.Ping(ctx); err != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not ready", "error": err.Error()})
+			// GW-05: never echo driver errors (they embed DSN/host details).
+			log.Printf("[health] db ping failed: %v", err)
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not ready", "reason": "database unreachable"})
 			return
 		}
 
@@ -45,7 +48,8 @@ func Redis(client redisPinger) gin.HandlerFunc {
 		}
 
 		if err := client.Ping(ctx).Err(); err != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not ready", "error": err.Error()})
+			log.Printf("[health] redis ping failed: %v", err)
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not ready", "reason": "cache unreachable"})
 			return
 		}
 

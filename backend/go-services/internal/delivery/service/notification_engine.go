@@ -20,8 +20,12 @@ func (s *DeliveryService) BroadcastGigAlert(ctx context.Context, gig *models.Del
 
 	gig.EligibleRiders = topRiders
 
+	// Sanitize broadcast payload — OTP must never be leaked to candidate riders
+	broadcastGig := *gig
+	broadcastGig.OTPCode = ""
+
 	// Publish Gig to Kafka Event Bus for WebSocket Gateway consumption
-	eventBytes, _ := json.Marshal(gig)
+	eventBytes, _ := json.Marshal(broadcastGig)
 	if s.kafka != nil {
 		record := &kgo.Record{
 			Topic: "deliveries.broadcasted",

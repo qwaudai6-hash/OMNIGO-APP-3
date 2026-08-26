@@ -2,22 +2,83 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
-	"crypto/sha256"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/omnigo/backend/internal/shared/database"
 	"github.com/omnigo/backend/internal/shared/tracking"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/bcrypt"
 )
+
+func decodeBase64Safe(s string) ([]byte, error) {
+	if b, err := base64.RawStdEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	if b, err := base64.StdEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	if b, err := base64.RawURLEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	return base64.URLEncoding.DecodeString(s)
+}
+
+func verifyArgon2id(encodedHash, plainPassword string) (bool, error) {
+	parts := strings.Split(encodedHash, "$")
+	if len(parts) < 6 {
+		return false, errors.New("invalid argon2id hash format")
+	}
+
+	var memory uint32
+	var iterations uint32
+	var parallelism uint8
+	_, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &memory, &iterations, &parallelism)
+	if err != nil {
+		return false, err
+	}
+
+	salt, err := decodeBase64Safe(parts[4])
+	if err != nil {
+		return false, err
+	}
+
+	expectedKey, err := decodeBase64Safe(parts[5])
+	if err != nil {
+		return false, err
+	}
+
+	keyLen := uint32(len(expectedKey))
+	computedKey := argon2.IDKey([]byte(plainPassword), salt, iterations, memory, parallelism, keyLen)
+
+	if subtle.ConstantTimeCompare(computedKey, expectedKey) == 1 {
+		return true, nil
+	}
+	return false, nil
+}
+
+func verifyPassword(encodedHash, plainPassword string) (bool, error) {
+	if strings.HasPrefix(encodedHash, "$argon2id$") {
+		return verifyArgon2id(encodedHash, plainPassword)
+	}
+	err := bcrypt.CompareHashAndPassword([]byte(encodedHash), []byte(plainPassword))
+	if err != nil {
+		return false, nil
+	}
+	return true, nil
+}
 
 func init() {
 	// Wire the bcrypt helper so auth_flow.go can reuse it without
@@ -127,6 +188,17 @@ func generateTrackingID(role string) string {
 }
 
 func (s *AuthService) Register(ctx context.Context, req RegisterRequest) (string, error) {
+	// 0. Role Validation: Reject unauthorized/admin role registrations
+	req.Role = strings.ToLower(strings.TrimSpace(req.Role))
+	allowedRoles := map[string]bool{
+		"customer": true,
+		"vendor":   true,
+		"rider":    true,
+	}
+	if !allowedRoles[req.Role] {
+		return "", fmt.Errorf("INVALID_ROLE: registration role must be 'customer', 'vendor', or 'rider'")
+	}
+
 	// 1. Relational Check: Validate email unique constraint
 	var exists bool
 	checkQuery := "SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)"
@@ -208,7 +280,11 @@ func (s *AuthService) Register(ctx context.Context, req RegisterRequest) (string
 			VALUES ($1, $2, $3, $4, $5, true, NOW(), NOW())
 			ON CONFLICT (store_tracking_id) DO NOTHING
 		`
-		_, _ = s.db.Exec(ctx, storeQuery, trackingID, storeTrackingID, storeName, req.Latitude, req.Longitude)
+		// MEDIUM-04: a vendor without a storefront is a broken signup — at
+		// minimum scream in the logs so ops can repair the account.
+		if _, iErr := s.db.Exec(ctx, storeQuery, trackingID, storeTrackingID, storeName, req.Latitude, req.Longitude); iErr != nil {
+			fmt.Fprintf(os.Stderr, "[auth] CRITICAL: store auto-provision failed for %s: %v\n", trackingID, iErr)
+		}
 	}
 
 	return trackingID, nil
@@ -285,9 +361,9 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (LoginRespons
 		}
 	}
 
-	// Verify Hash matching
-	err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password))
-	if err != nil {
+	// Verify Hash matching (supports both Argon2id and Bcrypt)
+	valid, err := verifyPassword(passwordHash, req.Password)
+	if err != nil || !valid {
 		return LoginResponse{}, errors.New("UNAUTHORIZED_BAD_CREDENTIALS: invalid email or password")
 	}
 
@@ -317,9 +393,11 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (LoginRespons
 	// Replaces the old fake `jwt_token_session_{trackingID}_{timestamp}`
 	// string. The JWT contains tracking_id, role, and email as claims,
 	// signed with JWT_SECRET_KEY env var. Expires in 1 hour.
+	// MEDIUM-05: a panic inside a request handler kills the whole process.
+	// Fail this request (and every auth request) loudly instead.
 	jwtSecret := os.Getenv("JWT_SECRET_KEY")
 	if jwtSecret == "" {
-		panic("FATAL: JWT_SECRET_KEY environment variable is not set. Refusing to start with insecure fallback.")
+		return LoginResponse{}, fmt.Errorf("server misconfiguration: signing key unavailable")
 	}
 
 	claims := jwt.MapClaims{
@@ -608,18 +686,14 @@ func (s *AuthService) UpdateKYCURLs(ctx context.Context, trackingID, cnicURL, li
 		return false, fmt.Errorf("failed to update kyc urls: %w", err)
 	}
 
-	// Post-update: Check for Rider auto-approval
+	// Post-update: When all required documents are present, route to admin verification queue
 	var role string
 	var currentCnic, currentLicense, currentVehicleReg string
 	checkQuery := `SELECT role, COALESCE(cnic_url, ''), COALESCE(license_url, ''), COALESCE(vehicle_registration_url, '') FROM users WHERE tracking_id = $1`
-	if err := s.db.QueryRow(ctx, checkQuery, trackingID).Scan(&role, &currentCnic, &currentLicense, &currentVehicleReg); err != nil {
-		return false, nil // Ignore error on check
-	}
-
-	if role == "rider" && currentCnic != "" && currentLicense != "" && currentVehicleReg != "" {
-		_, err := s.db.Exec(ctx, `UPDATE users SET is_verified = true, verification_status = 'approved', updated_at = NOW() WHERE tracking_id = $1`, trackingID)
-		if err == nil {
-			return true, nil
+	if err := s.db.QueryRow(ctx, checkQuery, trackingID).Scan(&role, &currentCnic, &currentLicense, &currentVehicleReg); err == nil {
+		if role == "rider" && currentCnic != "" && currentLicense != "" && currentVehicleReg != "" {
+			_, _ = s.db.Exec(ctx, `UPDATE users SET verification_status = 'pending', updated_at = NOW() WHERE tracking_id = $1 AND verification_status != 'approved'`, trackingID)
+			return false, nil
 		}
 	}
 
@@ -628,11 +702,17 @@ func (s *AuthService) UpdateKYCURLs(ctx context.Context, trackingID, cnicURL, li
 
 // VendorVerify processes document uploads and text fields for automated verification.
 func (s *AuthService) VendorVerify(ctx context.Context, trackingID string, fullName, businessName, ntnNumber, cnicFrontURL, cnicBackURL, licenseURL string) (bool, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+
 	// 1. Fetch current user data
 	var entityType string
 	var currentFullName, currentBusinessName, currentNtn, currentCnicFront, currentCnicBack, currentLicense string
 	query := `SELECT COALESCE(entity_type, ''), COALESCE(full_name, ''), COALESCE(business_name, ''), COALESCE(ntn_number, ''), COALESCE(cnic_url, ''), COALESCE(cnic_back_url, ''), COALESCE(license_url, '') FROM users WHERE tracking_id = $1`
-	err := s.db.QueryRow(ctx, query, trackingID).Scan(&entityType, &currentFullName, &currentBusinessName, &currentNtn, &currentCnicFront, &currentCnicBack, &currentLicense)
+	err = tx.QueryRow(ctx, query, trackingID).Scan(&entityType, &currentFullName, &currentBusinessName, &currentNtn, &currentCnicFront, &currentCnicBack, &currentLicense)
 	if err != nil {
 		return false, fmt.Errorf("user not found: %w", err)
 	}
@@ -675,7 +755,7 @@ func (s *AuthService) VendorVerify(ctx context.Context, trackingID string, fullN
 		SET full_name = $1, business_name = $2, ntn_number = $3, cnic_url = $4, cnic_back_url = $5, license_url = $6, is_verified = $7, updated_at = NOW()
 		WHERE tracking_id = $8
 	`
-	_, err = s.db.Exec(ctx, updateQuery, currentFullName, currentBusinessName, currentNtn, currentCnicFront, currentCnicBack, currentLicense, isVerified, trackingID)
+	_, err = tx.Exec(ctx, updateQuery, currentFullName, currentBusinessName, currentNtn, currentCnicFront, currentCnicBack, currentLicense, isVerified, trackingID)
 	if err != nil {
 		return false, fmt.Errorf("failed to update verification fields: %w", err)
 	}
@@ -683,7 +763,7 @@ func (s *AuthService) VendorVerify(ctx context.Context, trackingID string, fullN
 	// 5. If verified, trigger products to live
 	if isVerified {
 		prodQuery := `UPDATE products SET is_active = true, updated_at = NOW() WHERE vendor_tracking_id = $1`
-		_, _ = s.db.Exec(ctx, prodQuery, trackingID) // Fire and forget in same context
+		_, _ = tx.Exec(ctx, prodQuery, trackingID) // Fire and forget in same context
 	}
 
 	// 6. Ensure store entry in `stores` table is created/updated with shop name
@@ -692,16 +772,19 @@ func (s *AuthService) VendorVerify(ctx context.Context, trackingID string, fullN
 			UPDATE stores SET store_name = $1, is_active = $2, updated_at = NOW()
 			WHERE vendor_tracking_id = $3
 		`
-		res, _ := s.db.Exec(ctx, storeUpsertQuery, currentBusinessName, isVerified, trackingID)
+		res, _ := tx.Exec(ctx, storeUpsertQuery, currentBusinessName, isVerified, trackingID)
 		if res.RowsAffected() == 0 {
 			storeTrackingID := tracking.Generate("STOR")
-			_, _ = s.db.Exec(ctx, `
+			_, _ = tx.Exec(ctx, `
 				INSERT INTO stores (vendor_tracking_id, store_tracking_id, store_name, is_active, created_at, updated_at)
 				VALUES ($1, $2, $3, $4, NOW(), NOW())
 			`, trackingID, storeTrackingID, currentBusinessName, isVerified)
 		}
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
 	return isVerified, nil
 }
 
@@ -863,6 +946,12 @@ func (s *AuthService) Refresh(ctx context.Context, req RefreshRequest) (AuthResp
 	hasher.Write([]byte(req.RefreshToken))
 	tokenHash := fmt.Sprintf("%x", hasher.Sum(nil))
 
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return AuthResponse{}, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	var rawID interface{}
 	var userTrackingID string
 	var expiresAt time.Time
@@ -872,8 +961,9 @@ func (s *AuthService) Refresh(ctx context.Context, req RefreshRequest) (AuthResp
 		SELECT id, COALESCE(user_tracking_id, ''), expires_at, COALESCE(revoked, false) 
 		FROM user_refresh_tokens 
 		WHERE token_hash = $1
+		FOR UPDATE
 	`
-	err := s.db.QueryRow(ctx, query, tokenHash).Scan(&rawID, &userTrackingID, &expiresAt, &revoked)
+	err = tx.QueryRow(ctx, query, tokenHash).Scan(&rawID, &userTrackingID, &expiresAt, &revoked)
 	if err != nil {
 		return AuthResponse{}, errors.New("UNAUTHORIZED_INVALID_TOKEN: invalid refresh token")
 	}
@@ -881,7 +971,8 @@ func (s *AuthService) Refresh(ctx context.Context, req RefreshRequest) (AuthResp
 	// RTR Compromise Detection: if token is already revoked, all tokens for the user are invalidated
 	if revoked {
 		revokeAllQuery := "UPDATE user_refresh_tokens SET revoked = TRUE WHERE user_tracking_id = $1"
-		s.db.Exec(ctx, revokeAllQuery, userTrackingID)
+		_, _ = tx.Exec(ctx, revokeAllQuery, userTrackingID)
+		_ = tx.Commit(ctx)
 		return AuthResponse{}, errors.New("FORBIDDEN_TOKEN_COMPROMISED: reuse detected, all user tokens revoked")
 	}
 
@@ -891,9 +982,13 @@ func (s *AuthService) Refresh(ctx context.Context, req RefreshRequest) (AuthResp
 
 	// Revoke old token by token_hash
 	revokeQuery := "UPDATE user_refresh_tokens SET revoked = TRUE WHERE token_hash = $1"
-	_, err = s.db.Exec(ctx, revokeQuery, tokenHash)
+	_, err = tx.Exec(ctx, revokeQuery, tokenHash)
 	if err != nil {
 		return AuthResponse{}, fmt.Errorf("failed to revoke old token: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return AuthResponse{}, fmt.Errorf("failed to commit refresh token transaction: %w", err)
 	}
 
 	// Fetch user details for access token generation
@@ -921,9 +1016,11 @@ func (s *AuthService) Refresh(ctx context.Context, req RefreshRequest) (AuthResp
 	}
 
 	// Generate access token (1 hour expiry)
+	// MEDIUM-05: a panic inside a request handler kills the whole process.
+	// Fail this request (and every auth request) loudly instead.
 	jwtSecret := os.Getenv("JWT_SECRET_KEY")
 	if jwtSecret == "" {
-		panic("FATAL: JWT_SECRET_KEY environment variable is not set. Refusing to start with insecure fallback.")
+		return AuthResponse{}, fmt.Errorf("server misconfiguration: signing key unavailable")
 	}
 
 	claims := jwt.MapClaims{

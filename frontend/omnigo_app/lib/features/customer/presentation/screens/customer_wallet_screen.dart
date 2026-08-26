@@ -81,16 +81,16 @@ class _CustomerWalletScreenState extends State<CustomerWalletScreen> {
       final uri = Uri.parse(redirectUrl);
       if (await canLaunchUrl(uri)) {
         await launchUrl(uri, mode: LaunchMode.externalApplication);
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Top-up opened in browser. Tap refresh after payment.'),
+            backgroundColor: Colors.blue,
+          ),
+        );
+        await Future<void>.delayed(const Duration(seconds: 2));
+        await _fetch();
       }
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Top-up opened in browser. Tap refresh after payment.'),
-          backgroundColor: Colors.blue,
-        ),
-      );
-      await Future.delayed(const Duration(seconds: 2));
-      await _fetch();
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -106,31 +106,32 @@ class _CustomerWalletScreenState extends State<CustomerWalletScreen> {
     return showDialog<double>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Top-Up Amount'),
+        title: const Text('Top Up Wallet'),
         content: TextField(
           controller: controller,
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
           decoration: const InputDecoration(
-            labelText: 'PKR',
-            border: OutlineInputBorder(),
+            labelText: 'Amount (PKR)',
+            hintText: 'e.g. 500',
+            prefixText: 'PKR ',
           ),
           autofocus: true,
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
+            onPressed: () => Navigator.of(ctx).pop(),
             child: const Text('Cancel'),
           ),
-          FilledButton(
+          ElevatedButton(
             onPressed: () {
-              final v = double.tryParse(controller.text.trim());
-              if (v == null || v < 100) {
+              final parsed = double.tryParse(controller.text.trim());
+              if (parsed == null || parsed < 100) {
                 ScaffoldMessenger.of(ctx).showSnackBar(
-                  const SnackBar(content: Text('Min top-up is PKR 100')),
+                  const SnackBar(content: Text('Minimum top-up is PKR 100')),
                 );
                 return;
               }
-              Navigator.pop(ctx, v);
+              Navigator.of(ctx).pop(parsed);
             },
             child: const Text('Continue'),
           ),
@@ -143,13 +144,11 @@ class _CustomerWalletScreenState extends State<CustomerWalletScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final balance = (_wallet?['balance'] as num?)?.toDouble() ?? 0.0;
+    final balance = (_wallet?['balance'] as num?)?.toDouble() ?? 0;
+    final spent = (_wallet?['lifetime_spent'] as num?)?.toDouble() ?? 0;
+
     return Scaffold(
-      backgroundColor: Colors.white,
       appBar: AppBar(
-        backgroundColor: Colors.white,
-        elevation: 0,
-        foregroundColor: Colors.black,
         title: const Text('My Wallet'),
         actions: [
           IconButton(
@@ -158,104 +157,144 @@ class _CustomerWalletScreenState extends State<CustomerWalletScreen> {
           ),
         ],
       ),
-      body: RefreshIndicator(
-        onRefresh: _fetch,
-        child: _isLoading && _wallet == null
-            ? const Center(child: CircularProgressIndicator())
-            : ListView(
-                padding: const EdgeInsets.all(16),
-                children: [
-                  if (_error != null)
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      margin: const EdgeInsets.only(bottom: 16),
-                      decoration: BoxDecoration(
-                        color: Colors.red.shade50,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Text(_error!, style: const TextStyle(color: Colors.red)),
-                    ),
-
-                  // Balance card
-                  Container(
-                    padding: const EdgeInsets.all(24),
-                    decoration: BoxDecoration(
-                      gradient: const LinearGradient(
-                        colors: [Color(0xFF0a0a0a), Color(0xFF2a2a2a)],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                      ),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _error != null
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
                     child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
                       children: [
-                        const Text(
-                          'Available Balance',
-                          style: TextStyle(color: Colors.white70, fontSize: 14),
-                        ),
+                        Text(_error!, style: const TextStyle(color: Colors.red)),
                         const SizedBox(height: 8),
-                        Text(
-                          _fmt(balance),
-                          style: const TextStyle(
-                            color: Color(0xFFCAFF33),
-                            fontSize: 36,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        const Text(
-                          'Use this balance at checkout for instant payments.',
-                          style: TextStyle(color: Colors.white60, fontSize: 12),
+                        ElevatedButton(
+                          onPressed: _fetch,
+                          child: const Text('Retry'),
                         ),
                       ],
                     ),
                   ),
-                  const SizedBox(height: 24),
+                )
+              : RefreshIndicator(
+                  onRefresh: _fetch,
+                  child: ListView(
+                    padding: const EdgeInsets.all(16),
+                    children: [
+                      _buildBalanceCard(balance: balance, spent: spent),
+                      const SizedBox(height: 24),
+                      const Text(
+                        'Top Up Wallet',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      _buildTopUpOption(
+                        title: 'PayFast (Cards & Bank)',
+                        subtitle: 'Instant via Visa / Mastercard / UnionPay',
+                        icon: Icons.credit_card,
+                        color: Colors.indigo,
+                        onTap: _topUpInFlight ? null : () => _topUp(gateway: 'payfast'),
+                      ),
+                      const SizedBox(height: 8),
+                      _buildTopUpOption(
+                        title: 'JazzCash',
+                        subtitle: 'Mobile account or voucher',
+                        icon: Icons.account_balance_wallet,
+                        color: Colors.red,
+                        onTap: _topUpInFlight ? null : () => _topUp(gateway: 'jazzcash'),
+                      ),
+                      const SizedBox(height: 8),
+                      _buildTopUpOption(
+                        title: 'EasyPaisa',
+                        subtitle: 'Mobile account or voucher',
+                        icon: Icons.phone_android,
+                        color: Colors.green,
+                        onTap: _topUpInFlight ? null : () => _topUp(gateway: 'easypaisa'),
+                      ),
+                      const SizedBox(height: 24),
+                      const Text(
+                        'Recent Activity',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      ..._buildTransactionList(),
+                    ],
+                  ),
+                ),
+    );
+  }
 
-                  // Top-up options
-                  const Text(
-                    'Top up your wallet',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 12),
-                  _buildTopUpTile(
-                    title: 'PayFast (Card / Bank)',
-                    subtitle: 'Debit/credit card, JazzCash, EasyPaisa via PayFast',
-                    icon: Icons.account_balance,
-                    color: Colors.deepOrange,
-                    onTap: _topUpInFlight ? null : () => _topUp(gateway: 'payfast'),
-                  ),
-                  _buildTopUpTile(
-                    title: 'JazzCash',
-                    subtitle: 'Pakistan mobile wallet',
-                    icon: Icons.phone_android,
-                    color: Colors.red,
-                    onTap: _topUpInFlight ? null : () => _topUp(gateway: 'jazzcash'),
-                  ),
-                  _buildTopUpTile(
-                    title: 'EasyPaisa',
-                    subtitle: 'Pakistan mobile wallet',
-                    icon: Icons.account_balance_wallet,
-                    color: Colors.green,
-                    onTap: _topUpInFlight ? null : () => _topUp(gateway: 'easypaisa'),
-                  ),
-
-                  const SizedBox(height: 24),
-                  // Transaction history
-                  const Text(
-                    'Recent transactions',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 8),
-                  ..._buildTransactionList(),
-                ],
+  Widget _buildBalanceCard({required double balance, required double spent}) {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [Colors.indigo.shade700, Colors.indigo.shade900],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.indigo.withValues(alpha: 0.3),
+            blurRadius: 12,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Available Balance',
+            style: TextStyle(color: Colors.white70, fontSize: 13),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            _fmt(balance),
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 32,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'Lifetime spent: ${_fmt(spent)}',
+                style: const TextStyle(color: Colors.white70, fontSize: 12),
               ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Text(
+                  'PKR',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 11,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
 
-  Widget _buildTopUpTile({
+  Widget _buildTopUpOption({
     required String title,
     required String subtitle,
     required IconData icon,
@@ -270,7 +309,7 @@ class _CustomerWalletScreenState extends State<CustomerWalletScreen> {
       ),
       child: ListTile(
         leading: CircleAvatar(
-          backgroundColor: color.withOpacity(0.1),
+          backgroundColor: color.withValues(alpha: 0.1),
           child: Icon(icon, color: color),
         ),
         title: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),

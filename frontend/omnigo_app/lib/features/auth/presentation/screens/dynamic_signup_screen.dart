@@ -8,6 +8,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/network/api_client.dart';
+import 'forgot_password_screen.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/services/connectivity_service.dart';
 import '../../../../core/utils/error_formatter.dart';
@@ -48,7 +49,7 @@ class DynamicSignupScreenState extends State<DynamicSignupScreen> {
   // Vendor specific
   final _businessNameController = TextEditingController();
 
-  final bool _isUploadingDocs = false;
+  bool _isUploadingDocs = false; // mutable — set around KYC document upload
 
   final _formKey = GlobalKey<FormState>();
   final ApiClient _apiClient = ApiClient();
@@ -82,7 +83,8 @@ class DynamicSignupScreenState extends State<DynamicSignupScreen> {
   /// backend Nominatim proxy (keeps User-Agent / rate limits server-side).
   Future<String> _reverseGeocode(double lat, double lng) async {
     final url = Uri.parse(ApiEndpoints.geocodingReverse(lat, lng));
-    final response = await http.get(url);
+    // SP-FL-13: bound the call so a slow geo proxy cannot freeze signup.
+    final response = await http.get(url).timeout(const Duration(seconds: 8));
     if (response.statusCode == 200) {
       final data = json.decode(response.body) as Map<String, dynamic>;
       final addr = data['address'] as Map<String, dynamic>? ?? {};
@@ -102,7 +104,8 @@ class DynamicSignupScreenState extends State<DynamicSignupScreen> {
   /// Fetches real coordinates using IP-based location as a fallback for 
   /// desktop platforms (Linux) where GPS hardware/plugins are unavailable.
   Future<Map<String, double>> _getIpBasedLocation() async {
-    final response = await http.get(Uri.parse('https://ipapi.co/json/'));
+    // SP-FL-13: timeout here too (third-party API — never trust its latency).
+    final response = await http.get(Uri.parse('https://ipapi.co/json/')).timeout(const Duration(seconds: 6));
     if (response.statusCode == 200) {
       final data = json.decode(response.body);
       if (data['status'] == 'success') {
@@ -252,6 +255,8 @@ class DynamicSignupScreenState extends State<DynamicSignupScreen> {
           route = '/rider-map';
         } else if (returnedRole == 'vendor') {
           route = '/vendor-dashboard';
+        } else if (returnedRole == 'admin' || returnedRole == 'super_admin') {
+          route = '/admin-surveillance';
         }
 
         setState(() => _isLoading = false);
@@ -384,7 +389,7 @@ class DynamicSignupScreenState extends State<DynamicSignupScreen> {
                   Container(
                     padding: const EdgeInsets.all(10),
                     decoration: BoxDecoration(
-                      color: isSuccess ? AppTheme.softGreen.withOpacity(0.2) : Colors.red.shade50,
+                      color: isSuccess ? AppTheme.softGreen.withValues(alpha: 0.2) : Colors.red.shade50,
                       shape: BoxShape.circle,
                     ),
                     child: Icon(
@@ -520,7 +525,7 @@ class DynamicSignupScreenState extends State<DynamicSignupScreen> {
                       Text(
                         _isLogin ? 'LOG IN TO SUPERPORTAL' : 'CREATE UNIFIED ID ACCOUNT',
                         style: TextStyle(
-                          color: AppTheme.blackAccent.withOpacity(0.5),
+                          color: AppTheme.blackAccent.withValues(alpha: 0.5),
                           fontSize: 11,
                           fontWeight: FontWeight.bold,
                           letterSpacing: 2.0,
@@ -565,6 +570,32 @@ class DynamicSignupScreenState extends State<DynamicSignupScreen> {
                     ),
                   ],
                 ),
+                // FEATURE FIX: the dedicated LoginScreen (and its
+                // ForgotPasswordScreen flow) was unreachable dead code — nothing
+                // ever navigated to /login. Users in login mode now get direct
+                // access to password reset without depending on that screen.
+                if (_isLogin)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8.0),
+                    child: GestureDetector(
+                      onTap: () {
+                        HapticFeedback.lightImpact();
+                        Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => const ForgotPasswordScreen(),
+                          ),
+                        );
+                      },
+                      child: const Text(
+                        'Forgot password?',
+                        style: TextStyle(
+                          color: AppTheme.blackAccent,
+                          fontWeight: FontWeight.w600,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                  ),
                 const SizedBox(height: 40),
               ],
             ),
@@ -633,7 +664,7 @@ class DynamicSignupScreenState extends State<DynamicSignupScreen> {
         borderRadius: BorderRadius.circular(38),
         boxShadow: [
           BoxShadow(
-            color: _getRoleColor().withOpacity(0.3),
+            color: _getRoleColor().withValues(alpha: 0.3),
             blurRadius: 25,
             offset: const Offset(0, 10),
           ),
@@ -884,7 +915,7 @@ class DynamicSignupScreenState extends State<DynamicSignupScreen> {
         borderRadius: BorderRadius.circular(18),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.015),
+            color: Colors.black.withValues(alpha: 0.015),
             blurRadius: 8,
             offset: const Offset(0, 4),
           ),

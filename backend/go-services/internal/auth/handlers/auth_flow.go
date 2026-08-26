@@ -3,10 +3,12 @@ package handlers
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/omnigo/backend/internal/auth/service"
 	"github.com/omnigo/backend/internal/shared/middleware"
+	"github.com/redis/go-redis/v9"
 )
 
 // AuthFlowHandler exposes the password-reset, email-verification, and
@@ -99,7 +101,7 @@ func (h *AuthFlowHandler) ResetPassword(c *gin.Context) {
 // IssueEmailVerification renders a 24-hour token. Called after the
 // user requests a fresh verification email from the front-end.
 func (h *AuthFlowHandler) IssueEmailVerification(c *gin.Context) {
-	trackingID := c.GetString("user_id")
+	trackingID := middleware.GetTrackingID(c)
 	if trackingID == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
@@ -141,7 +143,10 @@ func (h *AuthFlowHandler) VerifyEmail(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "email verified", "email": email})
+	// SP-GO-18: do NOT echo the address back — a replayed/brute-forced token
+	// would otherwise confirm which email owns it (account enumeration).
+	_ = email
+	c.JSON(http.StatusOK, gin.H{"status": "email verified"})
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -152,7 +157,7 @@ func (h *AuthFlowHandler) VerifyEmail(c *gin.Context) {
 // them to the user. The user scans the QR code with Google
 // Authenticator, then submits a code to Verify2FAEnrollment.
 func (h *AuthFlowHandler) Enroll2FA(c *gin.Context) {
-	trackingID := c.GetString("user_id")
+	trackingID := middleware.GetTrackingID(c)
 	if trackingID == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
@@ -174,7 +179,7 @@ type Verify2FARequest struct {
 }
 
 func (h *AuthFlowHandler) Verify2FAEnrollment(c *gin.Context) {
-	trackingID := c.GetString("user_id")
+	trackingID := middleware.GetTrackingID(c)
 	if trackingID == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
@@ -193,7 +198,7 @@ func (h *AuthFlowHandler) Verify2FAEnrollment(c *gin.Context) {
 }
 
 func (h *AuthFlowHandler) Disable2FA(c *gin.Context) {
-	trackingID := c.GetString("user_id")
+	trackingID := middleware.GetTrackingID(c)
 	if trackingID == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
@@ -246,14 +251,22 @@ func (h *AuthFlowHandler) CompleteTwoFactorChallenge(c *gin.Context) {
 // challenge) sit on the /api/v1/auth group without middleware. 2FA
 // enroll/verify-enrollment/disable endpoints require a valid JWT
 // (they're post-login actions).
-func (h *AuthFlowHandler) RegisterRoutes(router *gin.Engine) {
+// RegisterRoutes wires the auth-flow endpoints.
+//
+// SP-GO-06: the login-time 2FA challenge is brute-forceable (6-digit TOTP,
+// ~1M combinations inside the 5-min window) so it MUST be rate limited.
+// Pass the service's Redis client; when Redis is unavailable the shared
+// RateLimit middleware fails open (logged), same as every other route.
+func (h *AuthFlowHandler) RegisterRoutes(router *gin.Engine, rdb redis.UniversalClient) {
 	flow := router.Group("/api/v1/auth")
-	// Public — no JWT required
-	flow.POST("/forgot-password", h.ForgotPassword)
-	flow.POST("/reset-password", h.ResetPassword)
+	// Public — no JWT required. 10 attempts / 5 min per IP on the
+	// challenge + reset endpoints (TOTP guesses & reset-token guessing).
+	limited := flow.Group("", middleware.RateLimit(rdb, 10, 5*time.Minute))
+	limited.POST("/forgot-password", h.ForgotPassword)
+	limited.POST("/reset-password", h.ResetPassword)
 	flow.GET("/verify-email", h.VerifyEmail)
 	// Login-time 2FA challenge — no JWT (user hasn't logged in yet).
-	flow.POST("/2fa/challenge", h.CompleteTwoFactorChallenge)
+	limited.POST("/2fa/challenge", h.CompleteTwoFactorChallenge)
 
 	// Protected — JWT required
 	protected := router.Group("/api/v1/auth")

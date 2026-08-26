@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"io"
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -46,9 +47,10 @@ func InternalOnly(signer *security.InternalSigner) gin.HandlerFunc {
 		}
 
 		if err := signer.VerifyRequest(c.Request, body); err != nil {
+			// GW-18: keep verification detail server-side only.
+			log.Printf("[InternalOnly] signature verify failed: %v", err)
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"error":   "INTERNAL_SIGNATURE_INVALID",
-				"message": err.Error(),
+				"error": "INTERNAL_SIGNATURE_INVALID",
 			})
 			return
 		}

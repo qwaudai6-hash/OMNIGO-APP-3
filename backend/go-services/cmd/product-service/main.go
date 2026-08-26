@@ -164,9 +164,13 @@ func main() {
 	reviewH := reviewHandlers.NewReviewHandler(rSvc)
 	reviewH.RegisterRoutes(router)
 
+	// Static uploads directory for product images
+	_ = os.MkdirAll("./uploads/products", 0755)
+	router.Static("/uploads", "./uploads")
+
 	// 5. Start Server with Graceful Shutdown
 	srv := &http.Server{
-		Addr:    fmt.Sprintf("127.0.0.1:%d", cfg.Port), // Service runs on 9001
+		Addr:    fmt.Sprintf("%s:%d", config.BindHost(), cfg.Port), // Service runs on 9001
 		Handler: router,
 	}
 

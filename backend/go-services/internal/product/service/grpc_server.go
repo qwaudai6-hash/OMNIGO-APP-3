@@ -21,6 +21,14 @@ func NewProductInventoryGRPCServer(service *ProductService) *ProductInventoryGRP
 func (s *ProductInventoryGRPCServer) ReserveProduct(ctx context.Context, req *pb.ReserveRequest) (*pb.ReserveResponse, error) {
 	var items []models.OrderItem
 	for _, item := range req.Items {
+		// CI-17: reject zero/negative quantities — a negative value would pass
+		// the `stock >= qty` guard and INFLATE inventory on release.
+		if item.Quantity <= 0 {
+			return &pb.ReserveResponse{
+				Success: false,
+				Message: "invalid quantity: must be > 0",
+			}, nil
+		}
 		items = append(items, models.OrderItem{
 			ProductTrackingID: item.ProductTrackingId,
 			Quantity:          int(item.Quantity),

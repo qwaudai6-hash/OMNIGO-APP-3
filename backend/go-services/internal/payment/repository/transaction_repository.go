@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -15,13 +16,15 @@ import (
 type TransactionStatus string
 
 const (
-	TxnPending    TransactionStatus = "pending"
-	TxnAuthorized TransactionStatus = "authorized"
-	TxnCaptured   TransactionStatus = "captured"
-	TxnFailed     TransactionStatus = "failed"
-	TxnRefunded   TransactionStatus = "refunded"
-	TxnReversed   TransactionStatus = "reversed"
-	TxnChargeback TransactionStatus = "chargeback"
+	TxnPending           TransactionStatus = "pending"
+	TxnProcessing        TransactionStatus = "processing"
+	TxnAuthorized        TransactionStatus = "authorized"
+	TxnSettlementPending TransactionStatus = "settlement_pending"
+	TxnCaptured          TransactionStatus = "captured"
+	TxnFailed            TransactionStatus = "failed"
+	TxnRefunded          TransactionStatus = "refunded"
+	TxnReversed          TransactionStatus = "reversed"
+	TxnChargeback        TransactionStatus = "chargeback"
 )
 
 // TransactionKind is the kind of money movement.
@@ -49,8 +52,9 @@ type PaymentTransaction struct {
 	IdempotencyKey string            `json:"idempotency_key,omitempty"`
 	Metadata       map[string]any    `json:"metadata,omitempty"`
 	ErrorMessage   string            `json:"error_message,omitempty"`
-	CreatedAt      int64             `json:"created_at_ms"`
-	UpdatedAt      int64             `json:"updated_at_ms"`
+	CreatedAt           int64             `json:"created_at_ms"`
+	UpdatedAt           int64             `json:"updated_at_ms"`
+	CallbackProcessedAt *time.Time        `json:"callback_processed_at,omitempty"`
 }
 
 // Repository handles payment transaction persistence.
@@ -66,7 +70,11 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 // optional; if set and already exists, the existing record is returned.
 func (r *Repository) Create(ctx context.Context, txn *PaymentTransaction) (*PaymentTransaction, error) {
 	if txn.TransactionID == "" {
-		txn.TransactionID = uuid.New().String()
+		// UTID-aligned internal identifier (FIX-PAY-02: previously a bare UUID,
+		// which the admin lineage resolver could never recognize as a
+		// transaction). Legacy rows use bare UUIDs or "pf_<uuid>" (PayFast);
+		// the admin resolver handles all three formats.
+		txn.TransactionID = "TXN-" + uuid.New().String()
 	}
 	if txn.Currency == "" {
 		txn.Currency = "PKR"
@@ -92,7 +100,7 @@ func (r *Repository) Create(ctx context.Context, txn *PaymentTransaction) (*Paym
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
 		ON CONFLICT (idempotency_key) DO UPDATE SET
 			updated_at = EXCLUDED.updated_at
-		RETURNING id, transaction_id, order_tracking_id, gateway, gateway_txn_id, amount, currency, status, kind, idempotency_key, metadata, error_message, EXTRACT(EPOCH FROM created_at)*1000, EXTRACT(EPOCH FROM updated_at)*1000
+		RETURNING id, transaction_id, order_tracking_id, gateway, gateway_txn_id, amount, currency, status, kind, idempotency_key, metadata, error_message, EXTRACT(EPOCH FROM created_at)*1000, EXTRACT(EPOCH FROM updated_at)*1000, callback_processed_at
 	`
 
 	row := r.db.QueryRow(ctx, query,
@@ -124,20 +132,27 @@ func (r *Repository) UpdateStatus(ctx context.Context, transactionID string, sta
 
 // GetByIDempotencyKey returns a transaction by its idempotency key.
 func (r *Repository) GetByIDempotencyKey(ctx context.Context, key string) (*PaymentTransaction, error) {
-	query := `SELECT id, transaction_id, order_tracking_id, gateway, gateway_txn_id, amount, currency, status, kind, idempotency_key, metadata, error_message, EXTRACT(EPOCH FROM created_at)*1000, EXTRACT(EPOCH FROM updated_at)*1000 FROM payment_transactions WHERE idempotency_key = $1`
+	query := `SELECT id, transaction_id, order_tracking_id, gateway, gateway_txn_id, amount, currency, status, kind, idempotency_key, metadata, error_message, EXTRACT(EPOCH FROM created_at)*1000, EXTRACT(EPOCH FROM updated_at)*1000, callback_processed_at FROM payment_transactions WHERE idempotency_key = $1`
 	return scanTransaction(r.db.QueryRow(ctx, query, key))
 }
 
 // GetByOrderID returns the most recent payment transaction for an order.
 func (r *Repository) GetByOrderID(ctx context.Context, orderID string, kind TransactionKind) (*PaymentTransaction, error) {
-	query := `SELECT id, transaction_id, order_tracking_id, gateway, gateway_txn_id, amount, currency, status, kind, idempotency_key, metadata, error_message, EXTRACT(EPOCH FROM created_at)*1000, EXTRACT(EPOCH FROM updated_at)*1000 FROM payment_transactions WHERE order_tracking_id = $1 AND kind = $2 ORDER BY created_at DESC LIMIT 1`
+	query := `SELECT id, transaction_id, order_tracking_id, gateway, gateway_txn_id, amount, currency, status, kind, idempotency_key, metadata, error_message, EXTRACT(EPOCH FROM created_at)*1000, EXTRACT(EPOCH FROM updated_at)*1000, callback_processed_at FROM payment_transactions WHERE order_tracking_id = $1 AND kind = $2 ORDER BY created_at DESC LIMIT 1`
 	return scanTransaction(r.db.QueryRow(ctx, query, orderID, kind))
 }
 
 // GetByTransactionID returns a transaction by its internal transaction id.
 func (r *Repository) GetByTransactionID(ctx context.Context, txnID string) (*PaymentTransaction, error) {
-	query := `SELECT id, transaction_id, order_tracking_id, gateway, gateway_txn_id, amount, currency, status, kind, idempotency_key, metadata, error_message, EXTRACT(EPOCH FROM created_at)*1000, EXTRACT(EPOCH FROM updated_at)*1000 FROM payment_transactions WHERE transaction_id = $1`
+	query := `SELECT id, transaction_id, order_tracking_id, gateway, gateway_txn_id, amount, currency, status, kind, idempotency_key, metadata, error_message, EXTRACT(EPOCH FROM created_at)*1000, EXTRACT(EPOCH FROM updated_at)*1000, callback_processed_at FROM payment_transactions WHERE transaction_id = $1`
 	return scanTransaction(r.db.QueryRow(ctx, query, txnID))
+}
+
+// GetByGatewayTxnID returns the most recent payment transaction referenced by
+// a gateway-side transaction/refund identifier (e.g. JazzCash pp_TxnRefNo).
+func (r *Repository) GetByGatewayTxnID(ctx context.Context, gateway, gatewayTxnID string) (*PaymentTransaction, error) {
+	query := `SELECT id, transaction_id, order_tracking_id, gateway, gateway_txn_id, amount, currency, status, kind, idempotency_key, metadata, error_message, EXTRACT(EPOCH FROM created_at)*1000, EXTRACT(EPOCH FROM updated_at)*1000, callback_processed_at FROM payment_transactions WHERE gateway = $1 AND gateway_txn_id = $2 ORDER BY created_at DESC LIMIT 1`
+	return scanTransaction(r.db.QueryRow(ctx, query, gateway, gatewayTxnID))
 }
 
 // HashRequest returns a stable SHA-256 hash of a request payload.
@@ -184,7 +199,7 @@ func scanTransaction(row interface {
 	err := row.Scan(
 		&txn.ID, &txn.TransactionID, &txn.OrderID, &txn.Gateway, &txn.GatewayTxnID,
 		&txn.Amount, &txn.Currency, &txn.Status, &txn.Kind, &txn.IdempotencyKey,
-		&metadata, &txn.ErrorMessage, &createdAt, &updatedAt,
+		&metadata, &txn.ErrorMessage, &createdAt, &updatedAt, &txn.CallbackProcessedAt,
 	)
 	if err != nil {
 		return nil, err

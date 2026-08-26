@@ -187,12 +187,33 @@ type AuthTokenRequest struct {
 }
 
 // AuthTokenResponse represents the authentication response from PayFast API token endpoint.
+// Supports standard IPG ("token", "refresh_token", "expiry") and APPS UAT ("ACCESS_TOKEN", "access_token").
 type AuthTokenResponse struct {
-	Code         string `json:"code,omitempty"`
-	Token        string `json:"token,omitempty"`
-	RefreshToken string `json:"refresh_token,omitempty"`
-	ExpiresIn    string `json:"expiry,omitempty"` // Wait, docs say "expiry": "<no.ofseconds>"
-	Message      string `json:"message,omitempty"`
+	Code             string `json:"code,omitempty"`
+	Token            string `json:"token,omitempty"`
+	AccessToken      string `json:"access_token,omitempty"`
+	AccessTokenUpper string `json:"ACCESS_TOKEN,omitempty"`
+	RefreshToken     string `json:"refresh_token,omitempty"`
+	ExpiresIn        string `json:"expiry,omitempty"`
+	Message          string `json:"message,omitempty"`
+}
+
+// GetToken returns the resolved access token regardless of parameter casing.
+func (r *AuthTokenResponse) GetToken() string {
+	if r.Token != "" {
+		return r.Token
+	}
+	if r.AccessToken != "" {
+		return r.AccessToken
+	}
+	return r.AccessTokenUpper
+}
+
+// IsSuccessCode returns true if the status or error code represents a successful transaction.
+// PayFast APPS uses both "00" (APIs) and "000" (IPN callbacks & transaction inquiries).
+func IsSuccessCode(code string) bool {
+	c := strings.TrimSpace(code)
+	return c == "00" || c == "000"
 }
 
 // TokenCache holds in-memory cached OAuth/Auth tokens with thread-safe expiration checks.
@@ -406,9 +427,19 @@ import (
 )
 
 // Client handles all interaction with PayFast Pakistan gateway.
+//
+// NOTE: PayFast issues TWO distinct secrets at onboarding:
+//   - securedKey: used ONLY to fetch the OAuth access token (POST /token, "secured_key" field).
+//   - hashKey:    a SEPARATE "Hash Key" used ONLY as the HMAC-SHA256 secret for computing
+//     "secured_hash" on /customer/validate, /transaction, /transaction/token,
+//     /transaction/tokenized, etc. Per the official docs: "A key will be provided
+//     separately for the hash calculation." These two values are NOT interchangeable —
+//     signing with securedKey instead of hashKey produces a hash PayFast's server will
+//     never match, which is why they flagged "merchant secret not included in the hash".
 type Client struct {
 	merchantID     string
 	securedKey     string
+	hashKey        string
 	merchantName   string
 	baseURL        string
 	successURL     string
@@ -419,7 +450,7 @@ type Client struct {
 }
 
 // NewClient constructs a production-ready PayFast client from environment variables or custom config.
-func NewClient(merchantID, securedKey, merchantName, baseURL string) *Client {
+func NewClient(merchantID, securedKey, hashKey, merchantName, baseURL string) *Client {
 	if baseURL == "" {
 		baseURL = os.Getenv("PAYFAST_BASE_URL")
 	}
@@ -432,15 +463,21 @@ func NewClient(merchantID, securedKey, merchantName, baseURL string) *Client {
 	}
 
 	cb := NewCircuitBreaker(5, 10*time.Second)
+	tokenCb := NewCircuitBreaker(5, 10*time.Second)
+	if hashKey == "" {
+		hashKey = securedKey
+	}
+
 	c := &Client{
 		merchantID:     merchantID,
 		securedKey:     securedKey,
+		hashKey:        hashKey,
 		merchantName:   merchantName,
 		baseURL:        strings.TrimRight(baseURL, "/"),
 		successURL:     os.Getenv("PAYFAST_SUCCESS_URL"),
 		failureURL:     os.Getenv("PAYFAST_FAILURE_URL"),
 		httpClient:     httpClient,
-		tokens:         NewTokenManager(httpClient, baseURL, merchantID, securedKey, cb),
+		tokens:         NewTokenManager(httpClient, baseURL, merchantID, securedKey, tokenCb),
 		circuitBreaker: cb,
 	}
 
@@ -452,6 +489,7 @@ func NewClientFromEnv() *Client {
 	return NewClient(
 		os.Getenv("PAYFAST_MERCHANT_ID"),
 		os.Getenv("PAYFAST_SECURED_KEY"),
+		os.Getenv("PAYFAST_HASH_KEY"),
 		os.Getenv("PAYFAST_MERCHANT_NAME"),
 		os.Getenv("PAYFAST_BASE_URL"),
 	)
@@ -463,8 +501,30 @@ func (c *Client) CircuitBreaker() *CircuitBreaker {
 }
 
 // IsConfigured returns true if merchant credentials are present.
+// Per official PayFast response: Only Merchant ID and Secured Key are required.
 func (c *Client) IsConfigured() bool {
 	return c.merchantID != "" && c.securedKey != ""
+}
+
+// VerifyIPNHash verifies the integrity hash PayFast attaches to Instant Payment Notification (IPN)
+// callbacks sent to the merchant's registered checkout_url. Per PayFast's documented spec, this is
+// a PLAIN SHA256 (not HMAC) of "basket_id|merchant_secured_key|merchant_id|payfast_err_code".
+// It verifies against securedKey (official spec: "Merchant Secured Key"), with graceful fallback to hashKey.
+func (c *Client) VerifyIPNHash(basketID, payfastErrCode, receivedHash string) bool {
+	if receivedHash == "" {
+		return false
+	}
+	expectedSecured := CalculateResponseValidationHash(basketID, c.securedKey, c.merchantID, payfastErrCode)
+	if VerifyResponseHash(expectedSecured, receivedHash) {
+		return true
+	}
+	if c.hashKey != "" && c.hashKey != c.securedKey {
+		expectedHashKey := CalculateResponseValidationHash(basketID, c.hashKey, c.merchantID, payfastErrCode)
+		if VerifyResponseHash(expectedHashKey, receivedHash) {
+			return true
+		}
+	}
+	return false
 }
 
 // GetAuthToken returns a cached or freshly-fetched auth token via the internal TokenManager.
@@ -488,6 +548,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/omnigo/backend/internal/shared/telemetry"
 )
 
 // ErrCircuitBreakerOpen is returned when the gateway circuit breaker is tripped.
@@ -535,12 +597,29 @@ func NewCircuitBreaker(threshold int, cooldown time.Duration) *CircuitBreaker {
 	if cooldown <= 0 {
 		cooldown = 10 * time.Second
 	}
-	return &CircuitBreaker{
+	cb := &CircuitBreaker{
 		state:            StateClosed,
 		failureThreshold: threshold,
 		cooldownDuration: cooldown,
 		lastStateChange:  time.Now(),
 	}
+	telemetry.SetCircuitBreakerState("payfast", float64(StateClosed))
+	return cb
+}
+
+// setState is the SINGLE place circuit state is ever mutated, so that every transition is
+// consistently reflected in both the gauge (current state) and the transition counter (audit
+// trail of how often/which transitions happen) — call sites never assign cb.state directly.
+// Caller must hold cb.mu.
+func (cb *CircuitBreaker) setState(newState CircuitState) {
+	if cb.state == newState {
+		return
+	}
+	oldState := cb.state
+	cb.state = newState
+	cb.lastStateChange = time.Now()
+	telemetry.SetCircuitBreakerState("payfast", float64(newState))
+	telemetry.RecordCircuitBreakerTransition(oldState.String(), newState.String())
 }
 
 // Execute wraps an external network call with circuit breaking protection.
@@ -551,8 +630,7 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 	// Check if cooldown has elapsed in Open state -> transition to HalfOpen
 	if cb.state == StateOpen {
 		if now.Sub(cb.lastStateChange) >= cb.cooldownDuration {
-			cb.state = StateHalfOpen
-			cb.lastStateChange = now
+			cb.setState(StateHalfOpen)
 			cb.halfOpenProbing = true
 		} else {
 			cb.mu.Unlock()
@@ -582,8 +660,14 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 			cb.consecutiveFailures++
 
 			if cb.state == StateHalfOpen || cb.consecutiveFailures >= cb.failureThreshold {
-				cb.state = StateOpen
-				cb.lastStateChange = time.Now()
+				cb.setState(StateOpen)
+			}
+		} else {
+			// Deterministic non-transient error (e.g. 400 Bad Request, card declined)
+			// Proves upstream gateway is reachable and responding!
+			cb.consecutiveFailures = 0
+			if cb.state == StateHalfOpen {
+				cb.setState(StateClosed)
 			}
 		}
 		return err
@@ -592,8 +676,7 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 	// Success -> Reset circuit to Closed
 	cb.consecutiveFailures = 0
 	if cb.state == StateHalfOpen {
-		cb.state = StateClosed
-		cb.lastStateChange = time.Now()
+		cb.setState(StateClosed)
 	}
 	return nil
 }
@@ -609,10 +692,9 @@ func (cb *CircuitBreaker) State() CircuitState {
 func (cb *CircuitBreaker) Reset() {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
-	cb.state = StateClosed
+	cb.setState(StateClosed)
 	cb.failureCount = 0
 	cb.consecutiveFailures = 0
-	cb.lastStateChange = time.Now()
 }
 
 ```
@@ -717,8 +799,17 @@ func (tm *TokenManager) fetchToken(ctx context.Context) (string, string, error) 
 		return "", "", ErrNotConfigured
 	}
 
-	// Official API endpoint: /token
+	// Official API endpoint: /token or /Transaction/GetAccessToken (APPS net.pk IPG)
 	authURL := tm.baseURL + "/token"
+	if strings.Contains(tm.baseURL, "apps.net.pk") {
+		if strings.HasSuffix(tm.baseURL, "/GetAccessToken") {
+			authURL = tm.baseURL
+		} else if strings.HasSuffix(tm.baseURL, "/Transaction") {
+			authURL = tm.baseURL + "/GetAccessToken"
+		} else {
+			authURL = tm.baseURL + "/Transaction/GetAccessToken"
+		}
+	}
 	formData := url.Values{}
 	formData.Set("merchant_id", tm.merchantID)
 	formData.Set("grant_type", "client_credentials")
@@ -780,15 +871,15 @@ func (tm *TokenManager) fetchToken(ctx context.Context) (string, string, error) 
 	}
 
 	var res AuthTokenResponse
-	if err := json.Unmarshal(body, &res); err == nil && res.Token != "" {
-		if res.Code != "" && res.Code != "00" {
+	if err := json.Unmarshal(body, &res); err == nil && res.GetToken() != "" {
+		if res.Code != "" && !IsSuccessCode(res.Code) {
 			return "", "", &GatewayError{
 				StatusCode: resp.StatusCode,
 				Message:    "Authentication rejected by gateway",
 				StatusMsg:  fmt.Sprintf("code=%s msg=%s", res.Code, res.Message),
 			}
 		}
-		return res.Token, res.ExpiresIn, nil
+		return res.GetToken(), res.ExpiresIn, nil
 	}
 
 	return "", "", ErrAuthFailed
@@ -860,6 +951,41 @@ func VerifySignature(expected, received string) bool {
 	return subtle.ConstantTimeCompare(expBytes, recBytes) == 1
 }
 
+// CalculateResponseValidationHash computes PayFast's RESPONSE-integrity hash — distinct from the
+// "secured_hash" this client sends on REQUESTS (see CalculateValidationHash/CalculateTransactionHash/
+// CalculateTemporaryTokenHash/CalculateTokenizedTransactionHash above, which are HMAC-SHA256).
+//
+// Per PayFast's official spec, this one is:
+//   - Plain SHA256 (NOT HMAC) of a pipe-delimited string
+//   - Format: basketID + "|" + securedKey + "|" + merchantID + "|" + payfastErrCode
+//   - The secured key is embedded directly IN the hashed string, not used as an HMAC key
+//
+// Verified against PayFast's worked example:
+//
+//	CalculateResponseValidationHash("BAS-01", "jdnkaabcks", "102", "000")
+//	  == "e8192a7554dd699975adf39619c703a492392edf5e416a61e183866ecdf6a2a2"
+//
+// NOTE: which securedKey PayFast means here (the OAuth SECURED_KEY vs. a separate hash-only key)
+// is still unconfirmed — see the open question to PayFast's integration team. Do not assume;
+// pass whichever key value has been confirmed once support responds.
+//
+// NOTE 2: which response field(s)/endpoint(s) actually return this hash for verification, and
+// under what JSON key name, is also not yet confirmed. This function is provided so the wiring
+// can be completed the moment that's confirmed — see VerifyResponseHash below for the comparison
+// step once the field mapping is known.
+func CalculateResponseValidationHash(basketID, securedKey, merchantID, payfastErrCode string) string {
+	payload := basketID + "|" + securedKey + "|" + merchantID + "|" + payfastErrCode
+	sum := sha256.Sum256([]byte(payload))
+	return hex.EncodeToString(sum[:])
+}
+
+// VerifyResponseHash compares a locally-recomputed CalculateResponseValidationHash result against
+// the hash PayFast returned, using constant-time comparison (SHA256 hex digests, so case-insensitive
+// compare is safe and matches VerifySignature's convention).
+func VerifyResponseHash(expected, receivedFromPayFast string) bool {
+	return VerifySignature(expected, receivedFromPayFast)
+}
+
 // CalculateTemporaryTokenHash computes the required secured_hash for POST /transaction/token
 // Official rules:
 // Card: merchant_user_id + user_mobile_number + card_number + expiry_month + expiry_year + cvv
@@ -899,12 +1025,18 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
+
+	"github.com/omnigo/backend/internal/shared/telemetry"
 )
 
 // ValidateCustomerPayment calls POST /customer/validate
-func (c *Client) ValidateCustomerPayment(ctx context.Context, req CustomerValidationRequest) (*CustomerValidationResponse, error) {
+func (c *Client) ValidateCustomerPayment(ctx context.Context, req CustomerValidationRequest) (result *CustomerValidationResponse, err error) {
+	callStart := time.Now()
+	defer func() { telemetry.TimeGatewayCall("validate_customer", callStart, &err) }()
+
 	var validationRes *CustomerValidationResponse
-	err := c.circuitBreaker.Execute(func() error {
+	err = c.circuitBreaker.Execute(func() error {
 		token, err := c.GetAuthToken(ctx, req.CustomerIP)
 		if err != nil {
 			return fmt.Errorf("failed to get auth token: %w", err)
@@ -924,7 +1056,7 @@ func (c *Client) ValidateCustomerPayment(ctx context.Context, req CustomerValida
 		formData.Set("customer_ip", req.CustomerIP)
 
 		// Calculate and set secured_hash
-		securedHash := CalculateValidationHash(req, c.securedKey)
+		securedHash := CalculateValidationHash(req, c.hashKey)
 		formData.Set("secured_hash", securedHash)
 
 		// Instrument-specific parameters
@@ -999,9 +1131,12 @@ func (c *Client) ValidateCustomerPayment(ctx context.Context, req CustomerValida
 }
 
 // InitiateTransaction calls POST /transaction
-func (c *Client) InitiateTransaction(ctx context.Context, req InitiateTransactionRequest, otp string) (*InitiateTransactionResponse, error) {
+func (c *Client) InitiateTransaction(ctx context.Context, req InitiateTransactionRequest, otp string) (result *InitiateTransactionResponse, err error) {
+	callStart := time.Now()
+	defer func() { telemetry.TimeGatewayCall("initiate_transaction", callStart, &err) }()
+
 	var txnRes *InitiateTransactionResponse
-	err := c.circuitBreaker.Execute(func() error {
+	err = c.circuitBreaker.Execute(func() error {
 		token, err := c.GetAuthToken(ctx, req.CustomerIP)
 		if err != nil {
 			return fmt.Errorf("failed to get auth token: %w", err)
@@ -1030,7 +1165,7 @@ func (c *Client) InitiateTransaction(ctx context.Context, req InitiateTransactio
 			formData.Set("otp", otp)
 		}
 
-		securedHash := CalculateTransactionHash(req, otp, c.securedKey)
+		securedHash := CalculateTransactionHash(req, otp, c.hashKey)
 		formData.Set("secured_hash", securedHash)
 
 		if req.CardNumber != "" {
@@ -1104,10 +1239,12 @@ func (c *Client) InitiateTransaction(ctx context.Context, req InitiateTransactio
 }
 
 // GetTransactionStatus calls GET /transaction/<transaction_id>
-// GetTransactionStatus calls GET /transaction/<transaction_id>
-func (c *Client) GetTransactionStatus(ctx context.Context, transactionID string) (*TransactionStatusResponse, error) {
+func (c *Client) GetTransactionStatus(ctx context.Context, transactionID string) (result *TransactionStatusResponse, err error) {
+	callStart := time.Now()
+	defer func() { telemetry.TimeGatewayCall("transaction_status", callStart, &err) }()
+
 	var statusRes *TransactionStatusResponse
-	err := c.circuitBreaker.Execute(func() error {
+	err = c.circuitBreaker.Execute(func() error {
 		token, err := c.GetAuthToken(ctx, "")
 		if err != nil {
 			return fmt.Errorf("failed to get auth token: %w", err)
@@ -1165,9 +1302,12 @@ func (c *Client) GetTransactionStatus(ctx context.Context, transactionID string)
 }
 
 // GetTransactionStatusByBasketID calls GET /transaction/basket_id/<basket_id>
-func (c *Client) GetTransactionStatusByBasketID(ctx context.Context, basketID string) (*TransactionStatusResponse, error) {
+func (c *Client) GetTransactionStatusByBasketID(ctx context.Context, basketID string) (result *TransactionStatusResponse, err error) {
+	callStart := time.Now()
+	defer func() { telemetry.TimeGatewayCall("transaction_status_by_basket", callStart, &err) }()
+
 	var statusRes *TransactionStatusResponse
-	err := c.circuitBreaker.Execute(func() error {
+	err = c.circuitBreaker.Execute(func() error {
 		token, err := c.GetAuthToken(ctx, "")
 		if err != nil {
 			return fmt.Errorf("failed to get auth token: %w", err)
@@ -1225,9 +1365,12 @@ func (c *Client) GetTransactionStatusByBasketID(ctx context.Context, basketID st
 }
 
 // GetTemporaryTransactionToken calls POST /transaction/token
-func (c *Client) GetTemporaryTransactionToken(ctx context.Context, req TemporaryTokenRequest) (*TemporaryTokenResponse, error) {
+func (c *Client) GetTemporaryTransactionToken(ctx context.Context, req TemporaryTokenRequest) (result *TemporaryTokenResponse, err error) {
+	callStart := time.Now()
+	defer func() { telemetry.TimeGatewayCall("temporary_token", callStart, &err) }()
+
 	var tokenRes *TemporaryTokenResponse
-	err := c.circuitBreaker.Execute(func() error {
+	err = c.circuitBreaker.Execute(func() error {
 		token, err := c.GetAuthToken(ctx, req.CustomerIP)
 		if err != nil {
 			return fmt.Errorf("failed to get auth token: %w", err)
@@ -1263,7 +1406,7 @@ func (c *Client) GetTemporaryTransactionToken(ctx context.Context, req Temporary
 			formData.Set("cnic_number", req.CNICNumber)
 		}
 
-		securedHash := CalculateTemporaryTokenHash(req, c.securedKey)
+		securedHash := CalculateTemporaryTokenHash(req, c.hashKey)
 		formData.Set("secured_hash", securedHash)
 
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()))
@@ -1317,9 +1460,12 @@ func (c *Client) GetTemporaryTransactionToken(ctx context.Context, req Temporary
 }
 
 // InitiateTokenizedTransaction calls POST /transaction/tokenized
-func (c *Client) InitiateTokenizedTransaction(ctx context.Context, req TokenizedTransactionRequest) (*TokenizedTransactionResponse, error) {
+func (c *Client) InitiateTokenizedTransaction(ctx context.Context, req TokenizedTransactionRequest) (result *TokenizedTransactionResponse, err error) {
+	callStart := time.Now()
+	defer func() { telemetry.TimeGatewayCall("tokenized_transaction", callStart, &err) }()
+
 	var txnRes *TokenizedTransactionResponse
-	err := c.circuitBreaker.Execute(func() error {
+	err = c.circuitBreaker.Execute(func() error {
 		token, err := c.GetAuthToken(ctx, req.CustomerIP)
 		if err != nil {
 			return fmt.Errorf("failed to get auth token: %w", err)
@@ -1352,7 +1498,7 @@ func (c *Client) InitiateTokenizedTransaction(ctx context.Context, req Tokenized
 			formData.Set("data_3ds_pares", req.Data3DSPaRes)
 		}
 
-		securedHash := CalculateTokenizedTransactionHash(req, c.securedKey)
+		securedHash := CalculateTokenizedTransactionHash(req, c.hashKey)
 		formData.Set("secured_hash", securedHash)
 
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()))
@@ -1527,30 +1673,45 @@ func IsDeterministicRejection(err error) bool {
 	return false
 }
 
-// MapIssuerResponseCode converts raw 1LINK/bank ISO-8583 response codes into clear, actionable advice for customers.
+// MapIssuerResponseCode converts raw 1LINK/PayFast response codes into clear, actionable advice for customers.
 func MapIssuerResponseCode(code string) string {
 	switch strings.TrimSpace(code) {
-	case "00":
+	case "00", "000":
 		return "Approved"
-	case "05", "51":
+	case "002":
+		return "Transaction timed out at bank gateway. Please retry."
+	case "03":
+		return "You have entered an inactive account. Please contact your bank."
+	case "05", "51", "97", "881":
 		return "Insufficient balance in your card/account. Please top up and retry."
 	case "14", "54":
 		return "Card expired or invalid expiry date entered."
-	case "57", "58":
+	case "55":
+		return "You have entered an invalid OTP or PIN. Please check and retry."
+	case "57", "58", "880", "883":
 		return "Online e-commerce transactions are not enabled on your card. Please enable online shopping in your bank app and retry."
-	case "61":
-		return "Exceeded transaction amount limit on your card/account."
+	case "61", "106", "882":
+		return "Daily transaction limit or count exceeded on your card. Please contact your bank."
 	case "65":
 		return "Exceeded transaction frequency limit on your card."
 	case "75":
 		return "Incorrect CVV / OTP entered too many times."
+	case "104":
+		return "Entered payment details are incorrect. Please verify card number, CVV, and expiry."
+	case "803":
+		return "OTP has been sent to your email address."
+	case "804":
+		return "OTP has been sent to your mobile number."
+	case "805":
+		return "OTP verified successfully."
+	case "806":
+		return "OTP could not be verified. Please request a new OTP."
 	case "91", "96":
 		return "Your issuing bank or 1LINK switch is temporarily unavailable. Please retry in a few moments."
 	default:
 		return "Payment was declined by issuing bank."
 	}
 }
-
 
 ```
 
@@ -1579,6 +1740,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/omnigo/backend/internal/escrow"
 	"github.com/omnigo/backend/internal/ledger"
@@ -1673,14 +1835,14 @@ type PaymentResponse struct {
 
 // PaymentMetadata stores non-sensitive gateway token state. Zero cardholder data stored.
 type PaymentMetadata struct {
-	InstrumentToken string                 `json:"instrument_token"`
-	GatewayTxnID    string                 `json:"gateway_txn_id"`
-	Data3DSSecureID string                 `json:"data_3ds_secureid"`
-	ECI             string                 `json:"eci"`
-	CustomerMobile  string                 `json:"customer_mobile"`
-	AccountTypeID   string                 `json:"account_type"`
-	CustomerIP      string                 `json:"customer_ip"`
-	CalculatedSplit map[string]float64     `json:"calculated_split"`
+	InstrumentToken string             `json:"instrument_token"`
+	GatewayTxnID    string             `json:"gateway_txn_id"`
+	Data3DSSecureID string             `json:"data_3ds_secureid"`
+	ECI             string             `json:"eci"`
+	CustomerMobile  string             `json:"customer_mobile"`
+	AccountTypeID   string             `json:"account_type"`
+	CustomerIP      string             `json:"customer_ip"`
+	CalculatedSplit map[string]float64 `json:"calculated_split"`
 }
 
 // PayFastService orchestrates domain logic, database invariants, and PayFast API integration.
@@ -1695,6 +1857,7 @@ type PayFastService struct {
 	callbackSecret   string
 	merchantCategory string
 	callbackBaseURL  string
+	checkoutURL      string
 	defaultCurrency  string
 }
 
@@ -1720,7 +1883,19 @@ func NewPayFastService(
 	}
 	cbURL := os.Getenv("PAYFAST_3DS_CALLBACK_URL")
 	if cbURL == "" {
-		cbURL = "http://localhost:8080/api/v1/payments/payfast/3ds_callback"
+		if os.Getenv("GO_TEST_ENV") == "1" {
+			cbURL = "http://localhost:8080/api/v1/payments/payfast/3ds_callback"
+		} else {
+			panic("PAYFAST_3DS_CALLBACK_URL environment variable is required (must be a publicly reachable HTTPS URL that PayFast can POST 3DS callbacks to)")
+		}
+	}
+	checkoutURL := os.Getenv("PAYFAST_CHECKOUT_URL")
+	if checkoutURL == "" {
+		if os.Getenv("GO_TEST_ENV") == "1" {
+			checkoutURL = "http://localhost:8080/api/v1/payments/payfast/ipn"
+		} else {
+			panic("PAYFAST_CHECKOUT_URL environment variable is required (the IPN webhook URL registered with PayFast — must be a publicly reachable HTTPS URL)")
+		}
 	}
 	currency := os.Getenv("DEFAULT_CURRENCY")
 	if currency == "" {
@@ -1738,6 +1913,7 @@ func NewPayFastService(
 		callbackSecret:   secret,
 		merchantCategory: cat,
 		callbackBaseURL:  cbURL,
+		checkoutURL:      checkoutURL,
 		defaultCurrency:  currency,
 	}
 }
@@ -1796,12 +1972,7 @@ func (s *PayFastService) Build3DSCallbackURL(internalTxnID string) (string, erro
 }
 
 // ProcessPayment handles the primary checkout initiation.
-func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, clientIP string, req *PaymentRequest) (*PaymentResponse, error) {
-	// 1. Validate Input Payload
-	if err := req.Validate(); err != nil {
-		return nil, fmt.Errorf("validation error: %w", err)
-	}
-
+func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, clientIP string, req *PaymentRequest) (resp *PaymentResponse, err error) {
 	method := req.PaymentMethod
 	if method == "" {
 		if req.SavedCardID != "" {
@@ -1812,6 +1983,32 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 			method = "bank_account"
 		}
 	}
+
+	// Records the final outcome exactly once, from whichever of ProcessPayment's ~20 return
+	// points is actually hit — named returns + defer means every exit path is covered without
+	// scattering telemetry calls (and the risk of missing one) throughout the function body.
+	defer func() {
+		outcome := "failed"
+		if err == nil && resp != nil {
+			switch resp.Status {
+			case "3ds_redirect":
+				outcome = "three_ds_required"
+			case "gateway_pending":
+				outcome = "gateway_pending"
+			case "settlement_pending", "succeeded":
+				outcome = "succeeded"
+			default:
+				outcome = resp.Status
+			}
+		}
+		telemetry.RecordPaymentOutcome(method, outcome)
+	}()
+
+	// 1. Validate Input Payload
+	if verr := req.Validate(); verr != nil {
+		return nil, fmt.Errorf("validation error: %w", verr)
+	}
+
 	telemetry.RecordPaymentAttempt("payfast", method)
 
 	// 2. Run Pre-Authorization Fraud & Velocity Checks
@@ -1854,13 +2051,13 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 	}
 
 	internalTxnID := "pf_" + uuid.New().String()
-	idempotencyKey := fmt.Sprintf("pf:%s:%s", req.OrderID, merchantUserID)
+	idempotencyKey := fmt.Sprintf("pf:%s:%s", req.OrderID, internalTxnID)
 
 	// Check active attempts
 	var activeAttempts int
 	err = tx.QueryRow(ctx,
 		`SELECT count(*) FROM payment_transactions 
-		 WHERE order_tracking_id = $1 AND status IN ('processing', '3ds_required', 'settlement_pending', 'gateway_pending')`,
+		 WHERE order_tracking_id = $1 AND status IN ('pending', 'processing', '3ds_required', 'settlement_pending', 'gateway_pending')`,
 		req.OrderID,
 	).Scan(&activeAttempts)
 	if err != nil {
@@ -1895,7 +2092,11 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 
 	// Pre-calculate Split and assert exact zero-tolerance paisa parity
 	var deliveryTrackingID string
-	_ = tx.QueryRow(ctx, `SELECT COALESCE(tracking_id, '') FROM deliveries WHERE order_tracking_id = $1`, req.OrderID).Scan(&deliveryTrackingID)
+	if scanErr := tx.QueryRow(ctx, `SELECT COALESCE(tracking_id, '') FROM deliveries WHERE order_tracking_id = $1`, req.OrderID).Scan(&deliveryTrackingID); scanErr != nil {
+		if !errors.Is(scanErr, pgx.ErrNoRows) {
+			log.Printf("ERROR: delivery tracking id lookup error for order %s: %v", req.OrderID, scanErr)
+		}
+	}
 	split, err := s.calculator.CalculateSplit(ctx, expectedAmount, storeID, deliveryTrackingID)
 	if err != nil {
 		return nil, fmt.Errorf("commission split calculation failed: %w", err)
@@ -1940,11 +2141,15 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 	if req.SavedCardID != "" && s.vault != nil {
 		savedToken, err := s.vault.GetCardInstrumentToken(ctx, merchantUserID, req.SavedCardID)
 		if err != nil {
-			_ = s.MarkPaymentFailed(ctx, internalTxnID, "Invalid saved card token: "+err.Error())
+			if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Invalid saved card token: "+err.Error()); markErr != nil {
+				log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+			}
 			return nil, err
 		}
 
-		_, _ = s.db.Exec(ctx, `UPDATE payment_transactions SET status = 'processing', updated_at = NOW() WHERE transaction_id = $1`, internalTxnID)
+		if _, execErr := s.db.Exec(ctx, `UPDATE payment_transactions SET status = 'processing', updated_at = NOW() WHERE transaction_id = $1`, internalTxnID); execErr != nil {
+			log.Printf("WARNING: failed to update payment %s to 'processing': %v", internalTxnID, execErr)
+		}
 
 		txnReq := payfast.TokenizedTransactionRequest{
 			InstrumentToken:  savedToken,
@@ -1967,7 +2172,9 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 				s.fraud.RecordAttempt(ctx, merchantUserID, clientIP, false)
 			}
 			if payfast.IsTransient(err) {
-				_ = s.MarkPaymentGatewayPending(ctx, internalTxnID, "", "Saved card timeout: "+err.Error())
+				if markErr := s.MarkPaymentGatewayPending(ctx, internalTxnID, "", "Saved card timeout: "+err.Error()); markErr != nil {
+					log.Printf("CRITICAL: failed to update payment status via MarkPaymentGatewayPending for txn %s: %v", internalTxnID, markErr)
+				}
 				return &PaymentResponse{
 					Status:        "gateway_pending",
 					OrderID:       req.OrderID,
@@ -1975,15 +2182,19 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 					Message:       "Payment is processing at gateway; reconciliation in progress",
 				}, nil
 			}
-			_ = s.MarkPaymentFailed(ctx, internalTxnID, "Saved card capture failed: "+err.Error())
+			if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Saved card capture failed: "+err.Error()); markErr != nil {
+				log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+			}
 			return nil, fmt.Errorf("saved card payment failed: %w", err)
 		}
 
-		if txnRes.StatusCode != "00" && txnRes.StatusCode != "" {
+		if txnRes.StatusCode != "00" && txnRes.StatusCode != "000" && txnRes.StatusCode != "" {
 			if s.fraud != nil {
 				s.fraud.RecordAttempt(ctx, merchantUserID, clientIP, false)
 			}
-			_ = s.MarkPaymentFailed(ctx, internalTxnID, txnRes.StatusMsg)
+			if markErr := s.MarkPaymentFailed(ctx, internalTxnID, txnRes.StatusMsg); markErr != nil {
+				log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+			}
 			return nil, fmt.Errorf("gateway error: %s (%s)", txnRes.StatusMsg, payfast.MapIssuerResponseCode(txnRes.StatusCode))
 		}
 
@@ -2013,7 +2224,9 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 
 	callbackURL, err := s.Build3DSCallbackURL(internalTxnID)
 	if err != nil {
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, "Failed to build callback URL: "+err.Error())
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Failed to build callback URL: "+err.Error()); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return nil, err
 	}
 
@@ -2058,7 +2271,9 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		if s.fraud != nil {
 			s.fraud.RecordAttempt(ctx, merchantUserID, clientIP, false)
 		}
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, "Temporary token request failed: "+err.Error())
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Temporary token request failed: "+err.Error()); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return &PaymentResponse{
 			Status:        "failed",
 			OrderID:       req.OrderID,
@@ -2069,10 +2284,14 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 
 	// Auto-save card token in vault if customer opted in
 	if req.SaveCardForFuture && tokenRes.InstrumentToken != "" && s.vault != nil && lastFour != "" {
-		_, _ = s.vault.SaveCard(
+		if _, saveErr := s.vault.SaveCard(
 			ctx, customerTrackingID, tokenRes.InstrumentToken,
 			cardBrand, lastFour, req.ExpiryMonth, req.ExpiryYear, req.AccountTitle, false,
-		)
+		); saveErr != nil {
+			// Non-critical: the current payment still proceeds without the card being
+			// saved for future use, but we surface it so retries/monitoring can catch it.
+			log.Printf("WARNING: failed to save card to vault for user %s: %v", customerTrackingID, saveErr)
+		}
 	}
 
 	// 6. Evaluate Token Response (3DS Required vs Direct Tokenized Capture)
@@ -2088,12 +2307,28 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 			CalculatedSplit: splitMeta,
 		})
 
-		_, _ = s.db.Exec(ctx,
+		// This row (status + gateway_txn_id + metadata) is what Handle3DSCallback looks up
+		// when PayFast redirects the customer back after OTP verification. If this write
+		// fails, the callback will have no instrument token / split data to resume the
+		// transaction with — so we must NOT tell the client to proceed to 3DS in that case.
+		if _, execErr := s.db.Exec(ctx,
 			`UPDATE payment_transactions 
 			 SET status = '3ds_required', gateway_txn_id = $1, metadata = $2, updated_at = NOW() 
 			 WHERE transaction_id = $3`,
 			tokenRes.TransactionID, metaBytes, internalTxnID,
-		)
+		); execErr != nil {
+			log.Printf("CRITICAL: failed to persist 3ds_required state for txn %s: %v", internalTxnID, execErr)
+			if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Failed to persist 3DS state: "+execErr.Error()); markErr != nil {
+				log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+			}
+			return &PaymentResponse{
+				Status:        "failed",
+				Action:        "failed",
+				OrderID:       req.OrderID,
+				TransactionID: internalTxnID,
+				Message:       "Failed to prepare 3-D Secure verification. Please try again.",
+			}, fmt.Errorf("persist 3ds_required state: %w", execErr)
+		}
 
 		return &PaymentResponse{
 			Status:        "3ds_redirect",
@@ -2106,12 +2341,16 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 
 	// 7. Direct Tokenized Capture (3DS Not Required)
 	if tokenRes.InstrumentToken == "" {
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, "Gateway returned empty instrument token")
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Gateway returned empty instrument token"); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return nil, errors.New("invalid gateway token response")
 	}
 
 	// Mark processing
-	_, _ = s.db.Exec(ctx, `UPDATE payment_transactions SET status = 'processing', updated_at = NOW() WHERE transaction_id = $1`, internalTxnID)
+	if _, execErr := s.db.Exec(ctx, `UPDATE payment_transactions SET status = 'processing', updated_at = NOW() WHERE transaction_id = $1`, internalTxnID); execErr != nil {
+		log.Printf("WARNING: failed to update payment %s to 'processing': %v", internalTxnID, execErr)
+	}
 
 	txnReq := payfast.TokenizedTransactionRequest{
 		InstrumentToken:  tokenRes.InstrumentToken,
@@ -2136,7 +2375,9 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 			s.fraud.RecordAttempt(ctx, merchantUserID, clientIP, false)
 		}
 		if payfast.IsTransient(err) {
-			_ = s.MarkPaymentGatewayPending(ctx, internalTxnID, tokenRes.TransactionID, "Direct tokenized txn timeout: "+err.Error())
+			if markErr := s.MarkPaymentGatewayPending(ctx, internalTxnID, tokenRes.TransactionID, "Direct tokenized txn timeout: "+err.Error()); markErr != nil {
+				log.Printf("CRITICAL: failed to update payment status via MarkPaymentGatewayPending for txn %s: %v", internalTxnID, markErr)
+			}
 			return &PaymentResponse{
 				Status:        "gateway_pending",
 				OrderID:       req.OrderID,
@@ -2145,7 +2386,9 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 			}, nil
 		}
 
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, "Tokenized capture failed: "+err.Error())
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Tokenized capture failed: "+err.Error()); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return &PaymentResponse{
 			Status:        "failed",
 			OrderID:       req.OrderID,
@@ -2155,14 +2398,18 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 	}
 
 	if txnRes == nil || txnRes.TransactionID == "" {
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, "Gateway returned empty transaction ID")
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Gateway returned empty transaction ID"); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return nil, errors.New("invalid gateway transaction response")
 	}
-	if txnRes.StatusCode != "00" && txnRes.StatusCode != "" {
+	if !payfast.IsSuccessCode(txnRes.StatusCode) && txnRes.StatusCode != "" {
 		if s.fraud != nil {
 			s.fraud.RecordAttempt(ctx, merchantUserID, clientIP, false)
 		}
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, txnRes.StatusMsg)
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, txnRes.StatusMsg); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return nil, fmt.Errorf("gateway error: %s (%s)", txnRes.StatusMsg, payfast.MapIssuerResponseCode(txnRes.StatusCode))
 	}
 
@@ -2184,7 +2431,16 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 }
 
 // Handle3DSCallback processes the ACS form post callback with replay defense.
-func (s *PayFastService) Handle3DSCallback(ctx context.Context, mdParam, paRes, clientIP string) (string, error) {
+func (s *PayFastService) Handle3DSCallback(ctx context.Context, mdParam, paRes, clientIP string) (result string, err error) {
+	callbackStart := time.Now()
+	defer func() {
+		outcome := "settled"
+		if err != nil {
+			outcome = "failed"
+		}
+		telemetry.Observe3DSCallbackDuration(outcome, time.Since(callbackStart))
+	}()
+
 	internalTxnID, err := s.VerifyMD(mdParam)
 	if err != nil {
 		return "", fmt.Errorf("invalid MD signature: %w", err)
@@ -2252,19 +2508,27 @@ func (s *PayFastService) Handle3DSCallback(ctx context.Context, mdParam, paRes, 
 	txnRes, err := s.payfast.InitiateTokenizedTransaction(gwCtx, txnReq)
 	if err != nil {
 		if payfast.IsTransient(err) {
-			_ = s.MarkPaymentGatewayPending(ctx, internalTxnID, meta.GatewayTxnID, "Tokenized 3DS txn timeout: "+err.Error())
+			if markErr := s.MarkPaymentGatewayPending(ctx, internalTxnID, meta.GatewayTxnID, "Tokenized 3DS txn timeout: "+err.Error()); markErr != nil {
+				log.Printf("CRITICAL: failed to update payment status via MarkPaymentGatewayPending for txn %s: %v", internalTxnID, markErr)
+			}
 			return orderID, fmt.Errorf("gateway timeout during 3DS transaction: %w", err)
 		}
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, "Tokenized 3DS txn rejected: "+err.Error())
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Tokenized 3DS txn rejected: "+err.Error()); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return orderID, fmt.Errorf("3DS payment rejected: %w", err)
 	}
 
 	if txnRes == nil || txnRes.TransactionID == "" {
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, "Gateway returned empty transaction ID after 3DS")
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Gateway returned empty transaction ID after 3DS"); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return orderID, errors.New("invalid gateway response")
 	}
-	if txnRes.StatusCode != "00" && txnRes.StatusCode != "" {
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, txnRes.StatusMsg)
+	if !payfast.IsSuccessCode(txnRes.StatusCode) && txnRes.StatusCode != "" {
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, txnRes.StatusMsg); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return orderID, fmt.Errorf("gateway rejection: %s", txnRes.StatusMsg)
 	}
 
@@ -2279,40 +2543,54 @@ func (s *PayFastService) Handle3DSCallback(ctx context.Context, mdParam, paRes, 
 // VerifyAndSettle queries PayFast status and settles the database transaction atomically.
 func (s *PayFastService) VerifyAndSettle(ctx context.Context, internalTxnID, orderID, gatewayTxnID string, expectedAmount float64) error {
 	if gatewayTxnID == "" {
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, "Missing gateway transaction ID for status verification")
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Missing gateway transaction ID for status verification"); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return errors.New("invalid gateway transaction ID")
 	}
 
 	statusRes, err := s.payfast.GetTransactionStatus(ctx, gatewayTxnID)
 	if err != nil {
 		if payfast.IsTransient(err) {
-			_ = s.MarkPaymentGatewayPending(ctx, internalTxnID, gatewayTxnID, "Status verification timeout: "+err.Error())
+			if markErr := s.MarkPaymentGatewayPending(ctx, internalTxnID, gatewayTxnID, "Status verification timeout: "+err.Error()); markErr != nil {
+				log.Printf("CRITICAL: failed to update payment status via MarkPaymentGatewayPending for txn %s: %v", internalTxnID, markErr)
+			}
 			return fmt.Errorf("status verification timeout: %w", err)
 		}
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, "Status verification error: "+err.Error())
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Status verification error: "+err.Error()); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return err
 	}
 
-	if statusRes.StatusCode != "00" {
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, fmt.Sprintf("Gateway status '%s': %s", statusRes.StatusCode, statusRes.StatusMsg))
+	if !payfast.IsSuccessCode(statusRes.StatusCode) {
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, fmt.Sprintf("Gateway status '%s': %s", statusRes.StatusCode, statusRes.StatusMsg)); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return fmt.Errorf("gateway status rejection: %s", statusRes.StatusMsg)
 	}
 
 	if statusRes.BasketID != "" && statusRes.BasketID != orderID {
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, fmt.Sprintf("Basket ID mismatch: expected %s, got %s", orderID, statusRes.BasketID))
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, fmt.Sprintf("Basket ID mismatch: expected %s, got %s", orderID, statusRes.BasketID)); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return errors.New("basket ID mismatch")
 	}
 
 	if statusRes.TxnAmt != "" {
 		gatewayAmt, parseErr := strconv.ParseFloat(statusRes.TxnAmt, 64)
 		if parseErr != nil {
-			_ = s.MarkPaymentFailed(ctx, internalTxnID, "Invalid amount format in gateway status response")
+			if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Invalid amount format in gateway status response"); markErr != nil {
+				log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+			}
 			return fmt.Errorf("invalid gateway amount format: %w", parseErr)
 		}
 		expectedPaisa := int64(math.Round(expectedAmount * 100))
 		gatewayPaisa := int64(math.Round(gatewayAmt * 100))
 		if expectedPaisa != gatewayPaisa {
-			_ = s.MarkPaymentFailed(ctx, internalTxnID, fmt.Sprintf("Amount mismatch: expected %d paisa, got %d paisa", expectedPaisa, gatewayPaisa))
+			if markErr := s.MarkPaymentFailed(ctx, internalTxnID, fmt.Sprintf("Amount mismatch: expected %d paisa, got %d paisa", expectedPaisa, gatewayPaisa)); markErr != nil {
+				log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+			}
 			return errors.New("transaction amount mismatch")
 		}
 	}
@@ -2332,22 +2610,26 @@ func (s *PayFastService) ExecuteSplit(ctx context.Context, internalTxnID, orderI
 	// 1. Lock order FIRST (Global lock order: orders -> payment_transactions)
 	var dbAmount float64
 	var storeID string
-	var orderStatus string
+	var orderStatus, paymentStatus string
 	err = tx.QueryRow(ctx,
-		`SELECT total_amount, store_tracking_id, status FROM orders WHERE order_tracking_id = $1 FOR UPDATE`, orderID,
-	).Scan(&dbAmount, &storeID, &orderStatus)
+		`SELECT total_amount, store_tracking_id, status, COALESCE(payment_status, '') FROM orders WHERE order_tracking_id = $1 FOR UPDATE`, orderID,
+	).Scan(&dbAmount, &storeID, &orderStatus, &paymentStatus)
 	if err != nil {
 		return fmt.Errorf("order not found: %w", err)
 	}
-	if orderStatus == "paid" {
-		return errors.New("conflict: order already paid by another transaction")
+	if orderStatus == "paid" || paymentStatus == "paid" || paymentStatus == "settlement_pending" {
+		return errors.New("conflict: order already paid or settlement in progress")
 	}
 	if dbAmount != expectedAmount {
 		return fmt.Errorf("order amount changed: expected %.2f, got %.2f", expectedAmount, dbAmount)
 	}
 
 	var deliveryTrackingID string
-	_ = tx.QueryRow(ctx, `SELECT COALESCE(tracking_id, '') FROM deliveries WHERE order_tracking_id = $1`, orderID).Scan(&deliveryTrackingID)
+	if scanErr := tx.QueryRow(ctx, `SELECT COALESCE(tracking_id, '') FROM deliveries WHERE order_tracking_id = $1`, orderID).Scan(&deliveryTrackingID); scanErr != nil {
+		if !errors.Is(scanErr, pgx.ErrNoRows) {
+			log.Printf("ERROR: delivery tracking id lookup error for order %s: %v", orderID, scanErr)
+		}
+	}
 
 	split, err := s.calculator.CalculateSplit(ctx, dbAmount, storeID, deliveryTrackingID)
 	if err != nil {
@@ -2467,6 +2749,104 @@ func (s *PayFastService) MarkPaymentGatewayPending(ctx context.Context, internal
 	return nil
 }
 
+// IPNParams holds the fields PayFast sends as query-string parameters when it POSTs/GETs an
+// Instant Payment Notification (IPN) to the merchant's registered checkout_url.
+// Supports flexible naming across PayFast APPS documentation variants.
+type IPNParams struct {
+	BasketID       string `form:"basket_id"`
+	BasketIDAlt    string `form:"Basket_ID"`
+	OrderID        string `form:"order_id"`
+	StatusCode     string `form:"status_code"` // this is the "payfast_err_code" the hash formula refers to
+	ErrCode        string `form:"err_code"`
+	TransactionID  string `form:"transaction_id"`
+	TxnAmt         string `form:"txnamt"`
+	SecuredHash    string `form:"secured_hash"`
+	ValidationHash string `form:"validation_hash"`
+}
+
+func (p *IPNParams) NormalizedBasketID() string {
+	if p.BasketID != "" {
+		return p.BasketID
+	}
+	if p.BasketIDAlt != "" {
+		return p.BasketIDAlt
+	}
+	return p.OrderID
+}
+
+func (p *IPNParams) NormalizedStatusCode() string {
+	if p.StatusCode != "" {
+		return p.StatusCode
+	}
+	return p.ErrCode
+}
+
+func (p *IPNParams) NormalizedHash() string {
+	if p.SecuredHash != "" {
+		return p.SecuredHash
+	}
+	return p.ValidationHash
+}
+
+// HandleIPN processes an Instant Payment Notification from PayFast's checkout_url webhook.
+func (s *PayFastService) HandleIPN(ctx context.Context, params IPNParams) error {
+	basketID := params.NormalizedBasketID()
+	statusCode := params.NormalizedStatusCode()
+	receivedHash := params.NormalizedHash()
+
+	if basketID == "" {
+		telemetry.RecordIPNReceived(false)
+		return errors.New("validation: missing basket_id in IPN payload")
+	}
+
+	if !s.payfast.VerifyIPNHash(basketID, statusCode, receivedHash) {
+		telemetry.RecordIPNReceived(false)
+		log.Printf("[PayFastService] SECURITY: IPN hash verification failed for basket_id=%s — possible spoofed callback, ignoring", basketID)
+		return errors.New("validation: IPN hash verification failed")
+	}
+	telemetry.RecordIPNReceived(true)
+
+	// Robust transaction lookup: match by gateway_txn_id first if supplied, otherwise fallback to active/latest txn for order
+	var internalTxnID, gatewayTxnID string
+	var amount float64
+	var err error
+
+	if params.TransactionID != "" {
+		err = s.db.QueryRow(ctx,
+			`SELECT transaction_id, COALESCE(gateway_txn_id, ''), amount 
+			 FROM payment_transactions 
+			 WHERE gateway_txn_id = $1 OR (order_tracking_id = $2 AND status IN ('processing', '3ds_required', 'gateway_pending', 'pending'))
+			 ORDER BY created_at DESC LIMIT 1`,
+			params.TransactionID, basketID,
+		).Scan(&internalTxnID, &gatewayTxnID, &amount)
+	} else {
+		err = s.db.QueryRow(ctx,
+			`SELECT transaction_id, COALESCE(gateway_txn_id, ''), amount 
+			 FROM payment_transactions 
+			 WHERE order_tracking_id = $1 
+			 ORDER BY created_at DESC LIMIT 1`,
+			basketID,
+		).Scan(&internalTxnID, &gatewayTxnID, &amount)
+	}
+
+	if err != nil {
+		return fmt.Errorf("no payment transaction found for basket_id %s: %w", basketID, err)
+	}
+
+	if gatewayTxnID == "" && params.TransactionID != "" {
+		gatewayTxnID = params.TransactionID
+	}
+
+	if !payfast.IsSuccessCode(statusCode) && statusCode != "" {
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "IPN reported failure, status_code: "+statusCode); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
+		return nil
+	}
+
+	return s.VerifyAndSettle(ctx, internalTxnID, basketID, gatewayTxnID, amount)
+}
+
 ```
 
 ---
@@ -2478,6 +2858,8 @@ package handlers
 
 import (
 	"fmt"
+	"html"
+	"log"
 	"net/http"
 	"strings"
 
@@ -2509,6 +2891,8 @@ func (h *PayFastSplitHandler) RegisterRoutes(r gin.IRoutes) {
 	r.POST("/api/v1/payments/payfast/payment", middleware.JWTAuth(), h.ProcessPayment)
 	r.POST("/api/v1/payments/payfast/3ds_callback", h.ThreeDSCallback)
 	r.GET("/api/v1/payments/payfast/3ds_callback", h.ThreeDSCallback)
+	r.POST("/api/v1/payments/payfast/ipn", h.IPNCallback)
+	r.GET("/api/v1/payments/payfast/ipn", h.IPNCallback)
 }
 
 // ProcessPayment handles POST /api/v1/payments/payfast/payment (Option C Token Flow).
@@ -2576,6 +2960,7 @@ func (h *PayFastSplitHandler) ThreeDSCallback(c *gin.Context) {
 		return
 	}
 
+	safeOrderID := html.EscapeString(orderID)
 	if strings.Contains(c.GetHeader("Accept"), "text/html") {
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, fmt.Sprintf(`<!DOCTYPE html>
@@ -2589,7 +2974,7 @@ func (h *PayFastSplitHandler) ThreeDSCallback(c *gin.Context) {
         if (window.FlutterChannel) { window.FlutterChannel.postMessage(JSON.stringify({status: 'success', order_id: '%s'})); }
     </script>
 </body>
-</html>`, orderID, orderID, orderID))
+</html>`, safeOrderID, safeOrderID, safeOrderID))
 		return
 	}
 
@@ -2602,6 +2987,7 @@ func (h *PayFastSplitHandler) ThreeDSCallback(c *gin.Context) {
 
 // respond3DSError sends a format-appropriate response (HTML for webviews, JSON for APIs).
 func (h *PayFastSplitHandler) respond3DSError(c *gin.Context, statusCode int, message string) {
+	safeMessage := html.EscapeString(message)
 	if strings.Contains(c.GetHeader("Accept"), "text/html") {
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(statusCode, fmt.Sprintf(`<!DOCTYPE html>
@@ -2611,10 +2997,30 @@ func (h *PayFastSplitHandler) respond3DSError(c *gin.Context, statusCode int, me
     <h2 style="color:#c62828;">Payment Authentication Failed</h2>
     <p>%s</p>
 </body>
-</html>`, message))
+</html>`, safeMessage))
 		return
 	}
-	c.JSON(statusCode, gin.H{"error": message})
+	c.JSON(statusCode, gin.H{"error": safeMessage})
+}
+
+// IPNCallback handles the checkout_url Instant Payment Notification (IPN).
+func (h *PayFastSplitHandler) IPNCallback(c *gin.Context) {
+	var params payfastSvc.IPNParams
+	if err := c.ShouldBind(&params); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid IPN payload: " + err.Error()})
+		return
+	}
+
+	if err := h.service.HandleIPN(c.Request.Context(), params); err != nil {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "validation") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid or unverifiable IPN payload"})
+			return
+		}
+		log.Printf("[PayFastHandler] IPN processing error for basket_id=%s: %v", params.BasketID, err)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "received"})
 }
 
 ```
@@ -2629,6 +3035,7 @@ package workers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -2636,6 +3043,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
@@ -2643,6 +3051,7 @@ import (
 	"github.com/omnigo/backend/internal/ledger"
 	"github.com/omnigo/backend/internal/payment/payfast"
 	"github.com/omnigo/backend/internal/payment_orchestrator"
+	"github.com/omnigo/backend/internal/shared/telemetry"
 )
 
 type SettlementPayload struct {
@@ -2764,22 +3173,30 @@ func (w *SettlementWorker) processPendingSettlements(ctx context.Context) {
 
 	// Mark claimed items as PROCESSING within the transaction
 	for _, item := range items {
-		_, _ = tx.Exec(ctx, `UPDATE outbox_events SET status = 'PROCESSING', updated_at = NOW() WHERE id = $1`, item.ID)
+		if _, execErr := tx.Exec(ctx, `UPDATE outbox_events SET status = 'PROCESSING', updated_at = NOW() WHERE id = $1`, item.ID); execErr != nil {
+			log.Printf("[SettlementWorker] Failed to claim outbox event %d as PROCESSING: %v — aborting batch, will retry next poll", item.ID, execErr)
+			return
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return
 	}
 
 	for _, item := range items {
+		itemStart := time.Now()
 		if err := w.processSingleSettlement(ctx, item.ID, item.Payload); err != nil {
+			telemetry.ObserveSettlementDuration("failed", time.Since(itemStart))
 			log.Printf("[SettlementWorker] Error processing settlement outbox event %d: %v", item.ID, err)
-			// Revert to PENDING with backoff count so it can be retried by the worker loop
-			_, _ = w.db.Exec(ctx,
+			if _, execErr := w.db.Exec(ctx,
 				`UPDATE outbox_events 
 				 SET status = 'PENDING', retry_count = retry_count + 1, error_message = $1, updated_at = NOW() 
 				 WHERE id = $2`,
 				err.Error(), item.ID,
-			)
+			); execErr != nil {
+				log.Printf("[SettlementWorker] CRITICAL: failed to revert outbox event %d to PENDING after processing error: %v", item.ID, execErr)
+			}
+		} else {
+			telemetry.ObserveSettlementDuration("settled", time.Since(itemStart))
 		}
 	}
 }
@@ -2835,20 +3252,22 @@ func (w *SettlementWorker) processSingleSettlement(ctx context.Context, eventID 
 	}
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx,
-		`UPDATE payment_transactions SET status = 'captured', updated_at = NOW() WHERE transaction_id = $1`,
-		payload.InternalTxnID,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to update payment to captured: %w", err)
-	}
-
+	// 1. Lock/Update orders FIRST (Global lock order: orders -> payment_transactions)
 	_, err = tx.Exec(ctx,
 		`UPDATE orders SET status = 'paid', payment_status = 'paid', updated_at = NOW() WHERE order_tracking_id = $1`,
 		payload.OrderID,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update order to paid: %w", err)
+	}
+
+	// 2. Update payment_transactions SECOND
+	_, err = tx.Exec(ctx,
+		`UPDATE payment_transactions SET status = 'captured', updated_at = NOW() WHERE transaction_id = $1`,
+		payload.InternalTxnID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update payment to captured: %w", err)
 	}
 
 	_, err = tx.Exec(ctx,
@@ -2913,10 +3332,20 @@ func (w *SettlementWorker) reconcileStuckPayments(ctx context.Context) {
 	rows.Close()
 
 	// Touch updated_at inside claiming transaction so concurrent pods won't pick up the same rows
+	claimFailed := false
 	for _, p := range list {
-		_, _ = tx.Exec(ctx, `UPDATE payment_transactions SET updated_at = NOW() WHERE transaction_id = $1`, p.InternalTxnID)
+		if _, execErr := tx.Exec(ctx, `UPDATE payment_transactions SET updated_at = NOW() WHERE transaction_id = $1`, p.InternalTxnID); execErr != nil {
+			log.Printf("[SettlementWorker] Failed to claim stuck txn %s for reconciliation: %v", p.InternalTxnID, execErr)
+			claimFailed = true
+		}
 	}
-	_ = tx.Commit(ctx)
+	if claimFailed {
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		log.Printf("[SettlementWorker] CRITICAL: failed to commit reconciliation claim: %v", err)
+		return
+	}
 
 	for _, p := range list {
 		var statusRes *payfast.TransactionStatusResponse
@@ -2934,20 +3363,24 @@ func (w *SettlementWorker) reconcileStuckPayments(ctx context.Context) {
 			log.Printf("[SettlementWorker] Reconciliation status check failed for %s (Order: %s, GatewayID: %s): %v",
 				p.InternalTxnID, p.OrderID, p.GatewayTxnID, inquiryErr)
 
-			// If payment has been stuck for > 15 minutes and gateway returns not found/error, fail deterministically
 			if time.Since(p.CreatedAt) > 15*time.Minute && !payfast.IsTransient(inquiryErr) {
 				log.Printf("[SettlementWorker] Timing out stale stuck payment %s (>15m). Marking failed.", p.InternalTxnID)
-				_, _ = w.db.Exec(ctx,
+				if _, execErr := w.db.Exec(ctx,
 					`UPDATE payment_transactions 
 					 SET status = 'failed', error_message = 'Reconciliation timed out: no gateway transaction found', updated_at = NOW() 
 					 WHERE transaction_id = $1 AND status IN ('gateway_pending', 'processing')`,
 					p.InternalTxnID,
-				)
+				); execErr != nil {
+					log.Printf("[SettlementWorker] CRITICAL: failed to mark timed-out reconciliation %s as failed: %v", p.InternalTxnID, execErr)
+				}
+				telemetry.RecordReconciliationOutcome("timeout")
+			} else {
+				telemetry.RecordReconciliationOutcome("still_pending")
 			}
 			continue
 		}
 
-		if statusRes.StatusCode == "00" && (statusRes.BasketID == "" || statusRes.BasketID == p.OrderID) {
+		if payfast.IsSuccessCode(statusRes.StatusCode) && (statusRes.BasketID == "" || statusRes.BasketID == p.OrderID) {
 			// Verify amount in paisa if returned by gateway
 			if statusRes.TxnAmt != "" {
 				if gatewayAmt, err := strconv.ParseFloat(statusRes.TxnAmt, 64); err == nil {
@@ -2955,10 +3388,13 @@ func (w *SettlementWorker) reconcileStuckPayments(ctx context.Context) {
 					gatewayPaisa := int64(math.Round(gatewayAmt * 100))
 					if expectedPaisa != gatewayPaisa {
 						log.Printf("[SettlementWorker] Reconciliation amount mismatch for %s: expected %d paisa, got %d paisa", p.InternalTxnID, expectedPaisa, gatewayPaisa)
-						_, _ = w.db.Exec(ctx,
+						if _, execErr := w.db.Exec(ctx,
 							`UPDATE payment_transactions SET status = 'failed', error_message = 'Reconciliation amount mismatch', updated_at = NOW() WHERE transaction_id = $1`,
 							p.InternalTxnID,
-						)
+						); execErr != nil {
+							log.Printf("[SettlementWorker] CRITICAL: failed to mark amount-mismatched txn %s as failed: %v", p.InternalTxnID, execErr)
+						}
+						telemetry.RecordReconciliationOutcome("amount_mismatch")
 						continue
 					}
 				}
@@ -2970,18 +3406,22 @@ func (w *SettlementWorker) reconcileStuckPayments(ctx context.Context) {
 			}
 
 			log.Printf("[SettlementWorker] Reconciliation verified SUCCESS for %s (%s). Enqueuing atomic settlement...", p.InternalTxnID, resolvedGatewayTxnID)
+			telemetry.RecordReconciliationOutcome("settled")
 			w.enqueueSettlementOutbox(ctx, p.InternalTxnID, p.OrderID, resolvedGatewayTxnID, p.Amount)
-		} else if statusRes.StatusCode != "" && statusRes.StatusCode != "00" {
+		} else if statusRes.StatusCode != "" && !payfast.IsSuccessCode(statusRes.StatusCode) {
 			log.Printf("[SettlementWorker] Reconciliation verified REJECTION for %s: %s (code: %s)", p.InternalTxnID, statusRes.StatusMsg, statusRes.StatusCode)
-			_, _ = w.db.Exec(ctx,
+			if _, execErr := w.db.Exec(ctx,
 				`UPDATE payment_transactions SET status = 'failed', error_message = $1, updated_at = NOW() WHERE transaction_id = $2`,
 				statusRes.StatusMsg, p.InternalTxnID,
-			)
+			); execErr != nil {
+				log.Printf("[SettlementWorker] CRITICAL: failed to mark rejected txn %s as failed: %v", p.InternalTxnID, execErr)
+			}
+			telemetry.RecordReconciliationOutcome("failed")
 		}
 	}
 }
 
-// cleanupStalePending marks abandoned 'pending' and '3ds_required' rows (>15m old) as failed so they don't block subsequent checkouts.
+// cleanupStalePending marks abandoned 'pending' and '3ds_required' rows (>15m old) as failed.
 func (w *SettlementWorker) cleanupStalePending(ctx context.Context) {
 	res, err := w.db.Exec(ctx,
 		`UPDATE payment_transactions 
@@ -3023,7 +3463,11 @@ func (w *SettlementWorker) enqueueSettlementOutbox(ctx context.Context, internal
 	}
 
 	var deliveryTrackingID string
-	_ = tx.QueryRow(ctx, `SELECT COALESCE(tracking_id, '') FROM deliveries WHERE order_tracking_id = $1`, orderID).Scan(&deliveryTrackingID)
+	if scanErr := tx.QueryRow(ctx, `SELECT COALESCE(tracking_id, '') FROM deliveries WHERE order_tracking_id = $1`, orderID).Scan(&deliveryTrackingID); scanErr != nil {
+		if !errors.Is(scanErr, pgx.ErrNoRows) {
+			log.Printf("ERROR: delivery tracking id lookup error for order %s: %v", orderID, scanErr)
+		}
+	}
 
 	split, err := w.calculator.CalculateSplit(ctx, amount, storeID, deliveryTrackingID)
 	if err != nil {
@@ -3121,7 +3565,1043 @@ func (w *SettlementWorker) enqueueSettlementOutbox(ctx context.Context, internal
 
 ---
 
-## 11. `internal/payment/payfast/payfast_test.go`
+## 11. `internal/payment_orchestrator/commission.go`
+
+```go
+package payment_orchestrator
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"math"
+	"os"
+	"strconv"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+func roundToPaisa(val float64) float64 {
+	return math.Round(val*100.0) / 100.0
+}
+
+// SplitResult contains the calculated payment split for an order.
+type SplitResult struct {
+	OrderTotal     float64 `json:"order_total"`
+	DeliveryFee    float64 `json:"delivery_fee"`
+	AdminRevenue   float64 `json:"admin_revenue"`   // Dynamic rate based on store commission + COD surcharge
+	VendorEscrow   float64 `json:"vendor_escrow"`   // Remainder after admin + delivery
+	DeliveryEscrow float64 `json:"delivery_escrow"` // delivery_fee → held for rider payout
+	CommissionRate float64 `json:"commission_rate"` // Base store commission rate
+}
+
+func envFloat(key string, fallback float64) float64 {
+	valStr := os.Getenv(key)
+	if valStr != "" {
+		if val, err := strconv.ParseFloat(valStr, 64); err == nil {
+			return val
+		} else {
+			log.Printf("Invalid float for %s: %v, using fallback %f", key, err, fallback)
+		}
+	}
+	return fallback
+}
+
+// CommissionCalculator computes payment splits from order and delivery data.
+type CommissionCalculator struct {
+	db *pgxpool.Pool
+}
+
+func NewCommissionCalculator(db *pgxpool.Pool) *CommissionCalculator {
+	return &CommissionCalculator{db: db}
+}
+
+// CalculateSplit computes the three-way split for an online payment.
+// It reads the store's commission_rate and the delivery gig's fee.
+func (c *CommissionCalculator) CalculateSplit(ctx context.Context, orderTotal float64, storeTrackingID, deliveryTrackingID string) (*SplitResult, error) {
+	// 1. Read store commission_rate
+	var commissionRate float64 = envFloat("DEFAULT_COMMISSION_RATE", 2.00)
+	err := c.db.QueryRow(ctx,
+		`SELECT commission_rate FROM stores WHERE store_tracking_id = $1`, storeTrackingID,
+	).Scan(&commissionRate)
+	if err != nil {
+		// Default if store not found
+		commissionRate = envFloat("DEFAULT_COMMISSION_RATE", 2.00)
+	}
+
+	// 2. Read delivery fee from the gig
+	var deliveryFee float64
+	if deliveryTrackingID != "" {
+		err = c.db.QueryRow(ctx,
+			`SELECT COALESCE(delivery_fee, 0) FROM deliveries WHERE tracking_id = $1`, deliveryTrackingID,
+		).Scan(&deliveryFee)
+		if err != nil {
+			deliveryFee = 0
+		}
+	}
+
+	// 3. Calculate splits with exact 2-decimal paisa precision
+	adminRevenue := roundToPaisa(orderTotal * commissionRate / 100.0)
+	deliveryEscrow := roundToPaisa(deliveryFee)
+	var vendorEscrow float64
+
+	// Guarantee that total split never exceeds orderTotal
+	if adminRevenue+deliveryEscrow > orderTotal {
+		if deliveryEscrow >= orderTotal {
+			deliveryEscrow = roundToPaisa(orderTotal)
+			adminRevenue = 0
+			vendorEscrow = 0
+		} else {
+			adminRevenue = roundToPaisa(orderTotal - deliveryEscrow)
+			vendorEscrow = 0
+		}
+	} else {
+		vendorEscrow = roundToPaisa(orderTotal - adminRevenue - deliveryEscrow)
+	}
+
+	return &SplitResult{
+		OrderTotal:     roundToPaisa(orderTotal),
+		DeliveryFee:    deliveryEscrow,
+		AdminRevenue:   adminRevenue,
+		VendorEscrow:   vendorEscrow,
+		DeliveryEscrow: deliveryEscrow,
+		CommissionRate: commissionRate,
+	}, nil
+}
+
+// CalculateCODSplit computes the split for COD settlement (higher admin cut since rider handled cash).
+func (c *CommissionCalculator) CalculateCODSplit(ctx context.Context, orderTotal float64, storeTrackingID string, orderTrackingID string) (*SplitResult, error) {
+	var commissionRate float64 = envFloat("DEFAULT_COMMISSION_RATE", 2.00)
+	err := c.db.QueryRow(ctx,
+		`SELECT commission_rate FROM stores WHERE store_tracking_id = $1`, storeTrackingID,
+	).Scan(&commissionRate)
+	if err != nil {
+		commissionRate = envFloat("DEFAULT_COMMISSION_RATE", 2.00)
+	}
+
+	var deliveryFee float64
+	if orderTrackingID != "" {
+		err = c.db.QueryRow(ctx,
+			`SELECT COALESCE(delivery_fee, 0) FROM deliveries WHERE order_tracking_id = $1 LIMIT 1`, orderTrackingID,
+		).Scan(&deliveryFee)
+		if err != nil {
+			deliveryFee = 0
+		}
+	}
+
+	codSurcharge := envFloat("COD_SURCHARGE_RATE", 0.5)
+
+	adminRevenue := roundToPaisa(orderTotal * (commissionRate + codSurcharge) / 100.0)
+	deliveryEscrow := roundToPaisa(deliveryFee)
+	var vendorEscrow float64
+
+	// Guarantee total COD split never exceeds orderTotal
+	if adminRevenue+deliveryEscrow > orderTotal {
+		if deliveryEscrow >= orderTotal {
+			deliveryEscrow = roundToPaisa(orderTotal)
+			adminRevenue = 0
+			vendorEscrow = 0
+		} else {
+			adminRevenue = roundToPaisa(orderTotal - deliveryEscrow)
+			vendorEscrow = 0
+		}
+	} else {
+		vendorEscrow = roundToPaisa(orderTotal - adminRevenue - deliveryEscrow)
+	}
+
+	return &SplitResult{
+		OrderTotal:     roundToPaisa(orderTotal),
+		DeliveryFee:    deliveryEscrow,
+		AdminRevenue:   adminRevenue,
+		VendorEscrow:   vendorEscrow,
+		DeliveryEscrow: deliveryEscrow,
+		CommissionRate: commissionRate,
+	}, nil
+}
+
+// CalculateRiderDeliveryCredit computes the rider's earning from a completed delivery.
+// Rider gets: delivery_fee - admin_commission
+func (c *CommissionCalculator) CalculateRiderDeliveryCredit(ctx context.Context, deliveryTrackingID string) (riderEarning, adminCommission float64, err error) {
+	var deliveryFee float64
+	err = c.db.QueryRow(ctx,
+		`SELECT COALESCE(delivery_fee, 0), COALESCE(admin_commission, 0) FROM deliveries WHERE tracking_id = $1`,
+		deliveryTrackingID,
+	).Scan(&deliveryFee, &adminCommission)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to read delivery gig: %w", err)
+	}
+
+	riderEarning = roundToPaisa(deliveryFee - adminCommission)
+	if riderEarning < 0 {
+		riderEarning = 0
+	}
+
+	return riderEarning, roundToPaisa(adminCommission), nil
+}
+
+```
+
+---
+
+## 12. `internal/payment_orchestrator/workers/payout_worker.go`
+
+```go
+package workers
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/omnigo/backend/internal/ledger"
+	"github.com/omnigo/backend/internal/shared/database"
+	"github.com/redis/go-redis/v9"
+)
+
+// PayoutWorker runs periodically to release vendor payouts from released escrow.
+type PayoutWorker struct {
+	db     *pgxpool.Pool
+	ledger *ledger.Service
+	redis  redis.UniversalClient
+}
+
+func NewPayoutWorker(db *pgxpool.Pool, ledgerSvc *ledger.Service, rdb redis.UniversalClient) *PayoutWorker {
+	return &PayoutWorker{db: db, ledger: ledgerSvc, redis: rdb}
+}
+
+// Start begins the hourly payout loop.
+func (w *PayoutWorker) Start(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	fmt.Println("[PayoutWorker] Started — checking every hour for releasable vendor funds")
+
+	// Run immediately on start
+	w.processPayouts(ctx)
+
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Println("[PayoutWorker] Shutting down")
+			return
+		case <-ticker.C:
+			w.processPayouts(ctx)
+		}
+	}
+}
+
+func (w *PayoutWorker) processPayouts(ctx context.Context) {
+	if w.redis != nil {
+		lockKey := "lock:workers:payout-worker"
+		success, err := w.redis.SetNX(ctx, lockKey, "1", 30*time.Minute).Result()
+		if err != nil {
+			fmt.Printf("[PayoutWorker] Redis lock error: %v\n", err)
+			return
+		}
+		if !success {
+			return
+		}
+		defer w.redis.Del(ctx, lockKey)
+	}
+	// 1. Find all vendors with released escrow holds
+	rows, err := w.db.Query(ctx,
+		`SELECT vendor_tracking_id, COALESCE(SUM(amount), 0)::float8 as total_released
+		 FROM escrow_holds
+		 WHERE status = 'released'
+		 GROUP BY vendor_tracking_id`,
+	)
+	if err != nil {
+		fmt.Printf("[PayoutWorker] Error querying released escrows: %v\n", err)
+		return
+	}
+	defer rows.Close()
+
+	batchID := uuid.New()
+	payoutsCreated := 0
+
+	for rows.Next() {
+		var vendorID string
+		var totalReleased float64
+		if err := rows.Scan(&vendorID, &totalReleased); err != nil {
+			fmt.Printf("[PayoutWorker] Error scanning vendor row: %v\n", err)
+			continue
+		}
+
+		if totalReleased <= 0 {
+			continue
+		}
+
+		// Verify vendor exists before creating payout/wallet records
+		ok, err := database.Exists(ctx, w.db, "SELECT 1 FROM users WHERE tracking_id = $1", vendorID)
+		if err != nil {
+			fmt.Printf("[PayoutWorker] Error verifying vendor %s: %v\n", vendorID, err)
+			continue
+		}
+		if !ok {
+			fmt.Printf("[PayoutWorker] Vendor %s does not exist, skipping payout\n", vendorID)
+			continue
+		}
+
+		// 2. Check for open disputes on this vendor's orders
+		var openDisputes int
+		err = w.db.QueryRow(ctx,
+			`SELECT COUNT(*) FROM disputes d
+			 JOIN escrow_holds e ON d.order_tracking_id = e.order_tracking_id
+			 WHERE e.vendor_tracking_id = $1 AND e.status = 'released'
+			 AND d.status IN ('open', 'investigating')`,
+			vendorID,
+		).Scan(&openDisputes)
+		if err != nil {
+			fmt.Printf("[PayoutWorker] Error checking disputes for %s: %v\n", vendorID, err)
+			continue
+		}
+		if openDisputes > 0 {
+			fmt.Printf("[PayoutWorker] Skipping %s — %d open disputes\n", vendorID, openDisputes)
+			continue
+		}
+
+		// 3. Process payout inside an atomic database transaction
+		tx, err := w.db.Begin(ctx)
+		if err != nil {
+			fmt.Printf("[PayoutWorker] Error starting transaction for %s: %v\n", vendorID, err)
+			continue
+		}
+
+		payoutID := uuid.New()
+		_, err = tx.Exec(ctx,
+			`INSERT INTO vendor_payouts (id, vendor_tracking_id, amount, status, batch_id)
+			 VALUES ($1, $2, $3, 'pending_disbursement', $4)`,
+			payoutID, vendorID, totalReleased, batchID,
+		)
+		if err != nil {
+			tx.Rollback(ctx)
+			fmt.Printf("[PayoutWorker] Error creating payout for %s: %v\n", vendorID, err)
+			continue
+		}
+
+		// Mark the processed escrow holds as 'paid_out' to prevent duplicate payouts in future hourly ticks
+		_, err = tx.Exec(ctx,
+			`UPDATE escrow_holds SET status = 'paid_out' WHERE vendor_tracking_id = $1 AND status = 'released'`,
+			vendorID,
+		)
+		if err != nil {
+			tx.Rollback(ctx)
+			fmt.Printf("[PayoutWorker] Error marking escrow holds as paid_out for %s: %v\n", vendorID, err)
+			continue
+		}
+
+		// 4. Update vendor_wallet in the same transaction
+		_, err = tx.Exec(ctx,
+			`INSERT INTO vendor_wallet (vendor_tracking_id, balance, lifetime_earnings, total_payouts)
+			 VALUES ($1, 0, 0, $2)
+			 ON CONFLICT (vendor_tracking_id)
+			 DO UPDATE SET total_payouts = vendor_wallet.total_payouts + $2, balance = vendor_wallet.balance - $2`,
+			vendorID, totalReleased,
+		)
+		if err != nil {
+			tx.Rollback(ctx)
+			fmt.Printf("[PayoutWorker] Error updating vendor wallet for %s: %v\n", vendorID, err)
+			continue
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			fmt.Printf("[PayoutWorker] Error committing payout transaction for %s: %v\n", vendorID, err)
+			continue
+		}
+
+		// 5. Execute ledger transfer: vendor_withdrawable → vendor's external account
+		idempotencyKey := fmt.Sprintf("payout:%s:%s", payoutID, vendorID)
+		_, err = w.ledger.Transfer(ctx, ledger.TransferRequest{
+			DebitAccount:   ledger.AccountVendorWithdrawable,
+			CreditAccount:  ledger.AccountVendorBankPayout,
+			Amount:         totalReleased,
+			ReferenceType:  "vendor_payout",
+			ReferenceID:    vendorID,
+			Description:    fmt.Sprintf("Vendor payout for %s — batch %s", vendorID, batchID),
+			IdempotencyKey: idempotencyKey,
+		})
+		if err != nil {
+			fmt.Printf("[PayoutWorker] Warning: Ledger transfer failed for %s: %v\n", vendorID, err)
+		}
+
+		payoutsCreated++
+
+		currency := os.Getenv("DEFAULT_CURRENCY")
+		if currency == "" {
+			currency = "PKR"
+		}
+
+		fmt.Printf("[PayoutWorker] Paid out %.2f %s to vendor %s (batch %s)\n",
+			totalReleased, currency, vendorID, batchID)
+	}
+
+	if payoutsCreated > 0 {
+		fmt.Printf("[PayoutWorker] Processed %d vendor payouts in batch %s\n", payoutsCreated, batchID)
+	}
+}
+
+```
+
+---
+
+## 13. `internal/escrow/models.go`
+
+```go
+package escrow
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// EscrowStatus represents the lifecycle of an escrow hold.
+type EscrowStatus string
+
+const (
+	StatusHeld     EscrowStatus = "held"
+	StatusReleased EscrowStatus = "released"
+	StatusPaidOut  EscrowStatus = "paid_out"
+	StatusDisputed EscrowStatus = "disputed"
+	StatusRefunded EscrowStatus = "refunded"
+)
+
+// EscrowHold represents a vendor fund hold after delivery completion.
+type EscrowHold struct {
+	ID               uuid.UUID    `json:"id"`
+	OrderTrackingID  string       `json:"order_tracking_id"`
+	VendorTrackingID string       `json:"vendor_tracking_id"`
+	Amount           float64      `json:"amount"`
+	Status           EscrowStatus `json:"status"`
+	HoldUntil        time.Time    `json:"hold_until"`
+	ReleasedAt       *time.Time   `json:"released_at,omitempty"`
+	DisputeID        *uuid.UUID   `json:"dispute_id,omitempty"`
+	CreatedAt        time.Time    `json:"created_at"`
+}
+
+```
+
+---
+
+## 14. `internal/escrow/repository.go`
+
+```go
+package escrow
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/omnigo/backend/internal/shared/database"
+)
+
+// Repository handles escrow persistence.
+type Repository struct {
+	db *pgxpool.Pool
+}
+
+func NewRepository(db *pgxpool.Pool) *Repository {
+	return &Repository{db: db}
+}
+
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
+}
+
+func validateHoldParents(ctx context.Context, q rowQuerier, hold *EscrowHold) error {
+	checks := []struct {
+		id    string
+		label string
+		query string
+	}{
+		{hold.OrderTrackingID, "order", "SELECT 1 FROM orders WHERE order_tracking_id = $1"},
+		{hold.VendorTrackingID, "vendor/store", "SELECT 1 FROM users WHERE tracking_id = $1 UNION SELECT 1 FROM stores WHERE store_tracking_id = $1 OR vendor_tracking_id = $1"},
+	}
+	for _, c := range checks {
+		ok, err := database.Exists(ctx, q, c.query, c.id)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("%s %s does not exist", c.label, c.id)
+		}
+	}
+	return nil
+}
+
+// CreateHold inserts a new escrow hold. It is idempotent across worker retries.
+func (r *Repository) CreateHold(ctx context.Context, hold *EscrowHold) error {
+	if err := validateHoldParents(ctx, r.db, hold); err != nil {
+		return err
+	}
+
+	// Idempotency guard: If an active/released hold already exists for this order, do not duplicate
+	var existingID uuid.UUID
+	err := r.db.QueryRow(ctx,
+		`SELECT id FROM escrow_holds WHERE order_tracking_id = $1 AND status IN ('held', 'disputed', 'released', 'paid_out') LIMIT 1`,
+		hold.OrderTrackingID,
+	).Scan(&existingID)
+	if err == nil {
+		// Hold already created in a previous attempt/retry
+		return nil
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("failed to check existing escrow hold: %w", err)
+	}
+
+	query := `
+		INSERT INTO escrow_holds (id, order_tracking_id, vendor_tracking_id, amount, status, hold_until)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`
+	_, err = r.db.Exec(ctx, query,
+		hold.ID, hold.OrderTrackingID, hold.VendorTrackingID,
+		hold.Amount, hold.Status, hold.HoldUntil,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create escrow hold: %w", err)
+	}
+	return nil
+}
+
+// HoldExistsForOrder checks if a hold for the given order already exists.
+func (r *Repository) HoldExistsForOrder(ctx context.Context, orderTrackingID string) (bool, error) {
+	var count int
+	err := r.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM escrow_holds WHERE order_tracking_id = $1`,
+		orderTrackingID,
+	).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// CreateHoldInTx inserts a new escrow hold inside an existing transaction.
+func (r *Repository) CreateHoldInTx(ctx context.Context, tx pgx.Tx, hold *EscrowHold) error {
+	if err := validateHoldParents(ctx, tx, hold); err != nil {
+		return err
+	}
+
+	query := `
+		INSERT INTO escrow_holds (id, order_tracking_id, vendor_tracking_id, amount, status, hold_until)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`
+	_, err := tx.Exec(ctx, query,
+		hold.ID, hold.OrderTrackingID, hold.VendorTrackingID,
+		hold.Amount, hold.Status, hold.HoldUntil,
+	)
+	return err
+}
+
+// ReleaseHold marks an escrow hold as released.
+func (r *Repository) ReleaseHold(ctx context.Context, holdID uuid.UUID) error {
+	_, err := r.db.Exec(ctx,
+		`UPDATE escrow_holds SET status = 'released', released_at = NOW() WHERE id = $1 AND status = 'held'`,
+		holdID,
+	)
+	return err
+}
+
+// FreezeForDispute marks an escrow hold as disputed.
+func (r *Repository) FreezeForDispute(ctx context.Context, orderTrackingID string, disputeID uuid.UUID) error {
+	_, err := r.db.Exec(ctx,
+		`UPDATE escrow_holds SET status = 'disputed', dispute_id = $1 WHERE order_tracking_id = $2 AND status = 'held'`,
+		disputeID, orderTrackingID,
+	)
+	return err
+}
+
+// UnfreezeOnDisputeRejection reverts disputed holds back to held.
+func (r *Repository) UnfreezeOnDisputeRejection(ctx context.Context, disputeID uuid.UUID) error {
+	_, err := r.db.Exec(ctx,
+		`UPDATE escrow_holds SET status = 'held', dispute_id = NULL WHERE dispute_id = $1 AND status = 'disputed'`,
+		disputeID,
+	)
+	return err
+}
+
+// RefundDisputedHold marks a disputed hold as refunded and returns the hold details.
+func (r *Repository) RefundDisputedHold(ctx context.Context, disputeID uuid.UUID) (*EscrowHold, error) {
+	var hold EscrowHold
+	err := r.db.QueryRow(ctx,
+		`UPDATE escrow_holds 
+		 SET status = 'refunded', released_at = NOW() 
+		 WHERE dispute_id = $1 AND status = 'disputed'
+		 RETURNING id, order_tracking_id, vendor_tracking_id, amount, status, hold_until, created_at`,
+		disputeID,
+	).Scan(&hold.ID, &hold.OrderTrackingID, &hold.VendorTrackingID, &hold.Amount, &hold.Status, &hold.HoldUntil, &hold.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &hold, nil
+}
+
+// GetReleasableHolds returns all held escrows past their hold_until time.
+func (r *Repository) GetReleasableHolds(ctx context.Context) ([]EscrowHold, error) {
+	rows, err := r.db.Query(ctx,
+		`SELECT id, order_tracking_id, vendor_tracking_id, amount, status, hold_until, created_at
+		 FROM escrow_holds WHERE status = 'held' AND hold_until < NOW() ORDER BY hold_until`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var holds []EscrowHold
+	for rows.Next() {
+		var h EscrowHold
+		if err := rows.Scan(&h.ID, &h.OrderTrackingID, &h.VendorTrackingID,
+			&h.Amount, &h.Status, &h.HoldUntil, &h.CreatedAt); err != nil {
+			return nil, err
+		}
+		holds = append(holds, h)
+	}
+	return holds, rows.Err()
+}
+
+// HasOpenDisputes checks if an order has any open disputes.
+func (r *Repository) HasOpenDisputes(ctx context.Context, orderTrackingID string) (bool, error) {
+	var count int
+	err := r.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM disputes WHERE order_tracking_id = $1 AND status IN ('open', 'investigating')`,
+		orderTrackingID,
+	).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// GetHoldsByVendor returns all escrow holds for a vendor.
+func (r *Repository) GetHoldsByVendor(ctx context.Context, vendorTrackingID string) ([]EscrowHold, error) {
+	rows, err := r.db.Query(ctx,
+		`SELECT id, order_tracking_id, vendor_tracking_id, amount, status, hold_until, COALESCE(released_at, '0001-01-01'), created_at
+		 FROM escrow_holds WHERE vendor_tracking_id = $1 ORDER BY created_at DESC LIMIT 50`,
+		vendorTrackingID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var holds []EscrowHold
+	for rows.Next() {
+		var h EscrowHold
+		var releasedAt time.Time
+		if err := rows.Scan(&h.ID, &h.OrderTrackingID, &h.VendorTrackingID,
+			&h.Amount, &h.Status, &h.HoldUntil, &releasedAt, &h.CreatedAt); err != nil {
+			return nil, err
+		}
+		if releasedAt.Year() > 1 {
+			h.ReleasedAt = &releasedAt
+		}
+		holds = append(holds, h)
+	}
+	return holds, rows.Err()
+}
+
+```
+
+---
+
+## 15. `internal/escrow/service.go`
+
+```go
+package escrow
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strconv"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/omnigo/backend/internal/ledger"
+)
+
+func getHoldDuration() time.Duration {
+	hoursStr := os.Getenv("ESCROW_HOLD_HOURS")
+	if hoursStr != "" {
+		if hours, err := strconv.Atoi(hoursStr); err == nil {
+			return time.Duration(hours) * time.Hour
+		}
+	}
+	return 48 * time.Hour
+}
+
+// Service manages escrow holds and releases.
+type Service struct {
+	repo   *Repository
+	ledger *ledger.Service
+	db     *pgxpool.Pool
+}
+
+func NewService(db *pgxpool.Pool, ledgerSvc *ledger.Service) *Service {
+	return &Service{
+		repo:   NewRepository(db),
+		ledger: ledgerSvc,
+		db:     db,
+	}
+}
+
+// CreateHold creates a new escrow hold for a vendor after delivery completion.
+func (s *Service) CreateHold(ctx context.Context, orderID, vendorID string, amount float64) error {
+	exists, err := s.repo.HoldExistsForOrder(ctx, orderID)
+	if err != nil {
+		return fmt.Errorf("failed to check existing hold: %w", err)
+	}
+	if exists {
+		// Idempotent success
+		return nil
+	}
+
+	hold := &EscrowHold{
+		ID:               uuid.New(),
+		OrderTrackingID:  orderID,
+		VendorTrackingID: vendorID,
+		Amount:           amount,
+		Status:           StatusHeld,
+		HoldUntil:        time.Now().Add(getHoldDuration()),
+	}
+
+	if err := s.repo.CreateHold(ctx, hold); err != nil {
+		return fmt.Errorf("escrow hold creation failed: %w", err)
+	}
+
+	return nil
+}
+
+// ReleaseExpiredHolds releases all holds past their hold_until time
+// if no open disputes exist for the order.
+func (s *Service) ReleaseExpiredHolds(ctx context.Context) (int, error) {
+	holds, err := s.repo.GetReleasableHolds(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch releasable holds: %w", err)
+	}
+
+	released := 0
+	for _, hold := range holds {
+		// Check for open disputes
+		hasDispute, err := s.repo.HasOpenDisputes(ctx, hold.OrderTrackingID)
+		if err != nil {
+			fmt.Printf("[Escrow] Error checking disputes for order %s: %v\n", hold.OrderTrackingID, err)
+			continue
+		}
+		if hasDispute {
+			fmt.Printf("[Escrow] Skipping release for order %s — open dispute exists\n", hold.OrderTrackingID)
+			continue
+		}
+
+		// Execute ledger transfer: vendor_locked_escrow → vendor_withdrawable
+		idempotencyKey := fmt.Sprintf("escrow:release:%s", hold.ID.String())
+		_, err = s.ledger.Transfer(ctx, ledger.TransferRequest{
+			DebitAccount:   ledger.AccountVendorLockedEscrow,
+			CreditAccount:  ledger.AccountVendorWithdrawable,
+			Amount:         hold.Amount,
+			ReferenceType:  "escrow_release",
+			ReferenceID:    hold.OrderTrackingID,
+			Description:    fmt.Sprintf("Escrow released for order %s after %dh hold", hold.OrderTrackingID, int(getHoldDuration().Hours())),
+			IdempotencyKey: idempotencyKey,
+		})
+		if err != nil {
+			fmt.Printf("[Escrow] Ledger transfer failed for hold %s: %v\n", hold.ID, err)
+			continue
+		}
+
+		// Mark hold as released
+		if err := s.repo.ReleaseHold(ctx, hold.ID); err != nil {
+			fmt.Printf("[Escrow] Failed to mark hold %s as released: %v\n", hold.ID, err)
+			continue
+		}
+
+		released++
+		fmt.Printf("[Escrow] Released %.2f PKR for vendor %s (order %s)\n",
+			hold.Amount, hold.VendorTrackingID, hold.OrderTrackingID)
+	}
+
+	return released, nil
+}
+
+// FreezeForDispute freezes all held escrows for an order when a dispute is filed.
+func (s *Service) FreezeForDispute(ctx context.Context, orderTrackingID string, disputeID uuid.UUID) error {
+	return s.repo.FreezeForDispute(ctx, orderTrackingID, disputeID)
+}
+
+// UnfreezeOnRejection reverts disputed holds when a dispute is rejected.
+func (s *Service) UnfreezeOnRejection(ctx context.Context, disputeID uuid.UUID) error {
+	return s.repo.UnfreezeOnDisputeRejection(ctx, disputeID)
+}
+
+// RefundDispute executes a double-entry ledger refund to the customer and marks the escrow hold refunded.
+func (s *Service) RefundDispute(ctx context.Context, disputeID uuid.UUID) error {
+	hold, err := s.repo.RefundDisputedHold(ctx, disputeID)
+	if err != nil {
+		return fmt.Errorf("failed to mark escrow hold refunded: %w", err)
+	}
+
+	// Fetch customer tracking ID from orders
+	var customerTrackingID string
+	err = s.db.QueryRow(ctx,
+		`SELECT customer_tracking_id FROM orders WHERE order_tracking_id = $1`,
+		hold.OrderTrackingID,
+	).Scan(&customerTrackingID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch order customer: %w", err)
+	}
+
+	// Double-entry ledger transfer: vendor_locked_escrow -> customer_wallet
+	idempotencyKey := fmt.Sprintf("escrow:refund:%s", disputeID.String())
+	_, err = s.ledger.Transfer(ctx, ledger.TransferRequest{
+		DebitAccount:   ledger.AccountVendorLockedEscrow,
+		CreditAccount:  ledger.AccountCustomerWallet,
+		Amount:         hold.Amount,
+		Currency:       "PKR",
+		ReferenceType:  "dispute_refund",
+		ReferenceID:    hold.OrderTrackingID,
+		Description:    fmt.Sprintf("Dispute refund for order %s to customer %s", hold.OrderTrackingID, customerTrackingID),
+		IdempotencyKey: idempotencyKey,
+	})
+	if err != nil {
+		return fmt.Errorf("ledger refund transfer failed: %w", err)
+	}
+
+	// Update customer wallet balance in customer_wallet table
+	upsertQuery := `
+		INSERT INTO customer_wallet (customer_tracking_id, balance, updated_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (customer_tracking_id)
+		DO UPDATE SET
+			balance = customer_wallet.balance + $2,
+			updated_at = NOW()
+	`
+	if _, err := s.db.Exec(ctx, upsertQuery, customerTrackingID, hold.Amount); err != nil {
+		fmt.Printf("[Escrow] Warning: failed to credit customer_wallet table directly: %v\n", err)
+	}
+
+	// Update order payment status to refunded
+	_, _ = s.db.Exec(ctx,
+		`UPDATE orders SET payment_status = 'refunded', updated_at = NOW() WHERE order_tracking_id = $1`,
+		hold.OrderTrackingID,
+	)
+
+	return nil
+}
+
+// GetHoldsByVendor returns escrow hold history for a vendor.
+func (s *Service) GetHoldsByVendor(ctx context.Context, vendorTrackingID string) ([]EscrowHold, error) {
+	return s.repo.GetHoldsByVendor(ctx, vendorTrackingID)
+}
+
+```
+
+---
+
+## 16. `internal/shared/telemetry/metrics.go`
+
+```go
+package telemetry
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+var (
+	paymentAttempts = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "payfast_payment_attempts_total",
+		Help: "Total number of payment attempts initiated, labeled by gateway and payment method.",
+	}, []string{"gateway", "method"})
+
+	paymentOutcomes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "payfast_payment_outcomes_total",
+		Help: "Total number of payment attempts resolved, labeled by method and final outcome (succeeded/failed/gateway_pending/three_ds_required).",
+	}, []string{"method", "outcome"})
+
+	fraudBlocks = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "payfast_fraud_blocks_total",
+		Help: "Total number of payment attempts blocked by pre-authorization fraud/velocity checks, labeled by reason.",
+	}, []string{"reason"})
+
+	gatewayCallDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "payfast_gateway_call_duration_seconds",
+		Help: "Duration of outbound calls to the PayFast gateway API, labeled by endpoint and outcome.",
+		Buckets: []float64{0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 20, 25},
+	}, []string{"endpoint", "outcome"})
+
+	threeDSCallbackDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "payfast_3ds_callback_duration_seconds",
+		Help: "End-to-end duration of processing a 3DS callback, from receipt to final settlement decision, labeled by outcome.",
+		Buckets: []float64{0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 20, 30},
+	}, []string{"outcome"})
+
+	circuitBreakerState = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "payfast_circuit_breaker_state",
+		Help: "Current circuit breaker state per gateway (0=CLOSED, 1=HALF_OPEN, 2=OPEN).",
+	}, []string{"gateway"})
+
+	circuitBreakerTransitions = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "payfast_circuit_breaker_transitions_total",
+		Help: "Total number of circuit breaker state transitions, labeled by from-state and to-state.",
+	}, []string{"from", "to"})
+
+	reconciliationOutcomes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "payfast_reconciliation_outcomes_total",
+		Help: "Total number of stuck-payment reconciliation attempts, labeled by outcome (settled/failed/still_pending/timeout).",
+	}, []string{"outcome"})
+
+	settlementDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "payfast_outbox_settlement_duration_seconds",
+		Help: "Duration of processing a single outbox settlement event, labeled by outcome.",
+		Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10},
+	}, []string{"outcome"})
+
+	settlementOutcomes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "payfast_outbox_settlement_outcomes_total",
+		Help: "Total number of outbox settlement events processed, labeled by outcome (settled/failed/retried).",
+	}, []string{"outcome"})
+
+	ipnReceived = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "payfast_ipn_received_total",
+		Help: "Total number of IPN (Instant Payment Notification) callbacks received on checkout_url, labeled by whether hash verification succeeded.",
+	}, []string{"verified"})
+)
+
+// RecordPaymentAttempt records that a payment attempt was initiated for the given gateway and method.
+func RecordPaymentAttempt(gateway, method string) {
+	paymentAttempts.WithLabelValues(gateway, method).Inc()
+}
+
+// RecordPaymentOutcome records the final resolved outcome of a payment attempt.
+func RecordPaymentOutcome(method, outcome string) {
+	paymentOutcomes.WithLabelValues(method, outcome).Inc()
+}
+
+// RecordFraudBlock records that a payment attempt was blocked by a fraud/velocity check.
+func RecordFraudBlock(reason string) {
+	fraudBlocks.WithLabelValues(reason).Inc()
+}
+
+// ObserveGatewayCallDuration records how long an outbound PayFast API call took.
+func ObserveGatewayCallDuration(endpoint, outcome string, duration time.Duration) {
+	gatewayCallDuration.WithLabelValues(endpoint, outcome).Observe(duration.Seconds())
+}
+
+// TimeGatewayCall is a convenience helper: call it with defer to automatically time and classify a gateway call.
+func TimeGatewayCall(endpoint string, start time.Time, errPtr *error) {
+	outcome := "success"
+	if errPtr != nil && *errPtr != nil {
+		if IsTimeoutError(*errPtr) {
+			outcome = "timeout"
+		} else {
+			outcome = "error"
+		}
+	}
+	ObserveGatewayCallDuration(endpoint, outcome, time.Since(start))
+}
+
+// IsTimeoutError does a best-effort classification of context deadline / timeout errors.
+func IsTimeoutError(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded)
+}
+
+// Observe3DSCallbackDuration records how long a full 3DS callback took to process.
+func Observe3DSCallbackDuration(outcome string, duration time.Duration) {
+	threeDSCallbackDuration.WithLabelValues(outcome).Observe(duration.Seconds())
+}
+
+// SetCircuitBreakerState records the current state of a named gateway's circuit breaker.
+func SetCircuitBreakerState(gateway string, stateValue float64) {
+	circuitBreakerState.WithLabelValues(gateway).Set(stateValue)
+}
+
+// RecordCircuitBreakerTransition records a circuit breaker moving from one state to another.
+func RecordCircuitBreakerTransition(from, to string) {
+	circuitBreakerTransitions.WithLabelValues(from, to).Inc()
+}
+
+// RecordReconciliationOutcome records the result of a single stuck-payment reconciliation attempt.
+func RecordReconciliationOutcome(outcome string) {
+	reconciliationOutcomes.WithLabelValues(outcome).Inc()
+}
+
+// ObserveSettlementDuration records how long a single outbox settlement event took to process.
+func ObserveSettlementDuration(outcome string, duration time.Duration) {
+	settlementDuration.WithLabelValues(outcome).Observe(duration.Seconds())
+	settlementOutcomes.WithLabelValues(outcome).Inc()
+}
+
+// RecordIPNReceived records an incoming IPN callback, labeled by whether its hash verified.
+func RecordIPNReceived(verified bool) {
+	label := "false"
+	if verified {
+		label = "true"
+	}
+	ipnReceived.WithLabelValues(label).Inc()
+}
+
+// Handler returns the standard Prometheus scrape handler.
+func Handler() http.Handler {
+	return promhttp.Handler()
+}
+
+// StartStandaloneServer starts a dedicated HTTP server exposing ONLY /metrics.
+func StartStandaloneServer(ctx context.Context) error {
+	addr := os.Getenv("METRICS_LISTEN_ADDR")
+	if addr == "" {
+		return errors.New("METRICS_LISTEN_ADDR environment variable is required to start the standalone metrics server (e.g. \":9090\")")
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", Handler())
+
+	srv := &http.Server{
+		Addr:         addr,
+		Handler:      mux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("[telemetry] metrics server shutdown error: %v", err)
+		}
+	}()
+
+	log.Printf("[telemetry] metrics server listening on %s/metrics", addr)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("metrics server failed: %w", err)
+	}
+	return nil
+}
+
+```
+
+---
+
+## 17. `internal/payment/payfast/payfast_test.go`
 
 ```go
 package payfast
@@ -3174,25 +4654,39 @@ func TestPayFastSignature(t *testing.T) {
 			t.Errorf("expected %s, got %s", expectedHash, hash)
 		}
 	})
+
+	t.Run("Official PayFast Email Worked Example - Validation Hash", func(t *testing.T) {
+		// Input string sequence from official email: BAS-01|jdnkaabcks|102|000
+		basketID := "BAS-01"
+		secretKey := "jdnkaabcks"
+		merchantID := "102"
+		errCode := "000"
+
+		calculatedHash := CalculateResponseValidationHash(basketID, secretKey, merchantID, errCode)
+		expectedHash := "e8192a7554dd699975adf39619c703a492392edf5e416a61e183866ecdf6a2a2"
+
+		if calculatedHash != expectedHash {
+			t.Errorf("Official PayFast worked example mismatch! Expected %s, got %s", expectedHash, calculatedHash)
+		}
+
+		if !VerifyResponseHash(expectedHash, calculatedHash) {
+			t.Errorf("VerifyResponseHash failed to verify exact hash")
+		}
+	})
 }
 
 func TestPayFastAuthAndTokenCache(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/token" {
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(AuthTokenResponse{
-				Code:         "00",
-				Token:        "fake_access_token",
-				RefreshToken: "fake_refresh_token",
-				ExpiresIn:    "3600",
-				Message:      "Success",
-			})
+			// Emulate APPS UAT response format with uppercase ACCESS_TOKEN
+			w.Write([]byte(`{"MERCHANT_ID":"102","ACCESS_TOKEN":"uat_access_token_123","GENERATED_DATE_TIME":"2026-08-21 22:00:00"}`))
 			return
 		}
 	}))
 	defer ts.Close()
 
-	client := NewClient("merchantID", "secretKey", "Test Merchant", ts.URL)
+	client := NewClient("102", "ROTATED_ME_REMOVE_THIS_PAYFAST_UAT_KEY", "", "Test Merchant", ts.URL)
 
 	ctx := context.Background()
 	token, err := client.GetAuthToken(ctx, "127.0.0.1")
@@ -3200,20 +4694,42 @@ func TestPayFastAuthAndTokenCache(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if token != "fake_access_token" {
-		t.Errorf("expected fake_access_token, got %s", token)
+	if token != "uat_access_token_123" {
+		t.Errorf("expected uat_access_token_123, got %s", token)
 	}
 
-	// Wait briefly to ensure caching is not bypassing incorrectly (though our cache timeout is 1 hour)
 	time.Sleep(10 * time.Millisecond)
 
-	// Second call should hit the cache and not error out
 	token2, err := client.GetAuthToken(ctx, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("unexpected error on second call: %v", err)
 	}
-	if token2 != "fake_access_token" {
-		t.Errorf("expected fake_access_token from cache, got %s", token2)
+	if token2 != "uat_access_token_123" {
+		t.Errorf("expected uat_access_token_123 from cache, got %s", token2)
+	}
+}
+
+func TestIsSuccessCode(t *testing.T) {
+	tests := []struct {
+		code     string
+		expected bool
+	}{
+		{"00", true},
+		{"000", true},
+		{" 00 ", true},
+		{" 000 ", true},
+		{"05", false},
+		{"97", false},
+		{"104", false},
+		{"002", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		got := IsSuccessCode(tt.code)
+		if got != tt.expected {
+			t.Errorf("IsSuccessCode(%q) = %v; expected %v", tt.code, got, tt.expected)
+		}
 	}
 }
 
@@ -3241,7 +4757,7 @@ func TestGetTemporaryTransactionToken(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client := NewClient("merchantID", "secretKey", "Test Merchant", ts.URL)
+	client := NewClient("merchantID", "secretKey", "hashKey", "Test Merchant", ts.URL)
 
 	ctx := context.Background()
 	req := TemporaryTokenRequest{
@@ -3280,7 +4796,7 @@ func TestInitiateTokenizedTransaction(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client := NewClient("merchantID", "secretKey", "Test Merchant", ts.URL)
+	client := NewClient("merchantID", "secretKey", "hashKey", "Test Merchant", ts.URL)
 
 	ctx := context.Background()
 	req := TokenizedTransactionRequest{
@@ -3308,7 +4824,6 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 			r.ParseForm()
 			w.WriteHeader(http.StatusOK)
 			if r.FormValue("card_number") == "4111222233334444" {
-				// 3DS required
 				json.NewEncoder(w).Encode(TemporaryTokenResponse{
 					StatusCode:      "00",
 					InstrumentToken: "inst_3ds",
@@ -3316,7 +4831,6 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 					Data3DSHTML:     "<html>Please authenticate 3DS</html>",
 				})
 			} else if r.FormValue("card_number") == "4111111111111111" {
-				// 3DS not required, directly tokenize
 				json.NewEncoder(w).Encode(TemporaryTokenResponse{
 					StatusCode:      "00",
 					InstrumentToken: "inst_no3ds",
@@ -3324,10 +4838,9 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 					Data3DSHTML:     "",
 				})
 			} else {
-				// Malicious or unknown
 				json.NewEncoder(w).Encode(TemporaryTokenResponse{
 					StatusCode: "99",
-					StatusMsg:    "Unknown Gateway Error",
+					StatusMsg:  "Unknown Gateway Error",
 				})
 			}
 			return
@@ -3338,18 +4851,18 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 				json.NewEncoder(w).Encode(TokenizedTransactionResponse{
 					StatusCode:    "00",
 					TransactionID: "txn_3ds",
-					StatusMsg:       "Approved",
+					StatusMsg:     "Approved",
 				})
 			} else if r.FormValue("instrument_token") == "inst_no3ds" {
 				json.NewEncoder(w).Encode(TokenizedTransactionResponse{
 					StatusCode:    "00",
 					TransactionID: "txn_no3ds",
-					StatusMsg:       "Approved",
+					StatusMsg:     "Approved",
 				})
 			} else {
 				json.NewEncoder(w).Encode(TokenizedTransactionResponse{
-					StatusCode:    "111", // duplicate or similar
-					StatusMsg:       "Transaction already captured or duplicate",
+					StatusCode: "111",
+					StatusMsg:  "Transaction already captured or duplicate",
 				})
 			}
 			return
@@ -3357,7 +4870,7 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client := NewClient("merchantID", "secretKey", "Test Merchant", ts.URL)
+	client := NewClient("merchantID", "secretKey", "hashKey", "Test Merchant", ts.URL)
 	ctx := context.Background()
 
 	t.Run("3DS Required Flow", func(t *testing.T) {
@@ -3404,53 +4917,6 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 		}
 	})
 
-	t.Run("Failed 3DS Callback", func(t *testing.T) {
-		// Simulating PayFast rejecting a tokenized transaction due to bad 3DS paRes
-		req := TokenizedTransactionRequest{InstrumentToken: "inst_bad3ds"} // Assuming the mock handles this, or just asserting failure logic in handler
-		// We can test this by expecting an error or a failure status code
-		_ = req
-	})
-
-	t.Run("Amount Tampering Detection", func(t *testing.T) {
-		// Status check returns different amount
-		statusRes := TransactionStatusResponse{
-			StatusCode: "00",
-			BasketID:   "order_123",
-			TxnAmt:     "100.00",
-		}
-		expectedAmount := "150.00"
-		if statusRes.TxnAmt != expectedAmount {
-			// This matches our handler's check
-			t.Log("Amount tampering successfully detected")
-		} else {
-			t.Error("Failed to detect amount tampering")
-		}
-	})
-
-	t.Run("Wrong Order Ownership (Basket ID mismatch)", func(t *testing.T) {
-		statusRes := TransactionStatusResponse{
-			StatusCode: "00",
-			BasketID:   "wrong_order",
-		}
-		if statusRes.BasketID != "order_123" {
-			t.Log("Basket ID mismatch successfully detected")
-		} else {
-			t.Error("Failed to detect Basket ID mismatch")
-		}
-	})
-
-	t.Run("Failed Status Verification", func(t *testing.T) {
-		statusRes := TransactionStatusResponse{
-			StatusCode: "99",
-			StatusMsg:  "Declined by bank",
-		}
-		if statusRes.StatusCode != "00" {
-			t.Log("Failed status correctly identified")
-		} else {
-			t.Error("Failed status was ignored")
-		}
-	})
-
 	t.Run("Status Check By Basket ID", func(t *testing.T) {
 		basketServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/token" {
@@ -3471,7 +4937,7 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 		}))
 		defer basketServer.Close()
 
-		bClient := NewClient("merchantID", "secretKey", "Test Merchant", basketServer.URL)
+		bClient := NewClient("merchantID", "secretKey", "hashKey", "Test Merchant", basketServer.URL)
 		bRes, err := bClient.GetTransactionStatusByBasketID(ctx, "order_999")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -3500,7 +4966,6 @@ func TestPayFastTransactionScenarios(t *testing.T) {
 	})
 
 	t.Run("Status Verification - Omitted txnamt Handling", func(t *testing.T) {
-		// Official PayFast documentation status response without txnamt
 		statusJSON := `{"status_code":"00","status_msg":"Success","basket_id":"order_888","transaction_id":"txn_888","code":"00"}`
 		var statusRes TransactionStatusResponse
 		if err := json.Unmarshal([]byte(statusJSON), &statusRes); err != nil {
@@ -3519,25 +4984,21 @@ func TestFlexibleTypes(t *testing.T) {
 			Flag FlexibleBool `json:"flag"`
 		}
 
-		// Raw boolean true
 		var t1 TestStruct
 		if err := json.Unmarshal([]byte(`{"flag": true}`), &t1); err != nil || !t1.Flag.Bool() {
 			t.Errorf("expected true, got %v (err: %v)", t1.Flag.Bool(), err)
 		}
 
-		// String "true"
 		var t2 TestStruct
 		if err := json.Unmarshal([]byte(`{"flag": "true"}`), &t2); err != nil || !t2.Flag.Bool() {
 			t.Errorf("expected true, got %v (err: %v)", t2.Flag.Bool(), err)
 		}
 
-		// Raw boolean false
 		var t3 TestStruct
 		if err := json.Unmarshal([]byte(`{"flag": false}`), &t3); err != nil || t3.Flag.Bool() {
 			t.Errorf("expected false, got %v (err: %v)", t3.Flag.Bool(), err)
 		}
 
-		// String "false"
 		var t4 TestStruct
 		if err := json.Unmarshal([]byte(`{"flag": "false"}`), &t4); err != nil || t4.Flag.Bool() {
 			t.Errorf("expected false, got %v (err: %v)", t4.Flag.Bool(), err)
@@ -3549,19 +5010,16 @@ func TestFlexibleTypes(t *testing.T) {
 			Val FlexibleString `json:"val"`
 		}
 
-		// String value "05"
 		var t1 TestStruct
 		if err := json.Unmarshal([]byte(`{"val": "05"}`), &t1); err != nil || t1.Val.String() != "05" {
 			t.Errorf("expected '05', got %v (err: %v)", t1.Val.String(), err)
 		}
 
-		// Boolean value true
 		var t2 TestStruct
 		if err := json.Unmarshal([]byte(`{"val": true}`), &t2); err != nil || t2.Val.String() != "true" {
 			t.Errorf("expected 'true', got %v (err: %v)", t2.Val.String(), err)
 		}
 
-		// Numeric value 123
 		var t3 TestStruct
 		if err := json.Unmarshal([]byte(`{"val": 123}`), &t3); err != nil || t3.Val.String() != "123" {
 			t.Errorf("expected '123', got %v (err: %v)", t3.Val.String(), err)
@@ -3578,19 +5036,16 @@ func TestCircuitBreaker(t *testing.T) {
 
 	mockErr := &GatewayError{StatusCode: 504, Message: "Gateway Timeout"}
 
-	// 1. Trigger consecutive failures
 	for i := 0; i < 3; i++ {
 		_ = cb.Execute(func() error {
 			return mockErr
 		})
 	}
 
-	// 2. Circuit should be Open
 	if cb.State() != StateOpen {
 		t.Errorf("expected circuit to be Open after 3 failures, got %v", cb.State())
 	}
 
-	// 3. Subsequent calls should fail-fast with ErrCircuitBreakerOpen
 	err := cb.Execute(func() error {
 		return nil
 	})
@@ -3598,10 +5053,8 @@ func TestCircuitBreaker(t *testing.T) {
 		t.Errorf("expected ErrCircuitBreakerOpen, got %v", err)
 	}
 
-	// 4. Wait for cooldown period to elapse -> HalfOpen
 	time.Sleep(60 * time.Millisecond)
 
-	// 5. Probe request succeeds -> Circuit should reset to Closed
 	err = cb.Execute(func() error {
 		return nil
 	})
@@ -3647,13 +5100,11 @@ func TestIsTransientAndSanitization(t *testing.T) {
 	})
 }
 
-
-
 ```
 
 ---
 
-## 12. `internal/payment_orchestrator/service/payfast_service_test.go`
+## 18. `internal/payment_orchestrator/service/payfast_service_test.go`
 
 ```go
 package service
@@ -3786,7 +5237,7 @@ func TestMDSignatureVerification(t *testing.T) {
 
 ---
 
-## 13. `migrations/0020_harden_payment_transactions.sql`
+## 19. `migrations/0020_harden_payment_transactions.sql`
 
 ```sql
 -- ════════════════════════════════════════════════════════════════
@@ -3824,7 +5275,7 @@ ON outbox_events(status, created_at);
 
 ---
 
-## 14. `migrations/0014_payment_transactions.sql`
+## 20. `migrations/0014_payment_transactions.sql`
 
 ```sql
 -- Migration 0014: payment_transactions table and related indexes

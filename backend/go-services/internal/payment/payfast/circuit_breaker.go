@@ -4,6 +4,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/omnigo/backend/internal/shared/telemetry"
 )
 
 // ErrCircuitBreakerOpen is returned when the gateway circuit breaker is tripped.
@@ -35,7 +37,6 @@ func (s CircuitState) String() string {
 type CircuitBreaker struct {
 	mu                  sync.Mutex
 	state               CircuitState
-	failureCount        int
 	consecutiveFailures int
 	failureThreshold    int
 	cooldownDuration    time.Duration
@@ -51,12 +52,29 @@ func NewCircuitBreaker(threshold int, cooldown time.Duration) *CircuitBreaker {
 	if cooldown <= 0 {
 		cooldown = 10 * time.Second
 	}
-	return &CircuitBreaker{
+	cb := &CircuitBreaker{
 		state:            StateClosed,
 		failureThreshold: threshold,
 		cooldownDuration: cooldown,
 		lastStateChange:  time.Now(),
 	}
+	telemetry.SetCircuitBreakerState("payfast", float64(StateClosed))
+	return cb
+}
+
+// setState is the SINGLE place circuit state is ever mutated, so that every transition is
+// consistently reflected in both the gauge (current state) and the transition counter (audit
+// trail of how often/which transitions happen) — call sites never assign cb.state directly.
+// Caller must hold cb.mu.
+func (cb *CircuitBreaker) setState(newState CircuitState) {
+	if cb.state == newState {
+		return
+	}
+	oldState := cb.state
+	cb.state = newState
+	cb.lastStateChange = time.Now()
+	telemetry.SetCircuitBreakerState("payfast", float64(newState))
+	telemetry.RecordCircuitBreakerTransition(oldState.String(), newState.String())
 }
 
 // Execute wraps an external network call with circuit breaking protection.
@@ -67,8 +85,7 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 	// Check if cooldown has elapsed in Open state -> transition to HalfOpen
 	if cb.state == StateOpen {
 		if now.Sub(cb.lastStateChange) >= cb.cooldownDuration {
-			cb.state = StateHalfOpen
-			cb.lastStateChange = now
+			cb.setState(StateHalfOpen)
 			cb.halfOpenProbing = true
 		} else {
 			cb.mu.Unlock()
@@ -84,6 +101,19 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 	}
 	cb.mu.Unlock()
 
+	defer func() {
+		if r := recover(); r != nil {
+			cb.mu.Lock()
+			cb.halfOpenProbing = false
+			if cb.state == StateHalfOpen {
+				cb.consecutiveFailures++
+				cb.setState(StateOpen)
+			}
+			cb.mu.Unlock()
+			panic(r)
+		}
+	}()
+
 	// Execute operation
 	err := fn()
 
@@ -94,12 +124,17 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 	if err != nil {
 		// Only count transient network/socket/gateway errors towards tripping
 		if IsTransient(err) || errors.Is(err, ErrAuthFailed) {
-			cb.failureCount++
 			cb.consecutiveFailures++
 
 			if cb.state == StateHalfOpen || cb.consecutiveFailures >= cb.failureThreshold {
-				cb.state = StateOpen
-				cb.lastStateChange = time.Now()
+				cb.setState(StateOpen)
+			}
+		} else {
+			// Deterministic non-transient error (e.g. 400 Bad Request, card declined)
+			// Proves upstream gateway is reachable and responding!
+			cb.consecutiveFailures = 0
+			if cb.state == StateHalfOpen {
+				cb.setState(StateClosed)
 			}
 		}
 		return err
@@ -108,8 +143,7 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 	// Success -> Reset circuit to Closed
 	cb.consecutiveFailures = 0
 	if cb.state == StateHalfOpen {
-		cb.state = StateClosed
-		cb.lastStateChange = time.Now()
+		cb.setState(StateClosed)
 	}
 	return nil
 }
@@ -125,8 +159,6 @@ func (cb *CircuitBreaker) State() CircuitState {
 func (cb *CircuitBreaker) Reset() {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
-	cb.state = StateClosed
-	cb.failureCount = 0
+	cb.setState(StateClosed)
 	cb.consecutiveFailures = 0
-	cb.lastStateChange = time.Now()
 }

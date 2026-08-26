@@ -108,6 +108,20 @@ func (s *Service) ReleaseExpiredHolds(ctx context.Context) (int, error) {
 			continue
 		}
 
+		// Update vendor wallet balance in database table
+		upsertVendorWallet := `
+			INSERT INTO vendor_wallet (vendor_tracking_id, balance, lifetime_earnings, updated_at)
+			VALUES ($1, $2, $2, NOW())
+			ON CONFLICT (vendor_tracking_id)
+			DO UPDATE SET
+				balance = vendor_wallet.balance + $2,
+				lifetime_earnings = vendor_wallet.lifetime_earnings + $2,
+				updated_at = NOW()
+		`
+		if _, err := s.db.Exec(ctx, upsertVendorWallet, hold.VendorTrackingID, hold.Amount); err != nil {
+			fmt.Printf("[Escrow] Warning: failed to credit vendor_wallet table directly: %v\n", err)
+		}
+
 		released++
 		fmt.Printf("[Escrow] Released %.2f PKR for vendor %s (order %s)\n",
 			hold.Amount, hold.VendorTrackingID, hold.OrderTrackingID)
@@ -157,6 +171,19 @@ func (s *Service) RefundDispute(ctx context.Context, disputeID uuid.UUID) error 
 	})
 	if err != nil {
 		return fmt.Errorf("ledger refund transfer failed: %w", err)
+	}
+
+	// Update customer wallet balance in customer_wallet table
+	upsertQuery := `
+		INSERT INTO customer_wallet (customer_tracking_id, balance, updated_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (customer_tracking_id)
+		DO UPDATE SET
+			balance = customer_wallet.balance + $2,
+			updated_at = NOW()
+	`
+	if _, err := s.db.Exec(ctx, upsertQuery, customerTrackingID, hold.Amount); err != nil {
+		fmt.Printf("[Escrow] Warning: failed to credit customer_wallet table directly: %v\n", err)
 	}
 
 	// Update order payment status to refunded

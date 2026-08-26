@@ -57,7 +57,11 @@ func (s *StripeService) CreateCheckoutSession(ctx context.Context, req CheckoutR
 		Metadata: map[string]string{
 			"order_id":    req.OrderID,
 			"customer_id": req.CustomerID,
-			"gateway":     "stripe",
+			// STOR- tracking ID. Required by the split webhook to attribute the
+			// vendor escrow hold to the correct store; empty means the split
+			// falls back to the default commission rate and skips the hold.
+			"store_id": req.StoreID,
+			"gateway":  "stripe",
 		},
 	}
 
@@ -123,8 +127,7 @@ func (s *StripeService) VerifyWebhook(payload []byte, signature string) (Webhook
 		// No-op; just acknowledge.
 		return WebhookEvent{}, nil
 
-	case "payment_intent.succeeded",
-		"payment_intent.requires_action":
+	case "payment_intent.succeeded":
 		var pi stripe.PaymentIntent
 		if err := json.Unmarshal(event.Data.Raw, &pi); err != nil {
 			return WebhookEvent{}, err
@@ -134,6 +137,24 @@ func (s *StripeService) VerifyWebhook(payload []byte, signature string) (Webhook
 			CustomerID:    pi.Metadata["customer_id"],
 			TransactionID: pi.ID,
 			Status:        "SUCCESS",
+			Amount:        float64(pi.Amount) / 100.0,
+			Currency:      string(pi.Currency),
+			Gateway:       "stripe",
+		}, nil
+
+	case "payment_intent.requires_action":
+		// 3-D Secure is pending — the payment is NOT confirmed yet. It must
+		// never be treated as SUCCESS or escrow would be credited for money
+		// the customer has not actually paid.
+		var pi stripe.PaymentIntent
+		if err := json.Unmarshal(event.Data.Raw, &pi); err != nil {
+			return WebhookEvent{}, err
+		}
+		return WebhookEvent{
+			OrderID:       pi.Metadata["order_id"],
+			CustomerID:    pi.Metadata["customer_id"],
+			TransactionID: pi.ID,
+			Status:        "PENDING",
 			Amount:        float64(pi.Amount) / 100.0,
 			Currency:      string(pi.Currency),
 			Gateway:       "stripe",

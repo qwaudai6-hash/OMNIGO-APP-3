@@ -53,9 +53,14 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
 
     setState(() => _isLoadingLineage = true);
 
+    // RIDE- sessions live in the ride-hailing domain (no order chain), so
+    // they resolve against the dedicated ride lineage endpoint.
+    final isRide = orderId.toUpperCase().startsWith('RIDE-');
+    final endpoint = isRide ? '$_adminBase/lineage/ride/$orderId' : '$_adminBase/lineage/$orderId/full';
+
     try {
       final response = await http.get(
-        Uri.parse('$_adminBase/lineage/$orderId/full'),
+        Uri.parse(endpoint),
         headers: await _getAuthHeaders(),
       ).timeout(const Duration(seconds: 8));
 
@@ -67,7 +72,7 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
       } else if (mounted) {
         setState(() => _isLoadingLineage = false);
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Order not found (${response.statusCode})')),
+          SnackBar(content: Text(isRide ? 'Ride not found (${response.statusCode})' : 'Order not found (${response.statusCode})')),
         );
       }
     } catch (e) {
@@ -341,9 +346,82 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
           if (_isLoadingLineage)
             const Center(child: CircularProgressIndicator(color: Colors.black87))
           else if (_lineageReport != null)
-            _buildLineageCard(_lineageReport!)
+            if (_lineageReport!.containsKey('ride_id'))
+              _buildRideLineageCard(_lineageReport!)
+            else
+              _buildLineageCard(_lineageReport!)
           else
             const Center(child: Padding(padding: EdgeInsets.all(40), child: Text('Search for an order to view its tracking lineage.', style: TextStyle(color: Colors.grey)))),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRideLineageCard(Map<String, dynamic> report) {
+    final rideId = (report['ride_id'] as String?) ?? 'N/A';
+    final rideStatus = (report['ride_status'] as String?) ?? 'N/A';
+    final vehicleType = (report['vehicle_type'] as String?) ?? 'N/A';
+    final fareAmount = (report['fare_amount'] ?? 0).toString();
+    final adminCommission = (report['admin_commission'] ?? 0).toString();
+
+    final customerID = (report['customer_id'] as String?) ?? 'N/A';
+    final customerName = (report['customer_name'] as String?) ?? 'N/A';
+
+    final riderId = (report['rider_id'] as String?) ?? 'UNASSIGNED';
+    final riderName = (report['rider_name'] as String?) ?? '';
+
+    final bids = report['bids'] as List<dynamic>? ?? [];
+    final ledgerEntries = report['ledger_entries'] as List<dynamic>? ?? [];
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.black.withValues(alpha: 0.05)),
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10, offset: const Offset(0, 4))],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('RIDE: $rideId', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+              Chip(label: Text(rideStatus, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)), backgroundColor: Colors.blue.withValues(alpha: 0.1)),
+            ],
+          ),
+          const Divider(height: 30),
+          _buildAuditRow(Icons.person_outline, 'Customer', '$customerName ($customerID)'),
+          _buildAuditRow(Icons.delivery_dining_outlined, 'Rider', riderName.isNotEmpty ? '$riderName ($riderId)' : riderId.toString()),
+          _buildAuditRow(Icons.two_wheeler_outlined, 'Vehicle', vehicleType),
+          _buildAuditRow(Icons.attach_money, 'Fare Amount', 'PKR $fareAmount'),
+          _buildAuditRow(Icons.receipt_long_outlined, 'Admin Commission', 'PKR $adminCommission'),
+          _buildAuditRow(Icons.gavel_outlined, 'Bids Received', '${bids.length}'),
+          if (bids.isNotEmpty) ...[
+            const SizedBox(height: 20),
+            const Text('Bid Trail', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: Colors.black87)),
+            const SizedBox(height: 10),
+            ...bids.map<Widget>((b) => Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Text(
+                    '• ${b['rider_name'] ?? b['rider_id']} — PKR ${b['bid_amount']} (${b['status']})',
+                    style: const TextStyle(fontSize: 13, color: Colors.black87),
+                  ),
+                ),),
+          ],
+          if (ledgerEntries.isNotEmpty) ...[
+            const SizedBox(height: 20),
+            const Text('Fare-Split Ledger Entries', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: Colors.black87)),
+            const SizedBox(height: 10),
+            ...ledgerEntries.map<Widget>((e) => Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Text(
+                    '• ${e['account']}: PKR ${e['amount']}',
+                    style: const TextStyle(fontSize: 13, color: Colors.black87),
+                  ),
+                ),),
+          ],
         ],
       ),
     );
@@ -370,8 +448,8 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.black.withOpacity(0.05)),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 10, offset: const Offset(0, 4))],
+        border: Border.all(color: Colors.black.withValues(alpha: 0.05)),
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10, offset: const Offset(0, 4))],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -380,7 +458,7 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text('ORDER: $orderId', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-              Chip(label: Text(orderStatus, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)), backgroundColor: Colors.blue.withOpacity(0.1)),
+              Chip(label: Text(orderStatus, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)), backgroundColor: Colors.blue.withValues(alpha: 0.1)),
             ],
           ),
           const Divider(height: 30),
@@ -388,7 +466,7 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
           _buildAuditRow(Icons.storefront_outlined, 'Store', '$storeName ($storeID)'),
           _buildAuditRow(Icons.delivery_dining_outlined, 'Rider', riderId.toString()),
           _buildAuditRow(Icons.local_shipping_outlined, 'Delivery Status', deliveryStatus.toString()),
-          _buildAuditRow(Icons.attach_money, 'Total Amount', '\$$totalAmount'),
+          _buildAuditRow(Icons.attach_money, 'Total Amount', 'PKR $totalAmount'),
           const SizedBox(height: 20),
           const Text('Order Items', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: Colors.black87)),
           const SizedBox(height: 10),
@@ -441,8 +519,8 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
                         Column(
                           crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
-                            Text('\$$subtotal', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.green)),
-                            Text('@ \$$unitPrice', style: const TextStyle(color: Colors.grey, fontSize: 11)),
+                            Text('PKR $subtotal', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.green)),
+                            Text('@ PKR $unitPrice', style: const TextStyle(color: Colors.grey, fontSize: 11)),
                           ],
                         ),
                       ],
@@ -509,7 +587,7 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
                     decoration: BoxDecoration(
                       color: Colors.white,
                       borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: Colors.orange.withOpacity(0.3)),
+                      border: Border.all(color: Colors.orange.withValues(alpha: 0.3)),
                     ),
                     child: Row(
                       children: [

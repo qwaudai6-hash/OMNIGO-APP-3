@@ -52,9 +52,14 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     try {
       final uri = Uri.parse('${ApiEndpoints.deliveryBase}/delivery/gig/upload-proof');
       final request = http.MultipartRequest('POST', uri);
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('jwt_token') ?? '';
+      if (token.isNotEmpty) {
+        request.headers['Authorization'] = 'Bearer $token';
+      }
       request.files.add(await http.MultipartFile.fromPath('photo', imageFile.path));
 
-      final streamedResponse = await request.send();
+      final streamedResponse = await request.send().timeout(const Duration(seconds: 30));
       final response = await http.Response.fromStream(streamedResponse);
 
       if (response.statusCode == 200) {
@@ -528,7 +533,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                           style: TextStyle(color: _statusColor(status), fontSize: 14, fontWeight: FontWeight.bold),),
                     ],
                   ),
-                  Text('\$$total',
+                  Text('PKR $total',
                       style: const TextStyle(color: AppTheme.limeAccent, fontSize: 24, fontWeight: FontWeight.w900),),
                 ],
               ),
@@ -541,9 +546,9 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                 width: double.infinity,
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
-                  color: Colors.redAccent.withOpacity(0.1),
+                  color: Colors.redAccent.withValues(alpha: 0.1),
                   borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.redAccent.withOpacity(0.3)),
+                  border: Border.all(color: Colors.redAccent.withValues(alpha: 0.3)),
                 ),
                 child: Row(
                   children: [
@@ -585,10 +590,10 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(24),
-                  border: Border.all(color: AppTheme.limeAccent.withOpacity(0.3)),
+                  border: Border.all(color: AppTheme.limeAccent.withValues(alpha: 0.3)),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withOpacity(0.02),
+                      color: Colors.black.withValues(alpha: 0.02),
                       blurRadius: 10,
                       offset: const Offset(0, 4),
                     ),
@@ -720,9 +725,9 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
               Container(
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
-                  color: AppTheme.limeAccent.withOpacity(0.2),
+                  color: AppTheme.limeAccent.withValues(alpha: 0.2),
                   borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: AppTheme.limeAccent.withOpacity(0.5)),
+                  border: Border.all(color: AppTheme.limeAccent.withValues(alpha: 0.5)),
                 ),
                 child: Row(
                   children: [
@@ -749,14 +754,22 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   }
 
   Widget _buildStatusTimeline(String status) {
+    // GAP-3/4 FIX: full lifecycle visibility. 'paid' shows payment captured
+    // (COD confirm or gateway webhook), 'in_transit' shows the rider en route
+    // between store and customer — both were invisible jumps before.
     final steps = [
       {'icon': Icons.receipt_long_outlined, 'label': 'Order Placed', 'key': 'pending'},
+      {'icon': Icons.payments_outlined, 'label': 'Payment Confirmed', 'key': 'paid'},
       {'icon': Icons.store_mall_directory_outlined, 'label': 'Accepted by Store', 'key': 'accepted'},
-      {'icon': Icons.local_shipping_outlined, 'label': 'Shipped / Gig Broadcast', 'key': 'shipped'},
+      {'icon': Icons.local_shipping_outlined, 'label': 'Picked Up', 'key': 'shipped'},
+      {'icon': Icons.delivery_dining_outlined, 'label': 'On the Way', 'key': 'in_transit'},
       {'icon': Icons.check_circle_outline, 'label': 'Delivered', 'key': 'delivered'},
     ];
 
-    final statusOrder = ['pending', 'accepted', 'shipped', 'delivered', 'completed', 'cancelled'];
+    const statusOrder = [
+      'pending', 'paid', 'accepted', 'shipped', 'picked_up',
+      'in_transit', 'delivered', 'completed', 'cancelled',
+    ];
     int currentIdx = statusOrder.indexOf(status);
     if (currentIdx < 0) currentIdx = 0;
     final isCancelled = status == 'cancelled';
@@ -777,7 +790,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                   width: 40,
                   height: 40,
                   decoration: BoxDecoration(
-                    color: isCompleted ? AppTheme.blackAccent : (isCancelled ? Colors.redAccent.withOpacity(0.1) : Colors.grey.shade200),
+                    color: isCompleted ? AppTheme.blackAccent : (isCancelled ? Colors.redAccent.withValues(alpha: 0.1) : Colors.grey.shade200),
                     shape: BoxShape.circle,
                     border: isCurrent ? Border.all(color: AppTheme.limeAccent, width: 3) : null,
                   ),

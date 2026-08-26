@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -142,18 +144,24 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *models.CreateOrderR
 	order.TrackingID = utid
 	order.TotalAmount = calculatedTotal
 
+	isCOD := order.PaymentGateway == "" || strings.EqualFold(order.PaymentGateway, "cod")
 	event := models.OrderEvent{
 		OrderID:            order.TrackingID,
 		UserTrackID:        order.UserTrackID,
 		VendorStoreTrackID: order.VendorStoreTrackID,
 		Items:              order.Items,
 		TotalAmount:        order.TotalAmount,
+		IsCOD:              isCOD,
 		DropoffLat:         order.CustomerLat,
 		DropoffLng:         order.CustomerLng,
 		Timestamp:          time.Now().UnixMilli(),
 	}
 
-	eventBytes, _ := json.Marshal(event)
+	eventBytes, err := json.Marshal(event)
+	if err != nil {
+		s.releaseStockCompensating(order.Items)
+		return nil, fmt.Errorf("failed serializing outbox event: %w", err)
+	}
 
 	// 3. Save to DB and outbox atomically using the request-scoped context
 	err = s.repo.CreateOrder(ctx, order, eventBytes)
@@ -247,17 +255,67 @@ func (s *OrderService) ReleaseStockForOrder(ctx context.Context, order *models.O
 	return nil
 }
 
+var validOrderTransitions = map[string][]string{
+	"pending":    {"paid", "accepted", "cancelled", "failed"},
+	"paid":       {"accepted", "cancelled", "refunded"},
+	"accepted":   {"shipped", "cancelled"},
+	"shipped":    {"in_transit", "delivered", "failed"},
+	"in_transit": {"delivered", "failed"},
+	"delivered":  {"completed", "refunded", "returned"},
+	"completed":  {"refunded", "returned"},
+	"cancelled":  {},
+	"failed":     {},
+	"refunded":   {},
+	"returned":   {},
+}
+
+func isValidOrderTransition(from, to string) bool {
+	from = strings.ToLower(from)
+	to = strings.ToLower(to)
+	if from == to {
+		return false
+	}
+	allowed, ok := validOrderTransitions[from]
+	if !ok {
+		return false
+	}
+	for _, target := range allowed {
+		if target == to {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *OrderService) UpdateOrderStatus(ctx context.Context, trackingID string, status string) error {
-	err := s.repo.UpdateOrderStatus(ctx, trackingID, status)
+	status = strings.ToLower(status)
+	order, err := s.repo.GetOrderByTrackingID(ctx, trackingID)
+	if err != nil {
+		return fmt.Errorf("order not found: %w", err)
+	}
+
+	if order.Status == status {
+		return nil // Already in requested state, no-op
+	}
+
+	if !isValidOrderTransition(order.Status, status) {
+		return fmt.Errorf("invalid order status transition from '%s' to '%s'", order.Status, status)
+	}
+
+	// If order is being cancelled or failed, compensate reserved inventory stock
+	if status == "cancelled" || status == "failed" {
+		if len(order.Items) > 0 {
+			_ = s.ReleaseStockForOrder(ctx, order)
+		}
+	}
+
+	err = s.repo.UpdateOrderStatus(ctx, trackingID, status)
 	if err != nil {
 		return err
 	}
 
-	// Fetch order to get customer and vendor ids for broadcasting
-	order, _ := s.repo.GetOrderByTrackingID(ctx, trackingID)
-
 	// Outbox handles orders.created, but we keep direct produce for orders.updated for simplicity in Phase 6
-	if s.kafka != nil && order != nil {
+	if s.kafka != nil {
 		event := map[string]interface{}{
 			"order_id":             trackingID,
 			"status":               status,
@@ -265,17 +323,21 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, trackingID string,
 			"vendor_tracking_id":   order.VendorTrackID,
 			"timestamp":            time.Now().UnixMilli(),
 		}
-		eventBytes, _ := json.Marshal(event)
-		record := &kgo.Record{
-			Topic: "orders.updated",
-			Key:   []byte(trackingID),
-			Value: eventBytes,
-		}
-		s.kafka.Client.Produce(ctx, record, func(_ *kgo.Record, err error) {
-			if err != nil {
-				fmt.Printf("Warning: Failed to produce orders.updated event: %v\n", err)
+		eventBytes, mErr := json.Marshal(event)
+		if mErr != nil {
+			log.Printf("[MEDIUM-03] failed to marshal orders.updated event for %s: %v — skipping produce", trackingID, mErr)
+		} else {
+			record := &kgo.Record{
+				Topic: "orders.updated",
+				Key:   []byte(trackingID),
+				Value: eventBytes,
 			}
-		})
+			s.kafka.Client.Produce(ctx, record, func(_ *kgo.Record, err error) {
+				if err != nil {
+					fmt.Printf("Warning: Failed to produce orders.updated event: %v\n", err)
+				}
+			})
+		}
 	}
 
 	return nil
@@ -289,58 +351,70 @@ func (s *OrderService) MarkOrderDelivered(ctx context.Context, trackingID string
 	if err := s.repo.MarkOrderDelivered(ctx, trackingID); err != nil {
 		return err
 	}
-
-	// Emit the orders.updated event so downstream consumers (admin
-	// dashboards, email-service, analytics-worker) can react.
-	if s.kafka != nil {
-		order, _ := s.repo.GetOrderByTrackingID(ctx, trackingID)
-		if order != nil {
-			event := map[string]interface{}{
-				"order_id":             trackingID,
-				"status":               "delivered",
-				"customer_tracking_id": order.UserTrackID,
-				"vendor_tracking_id":   order.VendorTrackID,
-				"delivered_at":         time.Now().UTC().Format(time.RFC3339),
-				"timestamp":            time.Now().UnixMilli(),
-			}
-			eventBytes, _ := json.Marshal(event)
-			record := &kgo.Record{
-				Topic: "orders.updated",
-				Key:   []byte(trackingID),
-				Value: eventBytes,
-			}
-			s.kafka.Client.Produce(ctx, record, func(_ *kgo.Record, err error) {
-				if err != nil {
-					fmt.Printf("Warning: Failed to produce orders.updated (delivered) event: %v\n", err)
-				}
-			})
-		}
-	}
-
-	return nil
+	// Deliveries satisfy the precondition for 24h escrow window. Broadcast
+	// update event so downstream telemetry/notifications pick it up.
+	return s.UpdateOrderStatus(ctx, trackingID, "delivered")
 }
 
-// produceOrderEvent emits a domain-specific Kafka topic for lifecycle events such as
-// orders.refunded or orders.cancelled. It is best-effort: callers should not fail
-// their primary transaction if Kafka is unavailable.
+// OrderLineage contains the unified lineage for an order across all actors.
+type OrderLineage struct {
+	OrderTrackingID    string  `json:"order_tracking_id"`
+	CustomerTrackingID string  `json:"customer_tracking_id"`
+	VendorTrackingID   string  `json:"vendor_tracking_id"`
+	StoreTrackingID    string  `json:"store_tracking_id"`
+	DeliveryTrackingID string  `json:"delivery_tracking_id,omitempty"`
+	RiderTrackingID    string  `json:"rider_tracking_id,omitempty"`
+	Status             string  `json:"status"`
+	TotalAmount        float64 `json:"total_amount"`
+	Currency           string  `json:"currency"`
+	PaymentGateway     string  `json:"payment_gateway"`
+}
+
+// GetOrderLineage retrieves the full UTID lineage for an order.
+func (s *OrderService) GetOrderLineage(ctx context.Context, trackingID string) (*OrderLineage, error) {
+	order, err := s.repo.GetOrderByTrackingID(ctx, trackingID)
+	if err != nil {
+		return nil, fmt.Errorf("order not found: %w", err)
+	}
+
+	lineage := &OrderLineage{
+		OrderTrackingID:    order.TrackingID,
+		CustomerTrackingID: order.UserTrackID,
+		VendorTrackingID:   order.VendorTrackID,
+		StoreTrackingID:    order.VendorStoreTrackID,
+		Status:             order.Status,
+		TotalAmount:        order.TotalAmount,
+		Currency:           order.Currency,
+		PaymentGateway:     order.PaymentGateway,
+	}
+
+	// Enrich with delivery tracking if available
+	delivery, err := s.repo.GetDeliveryByOrderTrackingID(ctx, trackingID)
+	if err == nil && delivery != nil {
+		lineage.DeliveryTrackingID = delivery.TrackingID
+		lineage.RiderTrackingID = delivery.RiderTrackID
+	}
+
+	return lineage, nil
+}
+
+// produceOrderEvent marshals an event payload and dispatches it to the given topic.
 func (s *OrderService) produceOrderEvent(ctx context.Context, topic, trackingID, reason string, amount float64, currency string) {
 	if s.kafka == nil {
 		return
 	}
-
-	order, _ := s.repo.GetOrderByTrackingID(ctx, trackingID)
-	payload := map[string]interface{}{
-		"order_id":  trackingID,
-		"reason":    reason,
-		"amount":    amount,
-		"currency":  currency,
-		"timestamp": time.Now().UnixMilli(),
+	payload := map[string]any{
+		"order_tracking_id": trackingID,
+		"reason":            reason,
+		"amount":            amount,
+		"currency":          currency,
+		"timestamp":         time.Now().UnixMilli(),
 	}
-	if order != nil {
-		payload["customer_tracking_id"] = order.UserTrackID
-		payload["vendor_tracking_id"] = order.VendorTrackID
+	eventBytes, mErr := json.Marshal(payload)
+	if mErr != nil {
+		log.Printf("[MEDIUM-03] failed to marshal %s event for %s: %v — skipping produce", topic, trackingID, mErr)
+		return
 	}
-	eventBytes, _ := json.Marshal(payload)
 
 	record := &kgo.Record{
 		Topic: topic,
@@ -364,7 +438,7 @@ func (s *OrderService) EmitCancelEvent(ctx context.Context, trackingID, reason s
 	s.produceOrderEvent(ctx, "orders.cancelled", trackingID, reason, 0, "")
 }
 
-// StartOutboxPoller begins a background routine that polls and publishes outbox events
+// StartOutboxPoller begins a background routine that atomically polls, claims, and publishes outbox events
 func (s *OrderService) StartOutboxPoller(ctx context.Context) {
 	if s.kafka == nil {
 		fmt.Println("Warning: Kafka client is nil, outbox poller will not start")
@@ -379,24 +453,26 @@ func (s *OrderService) StartOutboxPoller(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			events, err := s.repo.FetchPendingOutboxEvents(ctx, 50)
+			events, err := s.repo.ClaimPendingOutboxEvents(ctx, 50)
 			if err != nil {
-				fmt.Printf("Error fetching outbox events: %v\n", err)
+				fmt.Printf("Error claiming outbox events: %v\n", err)
 				continue
 			}
 
 			for _, event := range events {
+				ev := event
 				record := &kgo.Record{
-					Topic: event.Topic,
-					Key:   []byte(event.AggregateID),
-					Value: event.Payload,
+					Topic: ev.Topic,
+					Key:   []byte(ev.AggregateID),
+					Value: ev.Payload,
 				}
 				s.kafka.Client.Produce(ctx, record, func(_ *kgo.Record, err error) {
 					if err != nil {
-						fmt.Printf("Failed to publish outbox event %d: %v\n", event.ID, err)
+						fmt.Printf("Failed to publish outbox event %d: %v\n", ev.ID, err)
+						_ = s.repo.MarkOutboxEventFailed(context.Background(), ev.ID)
 					} else {
 						// Mark processed
-						_ = s.repo.MarkOutboxEventProcessed(ctx, event.ID)
+						_ = s.repo.MarkOutboxEventProcessed(context.Background(), ev.ID)
 					}
 				})
 			}

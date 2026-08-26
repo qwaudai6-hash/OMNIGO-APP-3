@@ -23,7 +23,7 @@ class ProductCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final String name = product.name.isNotEmpty ? product.name : 'Unknown';
     final double price = product.basePrice;
-    final String storeId = product.storeTrackingId.isNotEmpty ? product.storeTrackingId : 'STOR-001';
+    final String storeId = product.storeTrackingId;
 
     return GestureDetector(
       onTap: () {
@@ -43,50 +43,59 @@ class ProductCard extends StatelessWidget {
           borderRadius: BorderRadius.circular(24),
           boxShadow: [
             BoxShadow(
-                color: Colors.black.withOpacity(0.02),
-                blurRadius: 10,
-                offset: const Offset(0, 5),),
+              color: Colors.black.withValues(alpha: 0.04),
+              blurRadius: 16,
+              offset: const Offset(0, 6),
+            ),
           ],
         ),
+        clipBehavior: Clip.antiAlias,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // Image Canvas + Heart Float
             Expanded(
               child: Stack(
                 children: [
-                  Container(
-                    width: double.infinity,
-                    decoration: const BoxDecoration(
+                  Positioned.fill(
+                    child: Container(
                       color: AppTheme.softBlue,
-                      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-                    ),
-                    child: ClipRRect(
-                      borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-                      child: (product.imageUrl != null && product.imageUrl!.isNotEmpty)
+                      child: product.imageUrl != null &&
+                              product.imageUrl!.isNotEmpty
                           ? Image.network(
                               product.imageUrl!,
                               fit: BoxFit.cover,
                               errorBuilder: (context, error, stackTrace) =>
-                                  const Center(child: Icon(Icons.shopping_bag_outlined, size: 40, color: AppTheme.blackAccent)),
+                                  const Center(
+                                child: Icon(Icons.image_not_supported,
+                                    color: Colors.grey,),
+                              ),
                             )
-                          : const Center(child: Icon(Icons.shopping_bag_outlined, size: 40, color: AppTheme.blackAccent)),
+                          : const Center(
+                              child: Icon(Icons.shopping_bag_outlined,
+                                  size: 32, color: Colors.grey,),
+                            ),
                     ),
                   ),
                   Positioned(
-                    top: 8,
-                    right: 8,
+                    top: 10,
+                    right: 10,
                     child: GestureDetector(
                       onTap: onFavoriteToggle,
                       child: Container(
                         padding: const EdgeInsets.all(6),
                         decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.95),
+                          color: Colors.white.withValues(alpha: 0.9),
                           shape: BoxShape.circle,
                         ),
                         child: Icon(
-                          isFavorited ? Icons.favorite : Icons.favorite_border_rounded,
-                          color: isFavorited ? Colors.redAccent : Colors.grey,
-                          size: 18,
+                          isFavorited
+                              ? Icons.favorite
+                              : Icons.favorite_border,
+                          size: 16,
+                          color: isFavorited
+                              ? Colors.redAccent
+                              : AppTheme.blackAccent,
                         ),
                       ),
                     ),
@@ -94,8 +103,9 @@ class ProductCard extends StatelessWidget {
                 ],
               ),
             ),
+            // Product Info
             Padding(
-              padding: const EdgeInsets.all(12.0),
+              padding: const EdgeInsets.all(12),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -106,14 +116,16 @@ class ProductCard extends StatelessWidget {
                           fontSize: 15,),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,),
-                  const SizedBox(height: 4),
-                  Text(storeId,
-                      style: const TextStyle(color: Colors.grey, fontSize: 11),),
+                  if (storeId.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(storeId,
+                        style: const TextStyle(color: Colors.grey, fontSize: 11),),
+                  ],
                   const SizedBox(height: 8),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text('\$${price.toStringAsFixed(2)}',
+                      Text('PKR ${price.toStringAsFixed(2)}',
                           style: const TextStyle(
                               fontWeight: FontWeight.w800,
                               color: AppTheme.blackAccent,),),

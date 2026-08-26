@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -36,13 +38,15 @@ func (s *CheckoutService) CreateCheckoutTransaction(
 	customerID string,
 	storeID string,
 	nonce string,
+	orderTrackingID string,
 	items []CheckoutItem,
 	amountCents int64,
 ) (string, error) {
 
 	// 1. Idempotency Lock
+	var idempotencyKey string
 	if s.redis != nil && nonce != "" {
-		idempotencyKey := fmt.Sprintf("idempotency:checkout:%s:%s", customerID, nonce)
+		idempotencyKey = fmt.Sprintf("idempotency:checkout:%s:%s", customerID, nonce)
 		success, err := s.redis.SetNX(ctx, idempotencyKey, "PROCESSING", 120*time.Second).Result()
 		if err == nil && !success {
 			return "", errors.New("CONFLICT_DUPLICATE_CHECKOUT: request already in progress")
@@ -59,8 +63,14 @@ func (s *CheckoutService) CreateCheckoutTransaction(
 		defer tx.Rollback(ctx)
 
 		for _, item := range items {
+			// GO-24: products.id is int64 — parse the reference strictly so a
+			// non-numeric ID fails loudly instead of matching nothing.
+			pid, convErr := strconv.ParseInt(strings.TrimSpace(item.ProductID), 10, 64)
+			if convErr != nil {
+				return fmt.Errorf("invalid product id %q: must be numeric", item.ProductID)
+			}
 			query := `UPDATE products SET stock = stock - $1 WHERE id = $2 AND stock >= $1`
-			cmdTag, err := tx.Exec(ctx, query, item.Quantity, item.ProductID)
+			cmdTag, err := tx.Exec(ctx, query, item.Quantity, pid)
 			if err != nil {
 				return fmt.Errorf("failed executing stock deduction: %w", err)
 			}
@@ -86,6 +96,7 @@ func (s *CheckoutService) CreateCheckoutTransaction(
 			"customer_id": customerID,
 			"store_id":    storeID,
 			"nonce":       nonce,
+			"order_id":    orderTrackingID,
 		},
 	}
 
@@ -100,14 +111,35 @@ func (s *CheckoutService) CreateCheckoutTransaction(
 	return pi.ClientSecret, nil
 }
 
-// Background Worker to release stock back to active inventory if Stripe connection drops
+// Background Worker to release stock back to active inventory if Stripe
+// connection drops. GO-23: the release runs in ONE transaction — a crash
+// mid-loop previously leaked reserved stock permanently.
 func (s *CheckoutService) compensateFailedInventory(ctx context.Context, items []CheckoutItem) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		fmt.Printf("[Saga Engine Error] compensation tx begin failed: %v\n", err)
+		return
+	}
+	defer tx.Rollback(ctx)
+
 	for _, item := range items {
-		query := `UPDATE products SET stock = stock + $1 WHERE id = $2`
-		_, err := s.db.Exec(ctx, query, item.Quantity, item.ProductID)
-		if err != nil {
-			fmt.Printf("[Saga Engine Error] Failed to compensate inventory for product %s: %v\n", item.ProductID, err)
+		// GO-24: cast the caller-supplied product reference safely. The
+		// legacy checkout uses numeric `id`; reject non-numeric refs instead
+		// of letting the UPDATE silently match nothing.
+		pid, convErr := strconv.ParseInt(strings.TrimSpace(item.ProductID), 10, 64)
+		if convErr != nil {
+			fmt.Printf("[Saga Engine Error] non-numeric product id %q skipped in compensation\n", item.ProductID)
+			continue
 		}
+		query := `UPDATE products SET stock = stock + $1 WHERE id = $2`
+		if _, err := tx.Exec(ctx, query, item.Quantity, pid); err != nil {
+			fmt.Printf("[Saga Engine Error] Failed to compensate inventory for product %d: %v\n", pid, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		fmt.Printf("[Saga Engine Error] compensation commit failed: %v\n", err)
+		return
 	}
 	fmt.Println("[Saga Engine] Successfully compensated inventory for aborted Stripe payment.")
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -152,6 +153,24 @@ func (s *RideService) CompleteRide(ctx context.Context, trackingID string, req *
 	if !strings.HasPrefix(req.RiderTrackID, "RIDR-") {
 		return nil, fmt.Errorf("invalid rider tracking id")
 	}
+
+	// SECURITY (HIGH-05): the rider-reported FinalFare is NEVER trusted for
+	// settlement. OMNIGO is a bidding marketplace — the fare the customer
+	// agreed to (stored on the ride when the bid was accepted) is the
+	// contract price. Rider-submitted values are ignored entirely;
+	// distance/duration from the payload are kept for analytics only.
+	valRide, err := s.repo.GetRideByTrackingID(ctx, trackingID)
+	if err != nil {
+		return nil, fmt.Errorf("ride not found: %w", err)
+	}
+	if valRide.FareAmount <= 0 {
+		return nil, fmt.Errorf("ride %s has no agreed fare; cannot complete", trackingID)
+	}
+	if req.FinalFare != valRide.FareAmount {
+		log.Printf("[WARN] CompleteRide: client submitted fare %.2f differs from agreed fare %.2f for ride %s — using agreed fare", req.FinalFare, valRide.FareAmount, trackingID)
+	}
+	req.FinalFare = valRide.FareAmount
+
 	if err := s.repo.CompleteRide(ctx, trackingID, req.RiderTrackID, req.FinalFare, float64(req.DistanceMeters), float64(req.DurationSeconds)); err != nil {
 		return nil, err
 	}
@@ -275,6 +294,14 @@ func (s *RideService) GetBidsForRide(ctx context.Context, trackingID string) ([]
 func (s *RideService) AcceptBid(ctx context.Context, trackingID string, req *models.AcceptBidPayload) (*models.RideBid, error) {
 	if !strings.HasPrefix(req.CustomerTrackID, "CUST-") {
 		return nil, fmt.Errorf("invalid customer tracking id")
+	}
+
+	ride, err := s.repo.GetRideByTrackingID(ctx, trackingID)
+	if err != nil {
+		return nil, fmt.Errorf("ride not found: %w", err)
+	}
+	if ride.CustomerTrackID != req.CustomerTrackID {
+		return nil, fmt.Errorf("unauthorized: caller is not the owner of this ride")
 	}
 
 	bid, err := s.repo.AcceptBid(ctx, trackingID, req.BidID)

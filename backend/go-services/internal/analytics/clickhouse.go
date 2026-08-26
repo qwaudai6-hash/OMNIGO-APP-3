@@ -140,5 +140,9 @@ func (s *AnalyticsService) GetRiderDemandHeatmap(ctx context.Context, minLat, ma
 			"count": count,
 		})
 	}
+	// LOW-02: surface iteration-level errors (network resets mid-scan etc.)
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("heatmap row iteration failed: %w", err)
+	}
 	return results, nil
 }

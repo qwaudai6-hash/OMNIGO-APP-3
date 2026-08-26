@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -32,24 +33,34 @@ func RateLimit(rdb redis.UniversalClient, limit int, window time.Duration) gin.H
 			return
 		}
 
-		// Use client IP as the rate-limit key. Behind a load balancer,
-		// X-Forwarded-For should be trusted (configure per deployment).
-		ip := c.ClientIP()
-		key := fmt.Sprintf("ratelimit:%s", ip)
+		// Prefer verified tracking ID from authenticated JWT context, fallback to client IP
+		keyIdentifier := GetTrackingID(c)
+		if keyIdentifier == "" {
+			keyIdentifier = c.ClientIP()
+		}
+		key := fmt.Sprintf("ratelimit:%s", keyIdentifier)
 
 		ctx := c.Request.Context()
 
 		// Increment the counter
 		count, err := rdb.Incr(ctx, key).Result()
 		if err != nil {
-			// Redis error — fail open (allow request)
+			// Redis error — fail open (allow request) but LOG it so an
+			// attacker who disrupts Redis cannot silently bypass limiting.
+			log.Printf("[RateLimit] Redis error (%v) — failing OPEN for key %s", err, key)
 			c.Next()
 			return
 		}
 
-		// Set TTL on first increment
+		// SP-GO-16: set TTL atomically with the increment via pipeline. The
+		// previous INCR-then-EXPIRE two-step could leave a key with no TTL if
+		// the process died between calls → permanent client lockout.
 		if count == 1 {
-			rdb.Expire(ctx, key, window)
+			pipe := rdb.Pipeline()
+			pipe.Expire(ctx, key, window)
+			if _, perr := pipe.Exec(ctx); perr != nil {
+				log.Printf("[RateLimit] Expire failed for key %s: %v", key, perr)
+			}
 		}
 
 		// Set rate limit headers for client visibility

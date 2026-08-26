@@ -3,8 +3,12 @@ import '../../../../core/theme/app_theme.dart';
 
 class OrderSuccessScreen extends StatelessWidget {
 
-  const OrderSuccessScreen({super.key, required this.trackingId});
+  const OrderSuccessScreen({super.key, required this.trackingId, this.pending = false});
   final String trackingId;
+
+  /// PF-4 FIX: when true the payment is still processing at the gateway —
+  /// render an honest amber "processing" state instead of a green success.
+  final bool pending;
 
   @override
   Widget build(BuildContext context) {
@@ -21,20 +25,26 @@ class OrderSuccessScreen extends StatelessWidget {
                 width: 120,
                 height: 120,
                 decoration: BoxDecoration(
-                  color: Colors.green.shade50,
+                  color: pending ? Colors.amber.shade50 : Colors.green.shade50,
                   shape: BoxShape.circle,
                 ),
-                child: const Icon(Icons.check_circle, color: Colors.green, size: 80),
+                child: Icon(
+                  pending ? Icons.hourglass_top_rounded : Icons.check_circle,
+                  color: pending ? Colors.orange : Colors.green,
+                  size: 80,
+                ),
               ),
               const SizedBox(height: 32),
-              const Text(
-                'Order Placed Successfully!',
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: AppTheme.blackAccent),
+              Text(
+                pending ? 'Payment Processing…' : 'Order Placed Successfully!',
+                style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: AppTheme.blackAccent),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 16),
               Text(
-                'Your order has been confirmed. You will receive a notification once a rider is assigned.',
+                pending
+                    ? 'Your payment is being verified with the bank. The order status updates automatically — no action needed.'
+                    : 'Your order has been confirmed. You will receive a notification once a rider is assigned.',
                 style: TextStyle(fontSize: 16, color: Colors.grey.shade600, height: 1.5),
                 textAlign: TextAlign.center,
               ),

@@ -21,6 +21,7 @@ import (
 	"github.com/omnigo/backend/internal/admin"
 	"github.com/omnigo/backend/internal/analytics"
 	"github.com/omnigo/backend/internal/ledger"
+	"github.com/omnigo/backend/internal/shared/config"
 	"github.com/omnigo/backend/internal/shared/database"
 	"github.com/omnigo/backend/internal/shared/health"
 	"github.com/omnigo/backend/internal/shared/messaging"
@@ -89,7 +90,10 @@ func main() {
 
 	// Init Services
 	ledgerSvc := ledger.NewService(dbPool, tbService)
-	adminService := admin.NewAdminSurveillanceService(dbPool, driver, "neo4j", ledgerSvc)
+	// Single read-write pool today: the same pool is wired as both writer and
+	// reader. When a master-replica split lands, pass the replica pool as the
+	// second argument — all reads go through dbReader, writes through dbWriter.
+	adminService := admin.NewAdminSurveillanceService(dbPool, dbPool, driver, "neo4j", ledgerSvc)
 	verificationService := admin.NewVerificationService(dbPool)
 
 	// Initialize Kafka client for emitting payment.keys.updated events so
@@ -176,10 +180,42 @@ func main() {
 	adminRoutes.Use(middleware.RateLimit(rdb, 100, time.Minute))
 	adminRoutes.Use(middleware.AdminRequired())
 	{
-		// Lineage endpoint
+		// Lineage endpoints (supporting both compact and full sweeps for any UTID)
 		adminRoutes.GET("/lineage/:order_id", func(c *gin.Context) {
 			orderID := c.Param("order_id")
 			report, err := adminService.GetCompleteOrderLineage(c.Request.Context(), orderID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, report)
+		})
+
+		adminRoutes.GET("/lineage/:order_id/full", func(c *gin.Context) {
+			orderID := c.Param("order_id")
+			report, err := adminService.GetFullOrderLineage(c.Request.Context(), orderID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, report)
+		})
+
+		adminRoutes.GET("/lineage/full/:order_id", func(c *gin.Context) {
+			orderID := c.Param("order_id")
+			report, err := adminService.GetFullOrderLineage(c.Request.Context(), orderID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, report)
+		})
+
+		// Ride-hailing lineage: RIDE- sessions are a separate domain from the
+		// e-commerce order chain and get their own trace (participants, bid
+		// marketplace trail, fare-split ledger entries).
+		adminRoutes.GET("/lineage/ride/:id", func(c *gin.Context) {
+			report, err := adminService.GetRideLineage(c.Request.Context(), c.Param("id"))
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
@@ -222,6 +258,32 @@ func main() {
 				return
 			}
 			c.JSON(http.StatusOK, gin.H{"daily_revenue": data})
+		})
+
+		// PayFast Transaction Collection & Analytics (Admin Panel)
+		adminRoutes.GET("/finance/payfast/summary", func(c *gin.Context) {
+			stats, err := adminService.GetPayFastTransactionSummary(c.Request.Context())
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, stats)
+		})
+
+		adminRoutes.GET("/finance/payfast/transactions", func(c *gin.Context) {
+			status := c.DefaultQuery("status", "all")
+			limit, offset := parsePagination(c)
+			txns, total, err := adminService.GetPayFastTransactions(c.Request.Context(), status, limit, offset)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"transactions": txns,
+				"total":        total,
+				"limit":        limit,
+				"offset":       offset,
+			})
 		})
 
 		// Payment API key management (admin-only; encrypted at rest).
@@ -328,16 +390,9 @@ func main() {
 			c.JSON(http.StatusOK, gin.H{"status": "resolved", "order_id": orderID})
 		})
 
-		// Full lineage endpoint
-		adminRoutes.GET("/lineage/:order_id/full", func(c *gin.Context) {
-			orderID := c.Param("order_id")
-			report, err := adminService.GetFullOrderLineage(c.Request.Context(), orderID)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				return
-			}
-			c.JSON(http.StatusOK, report)
-		})
+		// NOTE: GET /lineage/:order_id/full is registered once above (line ~190).
+		// A duplicate registration here previously caused a gin panic at startup
+		// ("handlers are already registered for path").
 
 		// ── KYC/KYB automated verification endpoints ───────────────
 		adminRoutes.GET("/verifications/pending", func(c *gin.Context) {
@@ -404,18 +459,28 @@ func main() {
 		if aiHost == "" {
 			log.Println("Warning: AI_ENGINE_URL not set, AI audit endpoints will return 503")
 		}
+		aiClient := &http.Client{Timeout: 10 * time.Second}
 		adminRoutes.GET("/ai/audit-overview", func(c *gin.Context) {
 			if aiHost == "" {
 				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "AI_ENGINE_URL not configured"})
 				return
 			}
-			resp, err := http.Get(aiHost + "/api/v1/ai/audit/overview")
+			req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, aiHost+"/api/v1/ai/audit/overview", nil)
+			if err != nil {
+				c.JSON(http.StatusBadGateway, gin.H{"error": "failed to build AI engine request: " + err.Error()})
+				return
+			}
+			resp, err := aiClient.Do(req)
 			if err != nil {
 				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "AI Engine auditor offline: " + err.Error()})
 				return
 			}
 			defer resp.Body.Close()
-			c.DataFromReader(resp.StatusCode, resp.ContentLength, resp.Header.Get("Content-Type"), resp.Body, nil)
+			contentType := resp.Header.Get("Content-Type")
+			if contentType == "" {
+				contentType = "application/json"
+			}
+			c.DataFromReader(resp.StatusCode, resp.ContentLength, contentType, resp.Body, nil)
 		})
 
 		adminRoutes.POST("/ai/auto-heal", func(c *gin.Context) {
@@ -423,13 +488,25 @@ func main() {
 				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "AI_ENGINE_URL not configured"})
 				return
 			}
-			resp, err := http.Post(aiHost+"/api/v1/ai/audit/auto-heal", c.ContentType(), c.Request.Body)
+			req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, aiHost+"/api/v1/ai/audit/auto-heal", c.Request.Body)
+			if err != nil {
+				c.JSON(http.StatusBadGateway, gin.H{"error": "failed to build AI engine request: " + err.Error()})
+				return
+			}
+			if ct := c.ContentType(); ct != "" {
+				req.Header.Set("Content-Type", ct)
+			}
+			resp, err := aiClient.Do(req)
 			if err != nil {
 				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "AI Engine auto-heal offline: " + err.Error()})
 				return
 			}
 			defer resp.Body.Close()
-			c.DataFromReader(resp.StatusCode, resp.ContentLength, resp.Header.Get("Content-Type"), resp.Body, nil)
+			contentType := resp.Header.Get("Content-Type")
+			if contentType == "" {
+				contentType = "application/json"
+			}
+			c.DataFromReader(resp.StatusCode, resp.ContentLength, contentType, resp.Body, nil)
 		})
 
 		// ── Analytics / Geospatial Heatmap ───────────────
@@ -470,7 +547,7 @@ func main() {
 		port = "9007" // aligned with monolith child-port registry
 	}
 
-	srv := &http.Server{Addr: "127.0.0.1:" + port, Handler: r}
+	srv := &http.Server{Addr: config.BindHost() + ":" + port, Handler: r}
 
 	go func() {
 		log.Printf("Starting Admin Surveillance Engine on port %s...", port)

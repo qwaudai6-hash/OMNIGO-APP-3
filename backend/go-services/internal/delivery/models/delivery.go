@@ -10,6 +10,9 @@ const (
 	StatusInTransit    = "in_transit"
 	StatusCompleted    = "completed"
 	StatusFailed       = "failed"
+	StatusCancelled    = "cancelled"
+	StatusAssigned     = "assigned"
+	StatusDisputed     = "disputed"
 )
 
 // DeliveryGig represents a delivery task broadcasted to riders

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/omnigo/backend/internal/escrow"
 	"github.com/omnigo/backend/internal/ledger"
@@ -25,6 +26,16 @@ import (
 	"github.com/omnigo/backend/internal/payment_orchestrator"
 	"github.com/omnigo/backend/internal/payment_orchestrator/fraud"
 	"github.com/omnigo/backend/internal/shared/telemetry"
+)
+
+// Classification sentinels. Handlers must classify HTTP status codes via errors.Is()
+// against these — never by substring-matching error text, which breaks silently the
+// moment any message wording changes.
+var (
+	ErrValidation = errors.New("payfast: invalid request")
+	ErrNotFound   = errors.New("payfast: resource not found")
+	ErrForbidden  = errors.New("payfast: forbidden")
+	ErrConflict   = errors.New("payfast: conflicting state")
 )
 
 // PaymentRequest contains client checkout parameters.
@@ -44,6 +55,11 @@ type PaymentRequest struct {
 	ExpiryYear        string `json:"expiry_year"`
 	CVV               string `json:"cvv"`
 	OTP               string `json:"otp"`
+
+	// Optional client-supplied idempotency token (usually injected by the handler from
+	// the Idempotency-Key header). Retrying the SAME checkout with the same key returns
+	// a stable replay of the original attempt instead of charging twice.
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
 // Validate ensures input parameters meet financial security and card scheme formats.
@@ -112,14 +128,14 @@ type PaymentResponse struct {
 
 // PaymentMetadata stores non-sensitive gateway token state. Zero cardholder data stored.
 type PaymentMetadata struct {
-	InstrumentToken string                 `json:"instrument_token"`
-	GatewayTxnID    string                 `json:"gateway_txn_id"`
-	Data3DSSecureID string                 `json:"data_3ds_secureid"`
-	ECI             string                 `json:"eci"`
-	CustomerMobile  string                 `json:"customer_mobile"`
-	AccountTypeID   string                 `json:"account_type"`
-	CustomerIP      string                 `json:"customer_ip"`
-	CalculatedSplit map[string]float64     `json:"calculated_split"`
+	InstrumentToken string             `json:"instrument_token"`
+	GatewayTxnID    string             `json:"gateway_txn_id"`
+	Data3DSSecureID string             `json:"data_3ds_secureid"`
+	ECI             string             `json:"eci"`
+	CustomerMobile  string             `json:"customer_mobile"`
+	AccountTypeID   string             `json:"account_type"`
+	CustomerIP      string             `json:"customer_ip"`
+	CalculatedSplit map[string]float64 `json:"calculated_split"`
 }
 
 // PayFastService orchestrates domain logic, database invariants, and PayFast API integration.
@@ -134,6 +150,7 @@ type PayFastService struct {
 	callbackSecret   string
 	merchantCategory string
 	callbackBaseURL  string
+	checkoutURL      string
 	defaultCurrency  string
 }
 
@@ -159,7 +176,19 @@ func NewPayFastService(
 	}
 	cbURL := os.Getenv("PAYFAST_3DS_CALLBACK_URL")
 	if cbURL == "" {
-		cbURL = "http://localhost:8080/api/v1/payments/payfast/3ds_callback"
+		if os.Getenv("GO_TEST_ENV") == "1" {
+			cbURL = "http://localhost:8080/api/v1/payments/payfast/3ds_callback"
+		} else {
+			panic("PAYFAST_3DS_CALLBACK_URL environment variable is required (must be a publicly reachable HTTPS URL that PayFast can POST 3DS callbacks to)")
+		}
+	}
+	checkoutURL := os.Getenv("PAYFAST_CHECKOUT_URL")
+	if checkoutURL == "" {
+		if os.Getenv("GO_TEST_ENV") == "1" {
+			checkoutURL = "http://localhost:8080/api/v1/payments/payfast/ipn"
+		} else {
+			panic("PAYFAST_CHECKOUT_URL environment variable is required (the IPN webhook URL registered with PayFast — must be a publicly reachable HTTPS URL)")
+		}
 	}
 	currency := os.Getenv("DEFAULT_CURRENCY")
 	if currency == "" {
@@ -177,6 +206,7 @@ func NewPayFastService(
 		callbackSecret:   secret,
 		merchantCategory: cat,
 		callbackBaseURL:  cbURL,
+		checkoutURL:      checkoutURL,
 		defaultCurrency:  currency,
 	}
 }
@@ -234,13 +264,42 @@ func (s *PayFastService) Build3DSCallbackURL(internalTxnID string) (string, erro
 	return u.String(), nil
 }
 
-// ProcessPayment handles the primary checkout initiation.
-func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, clientIP string, req *PaymentRequest) (*PaymentResponse, error) {
-	// 1. Validate Input Payload
-	if err := req.Validate(); err != nil {
-		return nil, fmt.Errorf("validation error: %w", err)
+// idempotentReplayResponse maps a previously-recorded transaction's DB status onto a
+// stable, client-safe response for idempotent key replays.
+func idempotentReplayResponse(dbStatus, orderID, txnID string) *PaymentResponse {
+	resp := &PaymentResponse{
+		OrderID:       orderID,
+		TransactionID: txnID,
 	}
+	switch dbStatus {
+	case "settlement_pending", "captured", "authorized":
+		resp.Status = "settlement_pending"
+		resp.Message = "Payment already verified for this idempotency key; settlement in progress"
+	case "3ds_required":
+		resp.Status = "in_progress"
+		resp.Action = "3ds_redirect"
+		resp.Message = "3-D Secure verification already in progress for this idempotency key; complete the challenge window you already opened"
+	case "gateway_pending":
+		resp.Status = "gateway_pending"
+		resp.Message = "Payment is processing at gateway; reconciliation in progress"
+	default: // pending, processing
+		resp.Status = "in_progress"
+		resp.Message = "Payment attempt already in progress for this idempotency key"
+	}
+	return resp
+}
 
+// gatewayContext derives a detached, deadline-bounded context for outbound
+// gateway calls: cancellation from the originating HTTP request is dropped,
+// and the deadline tracks the client's configured HTTP timeout plus a small
+// local processing buffer instead of an arbitrary constant.
+func (s *PayFastService) gatewayContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := s.payfast.Timeout() + 5*time.Second
+	return context.WithTimeout(context.WithoutCancel(ctx), timeout)
+}
+
+// ProcessPayment handles the primary checkout initiation.
+func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, clientIP string, req *PaymentRequest) (resp *PaymentResponse, err error) {
 	method := req.PaymentMethod
 	if method == "" {
 		if req.SavedCardID != "" {
@@ -251,6 +310,41 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 			method = "bank_account"
 		}
 	}
+
+	// Records the final outcome exactly once, from whichever of ProcessPayment's ~20 return
+	// points is actually hit — named returns + defer means every exit path is covered without
+	// scattering telemetry calls (and the risk of missing one) throughout the function body.
+	defer func() {
+		outcome := "failed"
+		if err == nil && resp != nil {
+			switch resp.Status {
+			case "3ds_redirect":
+				outcome = "three_ds_required"
+			case "gateway_pending":
+				outcome = "gateway_pending"
+			case "settlement_pending", "succeeded":
+				outcome = "succeeded"
+			default:
+				outcome = resp.Status
+			}
+		}
+		telemetry.RecordPaymentOutcome(method, outcome)
+	}()
+
+	// 1. Validate Input Payload
+	if verr := req.Validate(); verr != nil {
+		return nil, fmt.Errorf("%w: %v", ErrValidation, verr)
+	}
+
+	// Optional client idempotency key: normalize and bound its size before it reaches
+	// the DB (column is VARCHAR(255); "pf:" prefix consumes 3).
+	if clientKey := strings.TrimSpace(req.IdempotencyKey); clientKey != "" {
+		if len(clientKey) > 200 {
+			return nil, fmt.Errorf("%w: idempotency key too long (max 200 characters)", ErrValidation)
+		}
+		req.IdempotencyKey = clientKey
+	}
+
 	telemetry.RecordPaymentAttempt("payfast", method)
 
 	// 2. Run Pre-Authorization Fraud & Velocity Checks
@@ -277,13 +371,13 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		 FROM orders WHERE order_tracking_id = $1 FOR UPDATE`, req.OrderID,
 	).Scan(&expectedAmount, &orderStatus, &customerTrackingID, &storeID)
 	if err != nil {
-		return nil, fmt.Errorf("order not found: %w", err)
+		return nil, fmt.Errorf("%w: order not found: %v", ErrNotFound, err)
 	}
 	if merchantUserID != customerTrackingID {
-		return nil, errors.New("forbidden: order belongs to a different user")
+		return nil, fmt.Errorf("%w: order belongs to a different user", ErrForbidden)
 	}
 	if orderStatus != "pending" && orderStatus != "unpaid" {
-		return nil, errors.New("order is not in a payable status")
+		return nil, fmt.Errorf("%w: order is not in a payable status", ErrConflict)
 	}
 
 	if s.fraud != nil {
@@ -293,20 +387,56 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 	}
 
 	internalTxnID := "pf_" + uuid.New().String()
-	idempotencyKey := fmt.Sprintf("pf:%s:%s", req.OrderID, merchantUserID)
+
+	// Idempotency key resolution:
+	//   - With a client-supplied key, retries of the same checkout collapse onto one
+	//     transaction (UNIQUE constraint on payment_transactions.idempotency_key).
+	//   - Without one, the key is per-attempt and real protection comes from the
+	//     active-attempt guard + unique partial index ux_payment_active_order.
+	idempotencyKey := fmt.Sprintf("pf:%s:%s", req.OrderID, internalTxnID)
+	if req.IdempotencyKey != "" {
+		idempotencyKey = "pf:" + req.IdempotencyKey
+	}
 
 	// Check active attempts
 	var activeAttempts int
 	err = tx.QueryRow(ctx,
 		`SELECT count(*) FROM payment_transactions 
-		 WHERE order_tracking_id = $1 AND status IN ('processing', '3ds_required', 'settlement_pending', 'gateway_pending')`,
+		 WHERE order_tracking_id = $1 AND status IN ('pending', 'processing', '3ds_required', 'settlement_pending', 'gateway_pending')`,
 		req.OrderID,
 	).Scan(&activeAttempts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check active attempts: %w", err)
 	}
+
+	// Idempotent replay: if this exact client key already produced a live/completed
+	// transaction for THIS order, return its state verbatim instead of erroring or
+	// double-charging. Terminal (failed/refunded) rows fall through so a genuine
+	// retry-after-failure can proceed under a derived per-attempt key.
+	if req.IdempotencyKey != "" {
+		var existTxnID, existOrderID, existStatus string
+		qErr := tx.QueryRow(ctx,
+			`SELECT transaction_id, order_tracking_id, status 
+			 FROM payment_transactions WHERE idempotency_key = $1`,
+			idempotencyKey,
+		).Scan(&existTxnID, &existOrderID, &existStatus)
+		if qErr == nil {
+			if existOrderID != req.OrderID {
+				return nil, fmt.Errorf("%w: idempotency key was already used for a different order", ErrConflict)
+			}
+			switch existStatus {
+			case "failed", "refunded", "reversed", "chargeback":
+				idempotencyKey = fmt.Sprintf("%s:r-%s", idempotencyKey, internalTxnID)
+			default:
+				return idempotentReplayResponse(existStatus, existOrderID, existTxnID), nil
+			}
+		} else if !errors.Is(qErr, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("failed to check idempotency key: %w", qErr)
+		}
+	}
+
 	if activeAttempts > 0 {
-		return nil, errors.New("conflict: payment attempt is already in progress for this order")
+		return nil, fmt.Errorf("%w: payment attempt is already in progress for this order", ErrConflict)
 	}
 
 	// Fetch authoritative phone from users table with fallback
@@ -334,7 +464,11 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 
 	// Pre-calculate Split and assert exact zero-tolerance paisa parity
 	var deliveryTrackingID string
-	_ = tx.QueryRow(ctx, `SELECT COALESCE(tracking_id, '') FROM deliveries WHERE order_tracking_id = $1`, req.OrderID).Scan(&deliveryTrackingID)
+	if scanErr := tx.QueryRow(ctx, `SELECT COALESCE(tracking_id, '') FROM deliveries WHERE order_tracking_id = $1`, req.OrderID).Scan(&deliveryTrackingID); scanErr != nil {
+		if !errors.Is(scanErr, pgx.ErrNoRows) {
+			log.Printf("ERROR: delivery tracking id lookup error for order %s: %v", req.OrderID, scanErr)
+		}
+	}
 	split, err := s.calculator.CalculateSplit(ctx, expectedAmount, storeID, deliveryTrackingID)
 	if err != nil {
 		return nil, fmt.Errorf("commission split calculation failed: %w", err)
@@ -365,8 +499,8 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		internalTxnID, req.OrderID, expectedAmount, s.defaultCurrency, idempotencyKey, metaBytes,
 	)
 	if err != nil {
-		if strings.Contains(err.Error(), "ux_payment_active_order") || strings.Contains(err.Error(), "unique constraint") {
-			return nil, errors.New("conflict: payment attempt is already in progress")
+		if strings.Contains(err.Error(), "ux_payment_active_order") || strings.Contains(err.Error(), "unique constraint") || strings.Contains(err.Error(), "duplicate key") {
+			return nil, fmt.Errorf("%w: payment attempt is already in progress", ErrConflict)
 		}
 		return nil, fmt.Errorf("failed to record payment attempt: %w", err)
 	}
@@ -379,11 +513,15 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 	if req.SavedCardID != "" && s.vault != nil {
 		savedToken, err := s.vault.GetCardInstrumentToken(ctx, merchantUserID, req.SavedCardID)
 		if err != nil {
-			_ = s.MarkPaymentFailed(ctx, internalTxnID, "Invalid saved card token: "+err.Error())
+			if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Invalid saved card token: "+err.Error()); markErr != nil {
+				log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+			}
 			return nil, err
 		}
 
-		_, _ = s.db.Exec(ctx, `UPDATE payment_transactions SET status = 'processing', updated_at = NOW() WHERE transaction_id = $1`, internalTxnID)
+		if _, execErr := s.db.Exec(ctx, `UPDATE payment_transactions SET status = 'processing', updated_at = NOW() WHERE transaction_id = $1`, internalTxnID); execErr != nil {
+			log.Printf("WARNING: failed to update payment %s to 'processing': %v", internalTxnID, execErr)
+		}
 
 		txnReq := payfast.TokenizedTransactionRequest{
 			InstrumentToken:  savedToken,
@@ -398,7 +536,7 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 			Otp:              req.OTP,
 		}
 
-		gwCtx, gwCancel := context.WithTimeout(context.WithoutCancel(ctx), 25*time.Second)
+		gwCtx, gwCancel := s.gatewayContext(ctx)
 		defer gwCancel()
 		txnRes, err := s.payfast.InitiateTokenizedTransaction(gwCtx, txnReq)
 		if err != nil {
@@ -406,7 +544,9 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 				s.fraud.RecordAttempt(ctx, merchantUserID, clientIP, false)
 			}
 			if payfast.IsTransient(err) {
-				_ = s.MarkPaymentGatewayPending(ctx, internalTxnID, "", "Saved card timeout: "+err.Error())
+				if markErr := s.MarkPaymentGatewayPending(ctx, internalTxnID, "", "Saved card timeout: "+err.Error()); markErr != nil {
+					log.Printf("CRITICAL: failed to update payment status via MarkPaymentGatewayPending for txn %s: %v", internalTxnID, markErr)
+				}
 				return &PaymentResponse{
 					Status:        "gateway_pending",
 					OrderID:       req.OrderID,
@@ -414,15 +554,72 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 					Message:       "Payment is processing at gateway; reconciliation in progress",
 				}, nil
 			}
-			_ = s.MarkPaymentFailed(ctx, internalTxnID, "Saved card capture failed: "+err.Error())
+			if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Saved card capture failed: "+err.Error()); markErr != nil {
+				log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+			}
 			return nil, fmt.Errorf("saved card payment failed: %w", err)
 		}
 
-		if txnRes.StatusCode != "00" && txnRes.StatusCode != "" {
+		// Issuer step-up: some banks demand a 3-D Secure challenge even for tokenized
+		// (saved-card) transactions. Route through the same 3DS callback machinery as
+		// new-card payments — persist instrument/split state and hand the challenge HTML
+		// back to the client — instead of misreporting an otherwise healthy payment as failed.
+		if txnRes != nil && txnRes.Data3DSHTML != "" {
+			metaBytes, _ = json.Marshal(PaymentMetadata{
+				InstrumentToken: savedToken,
+				GatewayTxnID:    txnRes.TransactionID,
+				Data3DSSecureID: txnRes.Data3DSSecureID,
+				ECI:             txnRes.ECI.String(),
+				CustomerMobile:  authoritativeMobile,
+				AccountTypeID:   req.AccountTypeID,
+				CustomerIP:      clientIP,
+				CalculatedSplit: splitMeta,
+			})
+
+			// This row is what Handle3DSCallback resumes from; if the write fails we must
+			// not send the customer into the ACS challenge with no resumable local state.
+			res, execErr := s.db.Exec(ctx,
+				`UPDATE payment_transactions 
+				 SET status = '3ds_required', gateway_txn_id = NULLIF($1, ''), metadata = $2, updated_at = NOW() 
+				 WHERE transaction_id = $3 AND status IN ('pending', 'processing')`,
+				txnRes.TransactionID, metaBytes, internalTxnID,
+			)
+			if execErr != nil || res.RowsAffected() == 0 {
+				failReason := "failed to persist saved-card 3DS state"
+				if execErr != nil {
+					failReason = "failed to persist saved-card 3DS state: " + execErr.Error()
+				} else {
+					failReason = "saved-card transaction no longer active for 3DS step-up"
+				}
+				log.Printf("CRITICAL: %s for txn %s", failReason, internalTxnID)
+				if markErr := s.MarkPaymentFailed(ctx, internalTxnID, failReason); markErr != nil {
+					log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+				}
+				return &PaymentResponse{
+					Status:        "failed",
+					Action:        "failed",
+					OrderID:       req.OrderID,
+					TransactionID: internalTxnID,
+					Message:       "Failed to prepare 3-D Secure verification. Please try again.",
+				}, fmt.Errorf("%s", failReason)
+			}
+
+			return &PaymentResponse{
+				Status:        "3ds_redirect",
+				Action:        "3ds_redirect",
+				ThreeDSHtml:   txnRes.Data3DSHTML,
+				OrderID:       req.OrderID,
+				TransactionID: internalTxnID,
+			}, nil
+		}
+
+		if txnRes.StatusCode != "00" && txnRes.StatusCode != "000" && txnRes.StatusCode != "" {
 			if s.fraud != nil {
 				s.fraud.RecordAttempt(ctx, merchantUserID, clientIP, false)
 			}
-			_ = s.MarkPaymentFailed(ctx, internalTxnID, txnRes.StatusMsg)
+			if markErr := s.MarkPaymentFailed(ctx, internalTxnID, txnRes.StatusMsg); markErr != nil {
+				log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+			}
 			return nil, fmt.Errorf("gateway error: %s (%s)", txnRes.StatusMsg, payfast.MapIssuerResponseCode(txnRes.StatusCode))
 		}
 
@@ -452,7 +649,9 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 
 	callbackURL, err := s.Build3DSCallbackURL(internalTxnID)
 	if err != nil {
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, "Failed to build callback URL: "+err.Error())
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Failed to build callback URL: "+err.Error()); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return nil, err
 	}
 
@@ -497,7 +696,9 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		if s.fraud != nil {
 			s.fraud.RecordAttempt(ctx, merchantUserID, clientIP, false)
 		}
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, "Temporary token request failed: "+err.Error())
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Temporary token request failed: "+err.Error()); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return &PaymentResponse{
 			Status:        "failed",
 			OrderID:       req.OrderID,
@@ -508,10 +709,14 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 
 	// Auto-save card token in vault if customer opted in
 	if req.SaveCardForFuture && tokenRes.InstrumentToken != "" && s.vault != nil && lastFour != "" {
-		_, _ = s.vault.SaveCard(
+		if _, saveErr := s.vault.SaveCard(
 			ctx, customerTrackingID, tokenRes.InstrumentToken,
 			cardBrand, lastFour, req.ExpiryMonth, req.ExpiryYear, req.AccountTitle, false,
-		)
+		); saveErr != nil {
+			// Non-critical: the current payment still proceeds without the card being
+			// saved for future use, but we surface it so retries/monitoring can catch it.
+			log.Printf("WARNING: failed to save card to vault for user %s: %v", customerTrackingID, saveErr)
+		}
 	}
 
 	// 6. Evaluate Token Response (3DS Required vs Direct Tokenized Capture)
@@ -527,12 +732,28 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 			CalculatedSplit: splitMeta,
 		})
 
-		_, _ = s.db.Exec(ctx,
+		// This row (status + gateway_txn_id + metadata) is what Handle3DSCallback looks up
+		// when PayFast redirects the customer back after OTP verification. If this write
+		// fails, the callback will have no instrument token / split data to resume the
+		// transaction with — so we must NOT tell the client to proceed to 3DS in that case.
+		if _, execErr := s.db.Exec(ctx,
 			`UPDATE payment_transactions 
 			 SET status = '3ds_required', gateway_txn_id = $1, metadata = $2, updated_at = NOW() 
 			 WHERE transaction_id = $3`,
 			tokenRes.TransactionID, metaBytes, internalTxnID,
-		)
+		); execErr != nil {
+			log.Printf("CRITICAL: failed to persist 3ds_required state for txn %s: %v", internalTxnID, execErr)
+			if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Failed to persist 3DS state: "+execErr.Error()); markErr != nil {
+				log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+			}
+			return &PaymentResponse{
+				Status:        "failed",
+				Action:        "failed",
+				OrderID:       req.OrderID,
+				TransactionID: internalTxnID,
+				Message:       "Failed to prepare 3-D Secure verification. Please try again.",
+			}, fmt.Errorf("persist 3ds_required state: %w", execErr)
+		}
 
 		return &PaymentResponse{
 			Status:        "3ds_redirect",
@@ -545,12 +766,16 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 
 	// 7. Direct Tokenized Capture (3DS Not Required)
 	if tokenRes.InstrumentToken == "" {
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, "Gateway returned empty instrument token")
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Gateway returned empty instrument token"); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return nil, errors.New("invalid gateway token response")
 	}
 
 	// Mark processing
-	_, _ = s.db.Exec(ctx, `UPDATE payment_transactions SET status = 'processing', updated_at = NOW() WHERE transaction_id = $1`, internalTxnID)
+	if _, execErr := s.db.Exec(ctx, `UPDATE payment_transactions SET status = 'processing', updated_at = NOW() WHERE transaction_id = $1`, internalTxnID); execErr != nil {
+		log.Printf("WARNING: failed to update payment %s to 'processing': %v", internalTxnID, execErr)
+	}
 
 	txnReq := payfast.TokenizedTransactionRequest{
 		InstrumentToken:  tokenRes.InstrumentToken,
@@ -567,7 +792,7 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 	}
 
 	// Use detached context preserving request context values
-	gwCtx, gwCancel := context.WithTimeout(context.WithoutCancel(ctx), 25*time.Second)
+	gwCtx, gwCancel := s.gatewayContext(ctx)
 	defer gwCancel()
 	txnRes, err := s.payfast.InitiateTokenizedTransaction(gwCtx, txnReq)
 	if err != nil {
@@ -575,7 +800,9 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 			s.fraud.RecordAttempt(ctx, merchantUserID, clientIP, false)
 		}
 		if payfast.IsTransient(err) {
-			_ = s.MarkPaymentGatewayPending(ctx, internalTxnID, tokenRes.TransactionID, "Direct tokenized txn timeout: "+err.Error())
+			if markErr := s.MarkPaymentGatewayPending(ctx, internalTxnID, tokenRes.TransactionID, "Direct tokenized txn timeout: "+err.Error()); markErr != nil {
+				log.Printf("CRITICAL: failed to update payment status via MarkPaymentGatewayPending for txn %s: %v", internalTxnID, markErr)
+			}
 			return &PaymentResponse{
 				Status:        "gateway_pending",
 				OrderID:       req.OrderID,
@@ -584,7 +811,9 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 			}, nil
 		}
 
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, "Tokenized capture failed: "+err.Error())
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Tokenized capture failed: "+err.Error()); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return &PaymentResponse{
 			Status:        "failed",
 			OrderID:       req.OrderID,
@@ -594,14 +823,18 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 	}
 
 	if txnRes == nil || txnRes.TransactionID == "" {
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, "Gateway returned empty transaction ID")
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Gateway returned empty transaction ID"); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return nil, errors.New("invalid gateway transaction response")
 	}
-	if txnRes.StatusCode != "00" && txnRes.StatusCode != "" {
+	if !payfast.IsSuccessCode(txnRes.StatusCode) && txnRes.StatusCode != "" {
 		if s.fraud != nil {
 			s.fraud.RecordAttempt(ctx, merchantUserID, clientIP, false)
 		}
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, txnRes.StatusMsg)
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, txnRes.StatusMsg); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return nil, fmt.Errorf("gateway error: %s (%s)", txnRes.StatusMsg, payfast.MapIssuerResponseCode(txnRes.StatusCode))
 	}
 
@@ -623,7 +856,16 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 }
 
 // Handle3DSCallback processes the ACS form post callback with replay defense.
-func (s *PayFastService) Handle3DSCallback(ctx context.Context, mdParam, paRes, clientIP string) (string, error) {
+func (s *PayFastService) Handle3DSCallback(ctx context.Context, mdParam, paRes, clientIP string) (result string, err error) {
+	callbackStart := time.Now()
+	defer func() {
+		outcome := "settled"
+		if err != nil {
+			outcome = "failed"
+		}
+		telemetry.Observe3DSCallbackDuration(outcome, time.Since(callbackStart))
+	}()
+
 	internalTxnID, err := s.VerifyMD(mdParam)
 	if err != nil {
 		return "", fmt.Errorf("invalid MD signature: %w", err)
@@ -686,24 +928,32 @@ func (s *PayFastService) Handle3DSCallback(ctx context.Context, mdParam, paRes, 
 	}
 
 	// Use detached context preserving request context values
-	gwCtx, gwCancel := context.WithTimeout(context.WithoutCancel(ctx), 25*time.Second)
+	gwCtx, gwCancel := s.gatewayContext(ctx)
 	defer gwCancel()
 	txnRes, err := s.payfast.InitiateTokenizedTransaction(gwCtx, txnReq)
 	if err != nil {
 		if payfast.IsTransient(err) {
-			_ = s.MarkPaymentGatewayPending(ctx, internalTxnID, meta.GatewayTxnID, "Tokenized 3DS txn timeout: "+err.Error())
+			if markErr := s.MarkPaymentGatewayPending(ctx, internalTxnID, meta.GatewayTxnID, "Tokenized 3DS txn timeout: "+err.Error()); markErr != nil {
+				log.Printf("CRITICAL: failed to update payment status via MarkPaymentGatewayPending for txn %s: %v", internalTxnID, markErr)
+			}
 			return orderID, fmt.Errorf("gateway timeout during 3DS transaction: %w", err)
 		}
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, "Tokenized 3DS txn rejected: "+err.Error())
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Tokenized 3DS txn rejected: "+err.Error()); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return orderID, fmt.Errorf("3DS payment rejected: %w", err)
 	}
 
 	if txnRes == nil || txnRes.TransactionID == "" {
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, "Gateway returned empty transaction ID after 3DS")
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Gateway returned empty transaction ID after 3DS"); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return orderID, errors.New("invalid gateway response")
 	}
-	if txnRes.StatusCode != "00" && txnRes.StatusCode != "" {
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, txnRes.StatusMsg)
+	if !payfast.IsSuccessCode(txnRes.StatusCode) && txnRes.StatusCode != "" {
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, txnRes.StatusMsg); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return orderID, fmt.Errorf("gateway rejection: %s", txnRes.StatusMsg)
 	}
 
@@ -716,42 +966,65 @@ func (s *PayFastService) Handle3DSCallback(ctx context.Context, mdParam, paRes, 
 }
 
 // VerifyAndSettle queries PayFast status and settles the database transaction atomically.
+//
+// The context is deliberately detached (WithoutCancel) before any work: by the time this
+// runs, funds have MAY already be captured at the gateway. If the originating HTTP request
+// dies mid-settlement (client disconnect, load-balancer timeout), a cancellable context
+// would abort the local ledger/order updates while the customer was still charged —
+// leaving a paid order stuck unsettled until reconciliation. Values (tracing etc.) are
+// preserved; only cancellation is dropped.
 func (s *PayFastService) VerifyAndSettle(ctx context.Context, internalTxnID, orderID, gatewayTxnID string, expectedAmount float64) error {
+	ctx = context.WithoutCancel(ctx)
+
 	if gatewayTxnID == "" {
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, "Missing gateway transaction ID for status verification")
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Missing gateway transaction ID for status verification"); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return errors.New("invalid gateway transaction ID")
 	}
 
 	statusRes, err := s.payfast.GetTransactionStatus(ctx, gatewayTxnID)
 	if err != nil {
 		if payfast.IsTransient(err) {
-			_ = s.MarkPaymentGatewayPending(ctx, internalTxnID, gatewayTxnID, "Status verification timeout: "+err.Error())
+			if markErr := s.MarkPaymentGatewayPending(ctx, internalTxnID, gatewayTxnID, "Status verification timeout: "+err.Error()); markErr != nil {
+				log.Printf("CRITICAL: failed to update payment status via MarkPaymentGatewayPending for txn %s: %v", internalTxnID, markErr)
+			}
 			return fmt.Errorf("status verification timeout: %w", err)
 		}
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, "Status verification error: "+err.Error())
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Status verification error: "+err.Error()); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return err
 	}
 
-	if statusRes.StatusCode != "00" {
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, fmt.Sprintf("Gateway status '%s': %s", statusRes.StatusCode, statusRes.StatusMsg))
+	if !payfast.IsSuccessCode(statusRes.StatusCode) {
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, fmt.Sprintf("Gateway status '%s': %s", statusRes.StatusCode, statusRes.StatusMsg)); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return fmt.Errorf("gateway status rejection: %s", statusRes.StatusMsg)
 	}
 
 	if statusRes.BasketID != "" && statusRes.BasketID != orderID {
-		_ = s.MarkPaymentFailed(ctx, internalTxnID, fmt.Sprintf("Basket ID mismatch: expected %s, got %s", orderID, statusRes.BasketID))
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, fmt.Sprintf("Basket ID mismatch: expected %s, got %s", orderID, statusRes.BasketID)); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
 		return errors.New("basket ID mismatch")
 	}
 
 	if statusRes.TxnAmt != "" {
 		gatewayAmt, parseErr := strconv.ParseFloat(statusRes.TxnAmt, 64)
 		if parseErr != nil {
-			_ = s.MarkPaymentFailed(ctx, internalTxnID, "Invalid amount format in gateway status response")
+			if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Invalid amount format in gateway status response"); markErr != nil {
+				log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+			}
 			return fmt.Errorf("invalid gateway amount format: %w", parseErr)
 		}
 		expectedPaisa := int64(math.Round(expectedAmount * 100))
 		gatewayPaisa := int64(math.Round(gatewayAmt * 100))
 		if expectedPaisa != gatewayPaisa {
-			_ = s.MarkPaymentFailed(ctx, internalTxnID, fmt.Sprintf("Amount mismatch: expected %d paisa, got %d paisa", expectedPaisa, gatewayPaisa))
+			if markErr := s.MarkPaymentFailed(ctx, internalTxnID, fmt.Sprintf("Amount mismatch: expected %d paisa, got %d paisa", expectedPaisa, gatewayPaisa)); markErr != nil {
+				log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+			}
 			return errors.New("transaction amount mismatch")
 		}
 	}
@@ -761,7 +1034,13 @@ func (s *PayFastService) VerifyAndSettle(ctx context.Context, internalTxnID, ord
 
 // ExecuteSplit creates the outbox event and prepares the transaction for atomic settlement.
 // Global lock ordering policy: ALWAYS lock orders FIRST, then payment_transactions to prevent deadlocks.
+//
+// Like VerifyAndSettle, the context is detached: this is pure local bookkeeping (DB + outbox)
+// for money that may already be captured at the gateway — it must never be aborted by an
+// upstream HTTP cancellation.
 func (s *PayFastService) ExecuteSplit(ctx context.Context, internalTxnID, orderID string, expectedAmount float64, gatewayTxnID string) error {
+	ctx = context.WithoutCancel(ctx)
+
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -771,22 +1050,26 @@ func (s *PayFastService) ExecuteSplit(ctx context.Context, internalTxnID, orderI
 	// 1. Lock order FIRST (Global lock order: orders -> payment_transactions)
 	var dbAmount float64
 	var storeID string
-	var orderStatus string
+	var orderStatus, paymentStatus string
 	err = tx.QueryRow(ctx,
-		`SELECT total_amount, store_tracking_id, status FROM orders WHERE order_tracking_id = $1 FOR UPDATE`, orderID,
-	).Scan(&dbAmount, &storeID, &orderStatus)
+		`SELECT total_amount, store_tracking_id, status, COALESCE(payment_status, '') FROM orders WHERE order_tracking_id = $1 FOR UPDATE`, orderID,
+	).Scan(&dbAmount, &storeID, &orderStatus, &paymentStatus)
 	if err != nil {
 		return fmt.Errorf("order not found: %w", err)
 	}
-	if orderStatus == "paid" {
-		return errors.New("conflict: order already paid by another transaction")
+	if orderStatus == "paid" || paymentStatus == "paid" || paymentStatus == "settlement_pending" {
+		return errors.New("conflict: order already paid or settlement in progress")
 	}
 	if dbAmount != expectedAmount {
 		return fmt.Errorf("order amount changed: expected %.2f, got %.2f", expectedAmount, dbAmount)
 	}
 
 	var deliveryTrackingID string
-	_ = tx.QueryRow(ctx, `SELECT COALESCE(tracking_id, '') FROM deliveries WHERE order_tracking_id = $1`, orderID).Scan(&deliveryTrackingID)
+	if scanErr := tx.QueryRow(ctx, `SELECT COALESCE(tracking_id, '') FROM deliveries WHERE order_tracking_id = $1`, orderID).Scan(&deliveryTrackingID); scanErr != nil {
+		if !errors.Is(scanErr, pgx.ErrNoRows) {
+			log.Printf("ERROR: delivery tracking id lookup error for order %s: %v", orderID, scanErr)
+		}
+	}
 
 	split, err := s.calculator.CalculateSplit(ctx, dbAmount, storeID, deliveryTrackingID)
 	if err != nil {
@@ -904,4 +1187,102 @@ func (s *PayFastService) MarkPaymentGatewayPending(ctx context.Context, internal
 		log.Printf("[PayFastService] No active row found to mark gateway_pending for %s", internalTxnID)
 	}
 	return nil
+}
+
+// IPNParams holds the fields PayFast sends as query-string parameters when it POSTs/GETs an
+// Instant Payment Notification (IPN) to the merchant's registered checkout_url.
+// Supports flexible naming across PayFast APPS documentation variants.
+type IPNParams struct {
+	BasketID       string `form:"basket_id"`
+	BasketIDAlt    string `form:"Basket_ID"`
+	OrderID        string `form:"order_id"`
+	StatusCode     string `form:"status_code"` // this is the "payfast_err_code" the hash formula refers to
+	ErrCode        string `form:"err_code"`
+	TransactionID  string `form:"transaction_id"`
+	TxnAmt         string `form:"txnamt"`
+	SecuredHash    string `form:"secured_hash"`
+	ValidationHash string `form:"validation_hash"`
+}
+
+func (p *IPNParams) NormalizedBasketID() string {
+	if p.BasketID != "" {
+		return p.BasketID
+	}
+	if p.BasketIDAlt != "" {
+		return p.BasketIDAlt
+	}
+	return p.OrderID
+}
+
+func (p *IPNParams) NormalizedStatusCode() string {
+	if p.StatusCode != "" {
+		return p.StatusCode
+	}
+	return p.ErrCode
+}
+
+func (p *IPNParams) NormalizedHash() string {
+	if p.SecuredHash != "" {
+		return p.SecuredHash
+	}
+	return p.ValidationHash
+}
+
+// HandleIPN processes an Instant Payment Notification from PayFast's checkout_url webhook.
+func (s *PayFastService) HandleIPN(ctx context.Context, params IPNParams) error {
+	basketID := params.NormalizedBasketID()
+	statusCode := params.NormalizedStatusCode()
+	receivedHash := params.NormalizedHash()
+
+	if basketID == "" {
+		telemetry.RecordIPNReceived(false)
+		return errors.New("validation: missing basket_id in IPN payload")
+	}
+
+	if !s.payfast.VerifyIPNHash(basketID, statusCode, receivedHash) {
+		telemetry.RecordIPNReceived(false)
+		log.Printf("[PayFastService] SECURITY: IPN hash verification failed for basket_id=%s — possible spoofed callback, ignoring", basketID)
+		return errors.New("validation: IPN hash verification failed")
+	}
+	telemetry.RecordIPNReceived(true)
+
+	// Robust transaction lookup: match by gateway_txn_id first if supplied, otherwise fallback to active/latest txn for order
+	var internalTxnID, gatewayTxnID string
+	var amount float64
+	var err error
+
+	if params.TransactionID != "" {
+		err = s.db.QueryRow(ctx,
+			`SELECT transaction_id, COALESCE(gateway_txn_id, ''), amount 
+			 FROM payment_transactions 
+			 WHERE gateway_txn_id = $1 OR (order_tracking_id = $2 AND status IN ('processing', '3ds_required', 'gateway_pending', 'pending'))
+			 ORDER BY created_at DESC LIMIT 1`,
+			params.TransactionID, basketID,
+		).Scan(&internalTxnID, &gatewayTxnID, &amount)
+	} else {
+		err = s.db.QueryRow(ctx,
+			`SELECT transaction_id, COALESCE(gateway_txn_id, ''), amount 
+			 FROM payment_transactions 
+			 WHERE order_tracking_id = $1 
+			 ORDER BY created_at DESC LIMIT 1`,
+			basketID,
+		).Scan(&internalTxnID, &gatewayTxnID, &amount)
+	}
+
+	if err != nil {
+		return fmt.Errorf("no payment transaction found for basket_id %s: %w", basketID, err)
+	}
+
+	if gatewayTxnID == "" && params.TransactionID != "" {
+		gatewayTxnID = params.TransactionID
+	}
+
+	if !payfast.IsSuccessCode(statusCode) && statusCode != "" {
+		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "IPN reported failure, status_code: "+statusCode); markErr != nil {
+			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
+		}
+		return nil
+	}
+
+	return s.VerifyAndSettle(ctx, internalTxnID, basketID, gatewayTxnID, amount)
 }

@@ -9,7 +9,10 @@ const fs = require('fs');
 
 // ── Configuration ───────────────────────────────────────────────
 const PORT = process.env.PORT || 8090;
-const KAFKA_BROKERS = (process.env.KAFKA_BROKERS || 'localhost:9092').split(',');
+// SP-NJ-08: fail fast on missing broker config.
+const KAFKA_BROKERS = process.env.KAFKA_BROKERS
+  ? process.env.KAFKA_BROKERS.split(',')
+  : (() => { console.error('[FATAL] KAFKA_BROKERS env var is required'); process.exit(1); })();
 const DB_DSN =
   process.env.DB_DSN ||
   process.env.DATABASE_URL;
@@ -20,6 +23,7 @@ if (!DB_DSN) {
 // ── SMTP Transporter (graceful degradation) ────────────────────
 let transporter = null;
 let smtpActive = false;
+let smtpVerified = Promise.resolve(); // resolved when transport check done
 
 if (process.env.SMTP_HOST) {
   transporter = nodemailer.createTransport({
@@ -30,13 +34,18 @@ if (process.env.SMTP_HOST) {
       : undefined,
   });
 
-  transporter.verify((err) => {
-    if (err) {
-      console.warn(`[SMTP] Verification failed: ${err.message}. Running in SANDBOX mode.`);
-    } else {
-      smtpActive = true;
-      console.log('[SMTP] Connection verified successfully');
-    }
+  // SP-NJ-11: track verification; the HTTP listener waits on this so no
+  // request lands during the window where emails would fake-succeed.
+  smtpVerified = new Promise((resolve) => {
+    transporter.verify((err) => {
+      if (err) {
+        console.warn(`[SMTP] Verification failed: ${err.message}. Running in SANDBOX mode.`);
+      } else {
+        smtpActive = true;
+        console.log('[SMTP] Connection verified successfully');
+      }
+      resolve();
+    });
   });
 } else {
   console.warn('[SMTP] No SMTP_HOST set. Running in SANDBOX mode (console.log only).');
@@ -50,7 +59,7 @@ pgPool.on('error', (err) => {
 
 async function fetchOrderDetails(orderTrackingId) {
   const orderResult = await pgPool.query(
-    `SELECT order_tracking_id AS tracking_id, user_tracking_id AS customer_tracking_id, store_tracking_id AS vendor_store_tracking_id,
+    `SELECT order_tracking_id AS tracking_id, customer_tracking_id, store_tracking_id AS vendor_store_tracking_id,
             total_amount, currency, status, created_at
      FROM orders WHERE order_tracking_id = $1`,
     [orderTrackingId]
@@ -136,8 +145,8 @@ function generateInvoicePDF(order) {
         const subtotal = (item.price_at_checkout * item.quantity).toFixed(2);
         doc.text(item.product_tracking_id, 50, y, { width: 200 });
         doc.text(String(item.quantity), 280, y, { width: 50 });
-        doc.text(`${item.price_at_checkout} ${order.currency}`, 340, y, { width: 90 });
-        doc.text(`${subtotal} ${order.currency}`, 440, y, { width: 100 });
+        doc.text(`${item.price_at_checkout} ${order.currency || 'PKR'}`, 340, y, { width: 90 });
+        doc.text(`${subtotal} ${order.currency || 'PKR'}`, 440, y, { width: 100 });
         y += 20;
       }
     } else {
@@ -150,7 +159,7 @@ function generateInvoicePDF(order) {
     doc.moveTo(50, y).lineTo(540, y).strokeColor('#eee').stroke();
     y += 16;
     doc.fontSize(13).fillColor('#0f0f0f');
-    doc.text(`Total: ${order.total_amount} ${order.currency}`, 350, y, { width: 190, align: 'right' });
+    doc.text(`Total: ${order.total_amount} ${order.currency || 'PKR'}`, 350, y, { width: 190, align: 'right' });
 
     // Footer
     doc.moveDown(3);
@@ -206,8 +215,9 @@ async function runKafkaConsumer() {
   await consumer.subscribe({ topic: 'orders.status_updated', fromBeginning: false });
 
   await consumer.run({
-    eachMessage: async ({ topic, partition, message }) => {
+    eachMessage: async ({ topic, message }) => {
       try {
+        if (!message || !message.value) return;
         const payload = JSON.parse(message.value.toString());
         // Redact potentially sensitive fields from logged payload.
         const logPayload = { ...payload };
@@ -222,7 +232,7 @@ async function runKafkaConsumer() {
             if (order && order.customer_email) {
               const statusUpper = (payload.status || order.status || 'UPDATED').toUpperCase();
               const subject = `OMNIGO Order Update: ${orderTrackingId} [${statusUpper}]`;
-              const textBody = `Hi ${order.customer_name},\n\nYour OMNIGO order ${orderTrackingId} status is now: ${statusUpper}.\n\nTotal: ${order.total_amount} ${order.currency}\n\nThank you for choosing OMNIGO!\n\n— OMNIGO Team`;
+              const textBody = `Hi ${order.customer_name},\n\nYour OMNIGO order ${orderTrackingId} status is now: ${statusUpper}.\n\nTotal: ${order.total_amount} ${order.currency || 'PKR'}\n\nThank you for choosing OMNIGO!\n\n— OMNIGO Team`;
               await sendTextEmail(order.customer_email, subject, textBody);
             }
           }
@@ -256,7 +266,7 @@ async function runKafkaConsumer() {
 
         // Send email
         const subject = `Your OMNIGO Order Receipt — ${order.tracking_id}`;
-        const textBody = `Hi ${order.customer_name},\n\nThank you for your order!\n\nOrder ID: ${order.tracking_id}\nTotal: ${order.total_amount} ${order.currency}\n\nPlease find your receipt attached.\n\n— OMNIGO Team`;
+        const textBody = `Hi ${order.customer_name},\n\nThank you for your order!\n\nOrder ID: ${order.tracking_id}\nTotal: ${order.total_amount} ${order.currency || 'PKR'}\n\nPlease find your receipt attached.\n\n— OMNIGO Team`;
         await sendReceiptEmail(order.customer_email, subject, textBody, pdfBuffer);
       } catch (err) {
         console.error(`[Email] Error processing message: ${err.message}`);
@@ -336,11 +346,42 @@ async function handleSendRequest(req, res) {
   res.json({ status: 'sent' });
 }
 
-app.post('/send', handleSendRequest);
+function authenticateInternal(req, res, next) {
+  const internalSecret = process.env.INTERNAL_SERVICE_KEY || process.env.JWT_SECRET || 'omnigo-internal-service-secret';
+  const authHeader = req.headers['authorization'] || req.headers['x-internal-service-key'];
+  if (!authHeader) {
+    return res.status(401).json({ error: 'unauthorized: missing internal auth header' });
+  }
+  const key = authHeader.replace(/^Bearer\s+/i, '').trim();
+  if (key !== internalSecret && key !== process.env.JWT_SECRET) {
+    return res.status(403).json({ error: 'forbidden: invalid internal service key' });
+  }
+  next();
+}
 
-app.listen(PORT, () => {
-  console.log(
-    `[Email] Service running on port ${PORT} (SMTP: ${smtpActive ? 'ACTIVE' : 'SANDBOX'})`
-  );
-  runKafkaConsumer().catch(console.error);
+app.post('/send', authenticateInternal, handleSendRequest);
+
+// SP-NJ-11: bind the port only after SMTP state is known.
+smtpVerified.finally(() => {
+  app.listen(PORT, () => {
+    console.log(
+      `[Email] Service running on port ${PORT} (SMTP: ${smtpActive ? 'ACTIVE' : 'SANDBOX'})`
+    );
+    runKafkaConsumer().catch(console.error);
+  });
 });
+
+const gracefulShutdown = async (signal) => {
+  console.log(`[${signal}] Graceful shutdown initiated...`);
+  try {
+    if (consumer) await consumer.disconnect();
+    if (pgPool) await pgPool.end();
+    console.log('Cleanup complete. Exiting.');
+    process.exit(0);
+  } catch (err) {
+    console.error('Shutdown error:', err);
+    process.exit(1);
+  }
+};
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));

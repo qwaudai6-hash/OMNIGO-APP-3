@@ -40,7 +40,12 @@ func (s *PayoutExportService) Export1IBFTCSVPending(ctx context.Context, batchID
 		query += ` WHERE vp.batch_id = $1 ORDER BY vp.created_at ASC`
 		args = append(args, batchID)
 	} else {
-		query += ` WHERE vp.status = 'pending_disbursement' ORDER BY vp.created_at ASC`
+		// Include BOTH payout origins: 'pending_disbursement' (auto-swept
+		// escrow batches from PayoutWorker) and 'pending' (vendor-initiated
+		// withdrawals). Excluding 'pending' meant manually requested
+		// withdrawals were debited from the wallet but never exported to the
+		// bank file.
+		query += ` WHERE vp.status IN ('pending', 'pending_disbursement') ORDER BY vp.created_at ASC`
 	}
 
 	rows, err := s.db.Query(ctx, query, args...)

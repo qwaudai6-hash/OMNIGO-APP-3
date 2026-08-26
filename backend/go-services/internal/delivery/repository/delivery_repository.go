@@ -21,7 +21,7 @@ type DeliveryRepository struct {
 
 var validGigTransitions = map[string][]string{
 	models.StatusBroadcasting: {models.StatusAccepted},
-	models.StatusAccepted:     {models.StatusPickedUp, models.StatusFailed},
+	models.StatusAccepted:     {models.StatusPickedUp, models.StatusFailed, models.StatusBroadcasting},
 	models.StatusPickedUp:     {models.StatusInTransit, models.StatusFailed},
 	models.StatusInTransit:    {models.StatusCompleted, models.StatusFailed},
 }
@@ -81,8 +81,19 @@ func (r *DeliveryRepository) CreateGig(ctx context.Context, gig *models.Delivery
 		gig.OrderTotal,
 		gig.CustomerPhone,
 	).Scan(&gig.ID, &gig.CreatedAt, &gig.UpdatedAt)
+	if err != nil {
+		return err
+	}
 
-	return err
+	// Mirror OTP code into orders table so customer app can display it to customer
+	if gig.OrderTrackingID != "" && gig.OTPCode != "" {
+		_, _ = r.writer.Exec(ctx,
+			`UPDATE orders SET otp_code = $1, updated_at = NOW() WHERE order_tracking_id = $2`,
+			gig.OTPCode, gig.OrderTrackingID,
+		)
+	}
+
+	return nil
 }
 
 // UpdateRiderLocation stores the rider's location in H3 Hexagonal Shards in Redis.
@@ -205,18 +216,7 @@ func (r *DeliveryRepository) AcceptGigWithEligibility(ctx context.Context, track
 	}
 
 	if !isVerified {
-		var orderCount int
-		countQuery := `
-			SELECT COUNT(*) FROM (
-				SELECT id FROM deliveries WHERE rider_tracking_id = $1 AND status IN ('accepted', 'picked_up', 'in_transit', 'completed')
-				UNION ALL
-				SELECT id FROM rides WHERE rider_tracking_id = $1 AND status IN ('accepted', 'in_progress', 'completed')
-			) combined_orders
-		`
-		_ = tx.QueryRow(ctx, countQuery, riderID).Scan(&orderCount)
-		if orderCount >= 10 {
-			return fmt.Errorf("conflict: unverified rider order limit reached (10/10). Please submit KYC verification to accept more orders")
-		}
+		return fmt.Errorf("conflict: rider KYC verification required. Please submit CNIC and Driving License documents for admin approval")
 	}
 
 	// Block COD gig if rider has >= 5000 cash in hand
@@ -470,4 +470,104 @@ func (r *DeliveryRepository) ResolveDispute(ctx context.Context, trackingID stri
 	`
 	_, err := r.writer.Exec(ctx, query, guiltyParty, trackingID)
 	return err
+}
+
+// RecordCODDebt inserts a pending debt for the rider for the COD amount.
+func (r *DeliveryRepository) RecordCODDebt(ctx context.Context, orderTrackingID, riderTrackingID string, amount float64) error {
+	query := `
+		INSERT INTO cod_debts (id, order_tracking_id, rider_tracking_id, amount_owed, status)
+		SELECT gen_random_uuid(), $1, $2, $3, 'pending'
+		WHERE NOT EXISTS (
+			SELECT 1 FROM cod_debts d
+			WHERE d.order_tracking_id = $1 AND d.status IN ('pending', 'settled')
+		)
+	`
+	_, err := r.writer.Exec(ctx, query, orderTrackingID, riderTrackingID, amount)
+	return err
+}
+
+// CancelDeliveryForOrder cancels any pending or broadcasting delivery gig for a given order
+func (r *DeliveryRepository) CancelDeliveryForOrder(ctx context.Context, orderTrackingID string) error {
+	query := `
+		UPDATE deliveries 
+		SET status = 'cancelled', updated_at = NOW()
+		WHERE order_tracking_id = $1 AND status IN ('pending', 'broadcasting')
+	`
+	_, err := r.writer.Exec(ctx, query, orderTrackingID)
+	return err
+}
+
+// SettleCODVendorAndDebt closes the COD loop at delivery completion:
+//
+//	CLAIM-2 FIX: credits the VENDOR wallet (escrow_holds row written as
+//	'paid_out' for audit) — previously COD vendor money lived only in the
+//	TigerBeetle ledger and never reached vendor_wallet / payouts.
+//	CLAIM-3 FIX: auto-inserts the rider's cod_debts row so the Pay Now
+//	flow has something to settle (previously only the manual confirm
+//	endpoint created debts, which no client ever called).
+//
+// Idempotent per order: wallet uses upsert-add; escrow/debt inserts are
+// guarded by NOT EXISTS.
+func (r *DeliveryRepository) SettleCODVendorAndDebt(ctx context.Context, orderTrackingID, storeID, riderTrackingID string, orderTotal, adminCommission, riderEarning float64) error {
+	tx, err := r.writer.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var vendorID string
+	err = tx.QueryRow(ctx,
+		`SELECT COALESCE(vendor_tracking_id, '') FROM orders WHERE order_tracking_id = $1`,
+		orderTrackingID).Scan(&vendorID)
+	if err != nil {
+		return fmt.Errorf("order lookup failed: %w", err)
+	}
+	if vendorID == "" {
+		vendorID = storeID // legacy fallback
+	}
+
+	vendorAmount := orderTotal - adminCommission - riderEarning
+	if vendorAmount < 0 {
+		vendorAmount = 0
+	}
+
+	if vendorAmount > 0 {
+		// CLAIM-2: credit the vendor's withdrawable wallet.
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO vendor_wallet (vendor_tracking_id, balance, lifetime_earnings, updated_at)
+			VALUES ($1, $2, $2, NOW())
+			ON CONFLICT (vendor_tracking_id)
+			DO UPDATE SET balance = vendor_wallet.balance + $2,
+			              lifetime_earnings = vendor_wallet.lifetime_earnings + $2,
+			              updated_at = NOW()
+		`, vendorID, vendorAmount); err != nil {
+			return fmt.Errorf("vendor wallet credit failed: %w", err)
+		}
+
+		// Audit trail: an already-settled escrow hold (excluded from the
+		// PayoutWorker sweep, which only scans status='released').
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO escrow_holds (id, order_tracking_id, vendor_tracking_id, amount, status, released_at)
+			SELECT gen_random_uuid(), $1, $2, $3, 'paid_out', NOW()
+			WHERE NOT EXISTS (
+				SELECT 1 FROM escrow_holds e WHERE e.order_tracking_id = $1 AND e.status = 'paid_out'
+			)
+		`, orderTrackingID, vendorID, vendorAmount); err != nil {
+			return fmt.Errorf("cod escrow audit row failed: %w", err)
+		}
+	}
+
+	// CLAIM-3: rider now holds this cash — record the debt once.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO cod_debts (id, order_tracking_id, rider_tracking_id, amount_owed, status)
+		SELECT gen_random_uuid(), $1, $2, $3, 'pending'
+		WHERE NOT EXISTS (
+			SELECT 1 FROM cod_debts d
+			WHERE d.order_tracking_id = $1 AND d.status IN ('pending', 'settled')
+		)
+	`, orderTrackingID, riderTrackingID, orderTotal); err != nil {
+		return fmt.Errorf("cod debt insert failed: %w", err)
+	}
+
+	return tx.Commit(ctx)
 }

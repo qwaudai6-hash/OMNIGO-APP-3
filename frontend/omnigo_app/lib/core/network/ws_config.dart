@@ -27,12 +27,9 @@ String resolveWsHost() {
 }
 
 /// In production: wss://omnigo-app-production.up.railway.app/ws (TLS, port 443)
-/// In local dev:   ws://10.0.2.2:8000/ws (gateway on port 8000)
 String wsBaseUrl(String host) {
-  final isLocal = host.contains('10.0.2.2') || host.contains('127.0.0.1');
-  if (isLocal) {
-    return 'ws://$host:8000/ws';
+  if (host.startsWith('wss://') || host.startsWith('ws://')) {
+    return host;
   }
-  // Production: gateway handles TLS, WS upgrades on /ws
   return 'wss://$host/ws';
 }

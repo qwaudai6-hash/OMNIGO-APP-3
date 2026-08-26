@@ -141,10 +141,10 @@ func (c *CommissionCalculator) CalculateCODSplit(ctx context.Context, orderTotal
 
 	return &SplitResult{
 		OrderTotal:     roundToPaisa(orderTotal),
-		DeliveryFee:    roundToPaisa(deliveryFee),
+		DeliveryFee:    deliveryEscrow,
 		AdminRevenue:   adminRevenue,
 		VendorEscrow:   vendorEscrow,
-		DeliveryEscrow: roundToPaisa(deliveryFee),
+		DeliveryEscrow: deliveryEscrow,
 		CommissionRate: commissionRate,
 	}, nil
 }
@@ -167,4 +167,24 @@ func (c *CommissionCalculator) CalculateRiderDeliveryCredit(ctx context.Context,
 	}
 
 	return riderEarning, roundToPaisa(adminCommission), nil
+}
+
+// ResolveDeliveryTrackingID returns the DEL- tracking ID of the delivery gig
+// linked to an order, or "" when the gig does not exist yet (the gig is
+// created asynchronously via the orders.created Kafka consumer, so a webhook
+// can legitimately arrive before dispatch). Callers treat "" as "no delivery
+// escrow component".
+func (c *CommissionCalculator) ResolveDeliveryTrackingID(ctx context.Context, orderTrackingID string) string {
+	if orderTrackingID == "" {
+		return ""
+	}
+	var trackingID string
+	err := c.db.QueryRow(ctx,
+		`SELECT COALESCE(tracking_id, '') FROM deliveries WHERE order_tracking_id = $1 LIMIT 1`,
+		orderTrackingID,
+	).Scan(&trackingID)
+	if err != nil {
+		return ""
+	}
+	return trackingID
 }

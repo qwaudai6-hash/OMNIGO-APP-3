@@ -2,6 +2,7 @@ package escrow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -45,17 +46,31 @@ func validateHoldParents(ctx context.Context, q rowQuerier, hold *EscrowHold) er
 	return nil
 }
 
-// CreateHold inserts a new escrow hold.
+// CreateHold inserts a new escrow hold. It is idempotent across worker retries.
 func (r *Repository) CreateHold(ctx context.Context, hold *EscrowHold) error {
 	if err := validateHoldParents(ctx, r.db, hold); err != nil {
 		return err
 	}
 
+	// Idempotency guard: If an active/released hold already exists for this order, do not duplicate
+	var existingID uuid.UUID
+	err := r.db.QueryRow(ctx,
+		`SELECT id FROM escrow_holds WHERE order_tracking_id = $1 AND status IN ('held', 'disputed', 'released', 'paid_out') LIMIT 1`,
+		hold.OrderTrackingID,
+	).Scan(&existingID)
+	if err == nil {
+		// Hold already created in a previous attempt/retry
+		return nil
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("failed to check existing escrow hold: %w", err)
+	}
+
 	query := `
 		INSERT INTO escrow_holds (id, order_tracking_id, vendor_tracking_id, amount, status, hold_until)
 		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (order_tracking_id, vendor_tracking_id) DO NOTHING
 	`
-	_, err := r.db.Exec(ctx, query,
+	_, err = r.db.Exec(ctx, query,
 		hold.ID, hold.OrderTrackingID, hold.VendorTrackingID,
 		hold.Amount, hold.Status, hold.HoldUntil,
 	)
@@ -87,6 +102,7 @@ func (r *Repository) CreateHoldInTx(ctx context.Context, tx pgx.Tx, hold *Escrow
 	query := `
 		INSERT INTO escrow_holds (id, order_tracking_id, vendor_tracking_id, amount, status, hold_until)
 		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (order_tracking_id, vendor_tracking_id) DO NOTHING
 	`
 	_, err := tx.Exec(ctx, query,
 		hold.ID, hold.OrderTrackingID, hold.VendorTrackingID,

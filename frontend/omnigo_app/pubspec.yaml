@@ -34,7 +34,7 @@ dependencies:
   firebase_messaging: ^15.0.0
   flutter_local_notifications: ^17.0.0
   sentry_flutter: ^8.13.0
-  fl_chart: 0.65.0
+  fl_chart: ^0.65.0
   qr_flutter: ^4.1.0
 
 dev_dependencies:

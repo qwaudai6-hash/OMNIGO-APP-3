@@ -10,6 +10,7 @@ import '../../../../core/services/session_registry.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/network/api_client.dart';
 import '../../../../core/network/websocket_client.dart';
+import '../../../../core/di/service_locator.dart';
 import 'package:provider/provider.dart';
 import '../../../../core/services/cart_provider.dart';
 import '../../data/models/product.dart';
@@ -357,7 +358,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     final token = SessionRegistry.instance.token ?? '';
     if (token.isEmpty) return;
 
-    _wsClient = WebSocketClient();
+    _wsClient = sl<WebSocketClient>();
     _wsClient!.connect(
       token,
       clientType: 'customer',
@@ -536,14 +537,15 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     if (mounted && displayName != null) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Dropoff set to: $displayName'),
-          duration: const Duration(seconds: 2),
+          content: Text('Location: $displayName'),
+          duration: const Duration(seconds: 4),
+          action: SnackBarAction(
+            label: 'Book Ride',
+            onPressed: () => _estimateAndSelectVehicle(),
+          ),
         ),
       );
     }
-
-    // Trigger estimation automatically using live GPS as Pickup
-    await _estimateAndSelectVehicle();
   }
 
   Future<void> _estimateAndSelectVehicle() async {
@@ -681,7 +683,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         backgroundColor: const Color(0xFF121212),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(24),
-          side: BorderSide(color: Colors.white.withOpacity(0.08)),
+          side: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
         ),
         title: const Row(
           children: [
@@ -900,7 +902,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                         borderRadius: BorderRadius.circular(20),
                         boxShadow: [
                           BoxShadow(
-                              color: Colors.black.withOpacity(0.02),
+                              color: Colors.black.withValues(alpha: 0.02),
                               blurRadius: 10,
                               offset: const Offset(0, 5),),
                         ],
@@ -1062,7 +1064,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
               borderRadius: BorderRadius.circular(20),
               boxShadow: [
                 BoxShadow(
-                    color: Colors.black.withOpacity(0.02),
+                    color: Colors.black.withValues(alpha: 0.02),
                     blurRadius: 10,
                     offset: const Offset(0, 5),),
               ],
@@ -1157,7 +1159,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   Widget _buildProductCard(Product p) {
     final String name = p.name.isNotEmpty ? p.name : 'Unknown';
     final double price = p.basePrice;
-    final String storeId = p.storeTrackingId.isNotEmpty ? p.storeTrackingId : 'STOR-001';
+    final String storeId = p.storeTrackingId;
     final String prodId = p.productTrackingId.isNotEmpty ? p.productTrackingId : 'PROD-N/A';
     final bool isFavorited = _favoriteProductIds.contains(prodId);
 
@@ -1179,7 +1181,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
           borderRadius: BorderRadius.circular(24),
           boxShadow: [
             BoxShadow(
-                color: Colors.black.withOpacity(0.02),
+                color: Colors.black.withValues(alpha: 0.02),
                 blurRadius: 10,
                 offset: const Offset(0, 5),),
           ],
@@ -1217,7 +1219,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                       child: Container(
                         padding: const EdgeInsets.all(6),
                         decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.9),
+                          color: Colors.white.withValues(alpha: 0.9),
                           shape: BoxShape.circle,
                         ),
                         child: Icon(
@@ -1250,7 +1252,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text('\$${price.toStringAsFixed(2)}',
+                      Text('PKR ${price.toStringAsFixed(2)}',
                           style: const TextStyle(
                               fontWeight: FontWeight.w800,
                               color: AppTheme.blackAccent,),),
@@ -1386,7 +1388,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                   return Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: Colors.black.withOpacity(0.85),
+                      color: Colors.black.withValues(alpha: 0.85),
                       borderRadius: BorderRadius.circular(16),
                     ),
                     child: Row(
@@ -1414,7 +1416,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         if (_isEstimatingRide)
           Positioned.fill(
             child: Container(
-              color: Colors.black.withOpacity(0.5),
+              color: Colors.black.withValues(alpha: 0.5),
               child: const Center(
                 child: CircularProgressIndicator(
                   color: Color(0xFFCAFF33),
@@ -1500,7 +1502,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         borderRadius: BorderRadius.circular(20),
         boxShadow: [
           BoxShadow(
-              color: Colors.black.withOpacity(0.01),
+              color: Colors.black.withValues(alpha: 0.01),
               blurRadius: 10,
               offset: const Offset(0, 5),),
         ],
@@ -1763,7 +1765,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
               ),
             ),
             Icon(onTap != null ? Icons.add_circle_outline : Icons.lock_outline,
-                color: AppTheme.blackAccent.withOpacity(0.5),),
+                color: AppTheme.blackAccent.withValues(alpha: 0.5),),
           ],
         ),
       ),
@@ -1782,7 +1784,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       margin: const EdgeInsets.symmetric(horizontal: 30, vertical: 16),
       padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 20),
       decoration: BoxDecoration(
-        color: AppTheme.blackAccent.withOpacity(0.95),
+        color: AppTheme.blackAccent.withValues(alpha: 0.95),
         borderRadius: BorderRadius.circular(40),
         boxShadow: const [
           BoxShadow(color: Colors.black26, blurRadius: 10, offset: Offset(0, 5)),
@@ -1808,7 +1810,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       onTap: () => setState(() => _currentIndex = index),
       child: Icon(
         icon,
-        color: isSelected ? AppTheme.limeAccent : Colors.white.withOpacity(0.5),
+        color: isSelected ? AppTheme.limeAccent : Colors.white.withValues(alpha: 0.5),
         size: 28,
       ),
     );

@@ -188,13 +188,13 @@ class VendorAddProductScreenState extends State<VendorAddProductScreen>
                   width: 44,
                   height: 44,
                   decoration: BoxDecoration(
-                    color: AppTheme.limeAccent.withOpacity(0.15),
+                    color: AppTheme.limeAccent.withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: const Icon(Icons.photo_library_outlined, color: AppTheme.blackAccent),
                 ),
                 title: const Text('Choose from Gallery',
-                    style: TextStyle(fontWeight: FontWeight.w600)),
+                    style: TextStyle(fontWeight: FontWeight.w600),),
                 onTap: () {
                   Navigator.pop(context);
                   _pickImage(ImageSource.gallery);
@@ -205,13 +205,13 @@ class VendorAddProductScreenState extends State<VendorAddProductScreen>
                   width: 44,
                   height: 44,
                   decoration: BoxDecoration(
-                    color: AppTheme.limeAccent.withOpacity(0.15),
+                    color: AppTheme.limeAccent.withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: const Icon(Icons.camera_alt_outlined, color: AppTheme.blackAccent),
                 ),
                 title: const Text('Take a Photo',
-                    style: TextStyle(fontWeight: FontWeight.w600)),
+                    style: TextStyle(fontWeight: FontWeight.w600),),
                 onTap: () {
                   Navigator.pop(context);
                   _pickImage(ImageSource.camera);
@@ -230,7 +230,7 @@ class VendorAddProductScreenState extends State<VendorAddProductScreen>
                     child: const Icon(Icons.delete_outline_rounded, color: Colors.redAccent),
                   ),
                   title: const Text('Remove Image',
-                      style: TextStyle(fontWeight: FontWeight.w600, color: Colors.redAccent)),
+                      style: TextStyle(fontWeight: FontWeight.w600, color: Colors.redAccent),),
                   onTap: () {
                     Navigator.pop(context);
                     setState(() {
@@ -463,7 +463,7 @@ class VendorAddProductScreenState extends State<VendorAddProductScreen>
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(18),
                   boxShadow: [
-                    BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 8, offset: const Offset(0, 4)),
+                    BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 8, offset: const Offset(0, 4)),
                   ],
                 ),
                 child: SwitchListTile(
@@ -531,7 +531,7 @@ class VendorAddProductScreenState extends State<VendorAddProductScreen>
           ),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.04),
+              color: Colors.black.withValues(alpha: 0.04),
               blurRadius: 12,
               offset: const Offset(0, 4),
             ),
@@ -552,14 +552,14 @@ class VendorAddProductScreenState extends State<VendorAddProductScreen>
           if (hasLocalFile)
             Image.file(_pickedImageFile!, fit: BoxFit.cover),
           Container(
-            color: Colors.black.withOpacity(0.45),
+            color: Colors.black.withValues(alpha: 0.45),
             child: const Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5),
                 SizedBox(height: 12),
                 Text('Uploading…',
-                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),),
               ],
             ),
           ),
@@ -601,7 +601,7 @@ class VendorAddProductScreenState extends State<VendorAddProductScreen>
             right: 0,
             child: Container(
               padding: const EdgeInsets.symmetric(vertical: 8),
-              color: Colors.black.withOpacity(0.5),
+              color: Colors.black.withValues(alpha: 0.5),
               child: const Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
@@ -632,7 +632,7 @@ class VendorAddProductScreenState extends State<VendorAddProductScreen>
             right: 0,
             child: Container(
               padding: const EdgeInsets.symmetric(vertical: 8),
-              color: Colors.black.withOpacity(0.5),
+              color: Colors.black.withValues(alpha: 0.5),
               child: const Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
@@ -663,7 +663,7 @@ class VendorAddProductScreenState extends State<VendorAddProductScreen>
             borderRadius: BorderRadius.circular(16),
           ),
           child: Icon(Icons.add_photo_alternate_outlined,
-              size: 28, color: Colors.grey.shade500),
+              size: 28, color: Colors.grey.shade500,),
         ),
         const SizedBox(height: 10),
         Text(
@@ -699,7 +699,7 @@ class VendorAddProductScreenState extends State<VendorAddProductScreen>
         color: Colors.white,
         borderRadius: BorderRadius.circular(18),
         boxShadow: [
-          BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 8, offset: const Offset(0, 4)),
+          BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 8, offset: const Offset(0, 4)),
         ],
       ),
       child: TextFormField(
@@ -729,7 +729,7 @@ class VendorAddProductScreenState extends State<VendorAddProductScreen>
         color: Colors.white,
         borderRadius: BorderRadius.circular(18),
         boxShadow: [
-          BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 8, offset: const Offset(0, 4)),
+          BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 8, offset: const Offset(0, 4)),
         ],
       ),
       child: TextFormField(
