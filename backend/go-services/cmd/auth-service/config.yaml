@@ -1,0 +1,4 @@
+port: 9000
+# Set via environment variables: DB_WRITER_DSN, DB_READER_DSN
+db_writer_dsn: ""
+db_reader_dsn: ""

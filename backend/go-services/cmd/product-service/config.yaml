@@ -1,0 +1,6 @@
+port: 9001
+# Set via environment variables: DB_WRITER_DSN, DB_READER_DSN, REDIS_ADDRS, KAFKA_BROKERS
+db_writer_dsn: ""
+db_reader_dsn: ""
+redis_addrs: []
+kafka_brokers: []
