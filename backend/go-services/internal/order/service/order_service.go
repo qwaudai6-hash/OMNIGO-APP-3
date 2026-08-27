@@ -169,12 +169,12 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *models.CreateOrderR
 		// Compensating Transaction: Release Stock
 		go s.releaseStockCompensating(order.Items)
 
-		// Postgres unique violation on idempotency constraint -> duplicate request.
+		log.Printf("[OrderService] CreateOrder DB error: %v", err)
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			return nil, ErrDuplicateRequest
 		}
-		return nil, ErrDatabaseFailure
+		return nil, fmt.Errorf("INTERNAL_DB_ERROR: %w", err)
 	}
 
 	// 4. Record COD pending transaction for cash-on-delivery orders.

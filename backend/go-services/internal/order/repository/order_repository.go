@@ -105,7 +105,7 @@ func (r *OrderRepository) CreateOrder(ctx context.Context, order *models.Order, 
 			INSERT INTO outbox_events (aggregate_id, topic, payload, status)
 			VALUES ($1, 'orders.created', $2, 'PENDING')
 		`
-		_, err = tx.Exec(ctx, outboxQuery, order.TrackingID, outboxPayload)
+		_, err = tx.Exec(ctx, outboxQuery, order.TrackingID, string(outboxPayload))
 		if err != nil {
 			return err
 		}
