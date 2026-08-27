@@ -21,8 +21,8 @@ val hasReleaseSigning = !storeFilePath.isNullOrBlank() &&
 
 android {
     namespace = "com.omnigo.app"
-    compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    compileSdk = 36
+    ndkVersion = "28.1.13356709"
 
     compileOptions {
         isCoreLibraryDesugaringEnabled = true
