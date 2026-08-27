@@ -95,6 +95,7 @@ func (h *WishlistHandler) RegisterRoutes(router *gin.Engine) {
 	wl := router.Group("/api/v1/wishlist")
 	{
 		wl.POST("/:product_id", h.ToggleFavorite)
+		wl.GET("", h.ListFavorites)
 		wl.GET("/", h.ListFavorites)
 		wl.DELETE("/:product_id", h.RemoveFavorite)
 	}

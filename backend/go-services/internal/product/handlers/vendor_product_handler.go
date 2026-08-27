@@ -203,7 +203,9 @@ func (h *VendorProductHandler) ListVendorProducts(c *gin.Context) {
 func (h *VendorProductHandler) RegisterRoutes(router *gin.Engine) {
 	vendor := router.Group("/api/v1/vendor/products", middleware.JWTAuth(), middleware.RoleRequired("vendor", "admin"))
 	{
+		vendor.GET("", h.ListVendorProducts)
 		vendor.GET("/", h.ListVendorProducts)
+		vendor.POST("", h.AddProduct)
 		vendor.POST("/", h.AddProduct)
 		vendor.PUT("/:product_id", h.UpdateProduct)
 		vendor.PATCH("/:product_id/stock", h.ToggleStock)

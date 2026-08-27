@@ -155,7 +155,9 @@ func (h *ProductHandler) GetRecommendations(c *gin.Context) {
 func (h *ProductHandler) RegisterRoutes(router *gin.Engine) {
 	products := router.Group("/api/v1/products", middleware.JWTAuth())
 	{
+		products.POST("", h.CreateProduct)
 		products.POST("/", h.CreateProduct)
+		products.GET("", h.ListProducts)
 		products.GET("/", h.ListProducts)
 		products.GET("/:tracking_id", h.GetProduct)
 		products.GET("/:tracking_id/recommendations", h.GetRecommendations)
