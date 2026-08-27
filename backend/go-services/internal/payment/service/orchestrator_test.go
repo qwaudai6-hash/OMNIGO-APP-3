@@ -8,7 +8,7 @@ import (
 
 func TestNewOrchestratorNoGateways(t *testing.T) {
 	// Ensure no real env keys leak into the test.
-	for _, k := range []string{"STRIPE_SECRET_KEY", "JAZZCASH_SALT", "EASYPAISA_HASH_KEY"} {
+	for _, k := range []string{"STRIPE_SECRET_KEY", "JAZZCASH_SALT", "EASYPAISA_HASH_KEY", "PAYFAST_MERCHANT_ID", "PAYFAST_SECURED_KEY"} {
 		os.Unsetenv(k)
 	}
 
@@ -19,6 +19,9 @@ func TestNewOrchestratorNoGateways(t *testing.T) {
 }
 
 func TestNewOrchestratorWithStripe(t *testing.T) {
+	for _, k := range []string{"PAYFAST_MERCHANT_ID", "PAYFAST_SECURED_KEY"} {
+		os.Unsetenv(k)
+	}
 	os.Setenv("STRIPE_SECRET_KEY", "sk_test_dummy")
 	os.Setenv("STRIPE_WEBHOOK_SECRET", "whsec_dummy")
 	defer func() {

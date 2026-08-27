@@ -74,24 +74,16 @@ func NewOrchestrator() *Orchestrator {
 			os.Getenv("EASYPAISA_API_URL"),
 		)
 	}
-	payfastMerchantID := os.Getenv("PAYFAST_MERCHANT_ID")
-	if payfastMerchantID == "" {
-		payfastMerchantID = "102"
+	if payfastMerchantID := os.Getenv("PAYFAST_MERCHANT_ID"); payfastMerchantID != "" {
+		payfastSecuredKey := os.Getenv("PAYFAST_SECURED_KEY")
+		payfastBaseURL := os.Getenv("PAYFAST_API_URL")
+		gateways["payfast"] = NewPayFastPKService(
+			payfastMerchantID,
+			payfastSecuredKey,
+			"OMNIGO",
+			payfastBaseURL,
+		)
 	}
-	payfastSecuredKey := os.Getenv("PAYFAST_SECURED_KEY")
-	if payfastSecuredKey == "" {
-		payfastSecuredKey = "zWHjBp2AlttNu1sK"
-	}
-	payfastBaseURL := os.Getenv("PAYFAST_API_URL")
-	if payfastBaseURL == "" {
-		payfastBaseURL = "https://ipguat.apps.net.pk/Ecommerce/api"
-	}
-	gateways["payfast"] = NewPayFastPKService(
-		payfastMerchantID,
-		payfastSecuredKey,
-		"OMNIGO",
-		payfastBaseURL,
-	)
 
 	return &Orchestrator{
 		gateways: gateways,
