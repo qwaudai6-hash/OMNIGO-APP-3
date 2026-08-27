@@ -1,8 +1,9 @@
 # Root Dockerfile for Railway deployment of OMNIGO Monolith & Microservices
-FROM golang:1.23-alpine AS builder
+FROM golang:alpine AS builder
 
 RUN apk add --no-cache git ca-certificates gcc musl-dev bash
 
+ENV GOTOOLCHAIN=auto
 ENV GOPROXY="https://proxy.golang.org,https://goproxy.io,direct"
 ENV GODEBUG="http2client=0"
 
