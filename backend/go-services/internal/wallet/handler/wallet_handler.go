@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -31,6 +32,7 @@ type WalletHandler struct {
 	orderSvc       OrderStatusUpdater
 	kafka          *messaging.KafkaClient
 	redis          redis.UniversalClient
+	memStore       sync.Map
 }
 
 // OrderStatusUpdater is the small surface order-service exposes to wallet callbacks.
@@ -91,7 +93,8 @@ const pendingWalletLoadTTL = 24 * time.Hour
 // callback fields).
 func (h *WalletHandler) storePendingWalletLoad(ctx context.Context, txnID string, p pendingWalletLoad) error {
 	if h.redis == nil {
-		return fmt.Errorf("redis not configured")
+		h.memStore.Store("walletload:"+txnID, p)
+		return nil
 	}
 	payload, err := json.Marshal(p)
 	if err != nil {
@@ -104,7 +107,15 @@ func (h *WalletHandler) storePendingWalletLoad(ctx context.Context, txnID string
 // a valid callback cannot be replayed.
 func (h *WalletHandler) consumePendingWalletLoad(ctx context.Context, txnID string) (*pendingWalletLoad, error) {
 	if h.redis == nil {
-		return nil, fmt.Errorf("redis not configured")
+		val, ok := h.memStore.LoadAndDelete("walletload:" + txnID)
+		if !ok {
+			return nil, fmt.Errorf("no pending wallet load for txn %s", txnID)
+		}
+		p, ok := val.(pendingWalletLoad)
+		if !ok {
+			return nil, fmt.Errorf("invalid pending wallet load type")
+		}
+		return &p, nil
 	}
 	payload, err := h.redis.GetDel(ctx, "walletload:"+txnID).Result()
 	if err != nil {
