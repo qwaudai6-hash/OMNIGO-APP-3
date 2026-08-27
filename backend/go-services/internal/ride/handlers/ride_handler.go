@@ -307,6 +307,7 @@ func isRider(c *gin.Context) bool {
 func (h *RideHandler) RegisterRoutes(router *gin.Engine) {
 	rides := router.Group("/api/v1/rides", middleware.JWTAuth())
 	{
+		rides.POST("", h.RequestRide)
 		rides.POST("/", h.RequestRide)
 		rides.GET("/:tracking_id", h.GetRide)
 		rides.POST("/:tracking_id/accept", h.AcceptRide)
