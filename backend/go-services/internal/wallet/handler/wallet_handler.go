@@ -614,10 +614,22 @@ func (h *WalletHandler) LoadCustomerWallet(c *gin.Context) {
 			returnURL = fmt.Sprintf("%s/api/v1/wallet/customer/load/callback?gateway=payfast", publicBase)
 		}
 
-		// PayFast Hosted Checkout redirection. customer_mobile_no is only sent when
-		// the caller supplied one — never fabricate placeholder contact data.
-		hostedURL := fmt.Sprintf("%s/hosted?merchant_id=%s&basket_id=%s&txnamt=%.2f&currency_code=PKR&success_url=%s&checkout_url=%s",
-			strings.TrimRight(baseURL, "/"), url.QueryEscape(merchantID), url.QueryEscape(txnID), req.Amount, url.QueryEscape(returnURL), url.QueryEscape(returnURL))
+		var hostedURL string
+		if strings.Contains(baseURL, "apps.net.pk") {
+			formEndpoint := strings.TrimRight(baseURL, "/")
+			if !strings.HasSuffix(formEndpoint, "/PostTransaction") {
+				if strings.HasSuffix(formEndpoint, "/Transaction") {
+					formEndpoint += "/PostTransaction"
+				} else {
+					formEndpoint += "/Transaction/PostTransaction"
+				}
+			}
+			hostedURL = fmt.Sprintf("%s?merchant_id=%s&basket_id=%s&txnamt=%.2f&currency_code=PKR&success_url=%s&checkout_url=%s",
+				formEndpoint, url.QueryEscape(merchantID), url.QueryEscape(txnID), req.Amount, url.QueryEscape(returnURL), url.QueryEscape(returnURL))
+		} else {
+			hostedURL = fmt.Sprintf("%s/hosted?merchant_id=%s&basket_id=%s&txnamt=%.2f&currency_code=PKR&success_url=%s&checkout_url=%s",
+				strings.TrimRight(baseURL, "/"), url.QueryEscape(merchantID), url.QueryEscape(txnID), req.Amount, url.QueryEscape(returnURL), url.QueryEscape(returnURL))
+		}
 		if mobileNo := strings.TrimSpace(req.CustomerMobileNo); mobileNo != "" {
 			hostedURL += "&customer_mobile_no=" + url.QueryEscape(mobileNo)
 		}

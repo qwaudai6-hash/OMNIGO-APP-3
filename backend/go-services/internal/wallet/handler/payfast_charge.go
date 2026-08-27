@@ -142,17 +142,40 @@ func (h *WalletHandler) PayFastCharge(c *gin.Context) {
 		return
 	}
 
-	redirectURL := fmt.Sprintf(
-		"%s/hosted?merchant_id=%s&basket_id=%s&txnamt=%.2f&currency_code=PKR&customer_mobile_no=%s&customer_email_address=%s&success_url=%s&checkout_url=%s",
-		strings.TrimRight(baseURL, "/"),
-		url.QueryEscape(merchantID),
-		url.QueryEscape(basketID),
-		order.TotalAmount,
-		url.QueryEscape(req.CustomerMobile),
-		url.QueryEscape(req.CustomerEmail),
-		url.QueryEscape(returnURL),
-		url.QueryEscape(returnURL),
-	)
+	var redirectURL string
+	if strings.Contains(baseURL, "apps.net.pk") {
+		formEndpoint := strings.TrimRight(baseURL, "/")
+		if !strings.HasSuffix(formEndpoint, "/PostTransaction") {
+			if strings.HasSuffix(formEndpoint, "/Transaction") {
+				formEndpoint += "/PostTransaction"
+			} else {
+				formEndpoint += "/Transaction/PostTransaction"
+			}
+		}
+		redirectURL = fmt.Sprintf(
+			"%s?merchant_id=%s&basket_id=%s&txnamt=%.2f&currency_code=PKR&customer_mobile_no=%s&customer_email_address=%s&success_url=%s&checkout_url=%s",
+			formEndpoint,
+			url.QueryEscape(merchantID),
+			url.QueryEscape(basketID),
+			order.TotalAmount,
+			url.QueryEscape(req.CustomerMobile),
+			url.QueryEscape(req.CustomerEmail),
+			url.QueryEscape(returnURL),
+			url.QueryEscape(returnURL),
+		)
+	} else {
+		redirectURL = fmt.Sprintf(
+			"%s/hosted?merchant_id=%s&basket_id=%s&txnamt=%.2f&currency_code=PKR&customer_mobile_no=%s&customer_email_address=%s&success_url=%s&checkout_url=%s",
+			strings.TrimRight(baseURL, "/"),
+			url.QueryEscape(merchantID),
+			url.QueryEscape(basketID),
+			order.TotalAmount,
+			url.QueryEscape(req.CustomerMobile),
+			url.QueryEscape(req.CustomerEmail),
+			url.QueryEscape(returnURL),
+			url.QueryEscape(returnURL),
+		)
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":       "pending_redirect",
