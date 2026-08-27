@@ -34,6 +34,7 @@ var upgrader = websocket.Upgrader{
 		// Compare parsed hostnames exactly — a HasPrefix on the raw header
 		// allowed spoofed hosts like "http://localhost.evil.com".
 		allowedHosts := []string{
+			"omnigo-app-3-production.up.railway.app",
 			"omnigo-app-production.up.railway.app",
 			"omnigo.app",
 			"www.omnigo.app",

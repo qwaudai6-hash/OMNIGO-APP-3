@@ -25,10 +25,10 @@ Below is the EXACT, verified state of our production environment variables for t
 # Port & Gateway
 AUTH_SERVICE_PORT="9000"
 APP_ENV="production"
-CORS_ALLOWED_ORIGINS="https://omnigo-app-production.up.railway.app"
-PUBLIC_BASE_URL="https://omnigo-app-production.up.railway.app"
-WALLET_RETURN_URL="https://omnigo-app-production.up.railway.app/api/v1/wallet/callback"
-PUBLIC_GATEWAY_URL="https://omnigo-app-production.up.railway.app"
+CORS_ALLOWED_ORIGINS="https://omnigo-app-3-production.up.railway.app"
+PUBLIC_BASE_URL="https://omnigo-app-3-production.up.railway.app"
+WALLET_RETURN_URL="https://omnigo-app-3-production.up.railway.app/api/v1/wallet/callback"
+PUBLIC_GATEWAY_URL="https://omnigo-app-3-production.up.railway.app"
 
 # Databases (Internal Railway Links & Cloud)
 DATABASE_URL="${{Postgres.DATABASE_URL}}"
@@ -86,7 +86,7 @@ TIGERBEETLE_ADDRESSES="tigerbeetle.railway.internal:3000"
 ## 3. Flutter to Backend Request Flow
 
 ### How does Flutter communicate?
-1. **The Entry Point:** The Flutter application has `PUBLIC_BASE_URL` embedded inside its configuration. It ONLY talks to `https://omnigo-app-production.up.railway.app`.
+1. **The Entry Point:** The Flutter application has `PUBLIC_BASE_URL` embedded inside its configuration. It ONLY talks to `https://omnigo-app-3-production.up.railway.app`.
 2. **Gateway:** When Railway receives a request on this URL, it hits the Go Monolith API Gateway.
 3. **Internal Routing:** 
    - If Flutter asks for `/api/v1/orders`, the Monolith routes the request internally to the `order-service` (listening on `127.0.0.1:9005`).

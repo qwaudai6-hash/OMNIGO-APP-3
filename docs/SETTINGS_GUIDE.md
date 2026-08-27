@@ -18,9 +18,9 @@ Railway pe har service ke liye ye env vars set karo:
 ```
 PORT=8000
 APP_ENV=production
-CORS_ALLOWED_ORIGINS=https://omnigo-app-production.up.railway.app
-PUBLIC_BASE_URL=https://omnigo-app-production.up.railway.app
-WALLET_RETURN_URL=https://omnigo-app-production.up.railway.app/api/v1/wallet/callback
+CORS_ALLOWED_ORIGINS=https://omnigo-app-3-production.up.railway.app
+PUBLIC_BASE_URL=https://omnigo-app-3-production.up.railway.app
+WALLET_RETURN_URL=https://omnigo-app-3-production.up.railway.app/api/v1/wallet/callback
 REDIS_ADDRS=<railway-redis-private-url:6379>
 ```
 
@@ -181,12 +181,12 @@ AI_ENGINE_URL=http://ai-engine.railway.internal:8086
 ### Production build (Play Store / App Store):
 ```bash
 flutter build apk --release \
-  --dart-define=API_HOST=omnigo-app-production.up.railway.app
+  --dart-define=API_HOST=omnigo-app-3-production.up.railway.app
 ```
 
 Flutter automatically uses:
-- `https://omnigo-app-production.up.railway.app` for all API calls
-- `wss://omnigo-app-production.up.railway.app/ws` for WebSocket
+- `https://omnigo-app-3-production.up.railway.app` for all API calls
+- `wss://omnigo-app-3-production.up.railway.app/ws` for WebSocket
 
 ### Local development (Android emulator):
 ```bash
@@ -206,11 +206,11 @@ flutter run --dart-define=API_HOST=127.0.0.1
 
 `api_endpoints.dart` line 32:
 ```dart
-return 'omnigo-app-production.up.railway.app';
+return 'omnigo-app-3-production.up.railway.app';
 ```
 
 Yeh tab use hota hai jab `--dart-define=API_HOST` set NAHI kiya gaya.
-Production build mein `--dart-define=API_HOST=omnigo-app-production.up.railway.app`
+Production build mein `--dart-define=API_HOST=omnigo-app-3-production.up.railway.app`
 pass karte ho, toh wahi use hota hai.
 
 ---
@@ -270,9 +270,9 @@ Agar high traffic hai, writer ko 20-30 kar sakte ho.
 | `JWT_SECRET_KEY` | `openssl rand -base64 64` se generate |
 | `ADMIN_API_KEY_ENCRYPTION_KEY` | `openssl rand -base64 32` se generate |
 | `APP_ENV` | `production` (NOT `development`) |
-| `CORS_ALLOWED_ORIGINS` | `https://omnigo-app-production.up.railway.app` |
+| `CORS_ALLOWED_ORIGINS` | `https://omnigo-app-3-production.up.railway.app` |
 | `TB_ENABLED` | `false` jab tak TigerBeetle setup na ho |
-| `PUBLIC_BASE_URL` | `https://omnigo-app-production.up.railway.app` |
+| `PUBLIC_BASE_URL` | `https://omnigo-app-3-production.up.railway.app` |
 
 ---
 

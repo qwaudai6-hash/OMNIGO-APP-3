@@ -84,7 +84,7 @@ jobs:
         run: |
           flutter build apk --debug \
             --android-skip-build-dependency-validation \
-            --dart-define=API_HOST="${API_HOST:-omnigo-app-production.up.railway.app}" \
+            --dart-define=API_HOST="${API_HOST:-omnigo-app-3-production.up.railway.app}" \
             --dart-define=STRIPE_PUBLISHABLE_KEY="${STRIPE_KEY:-pk_test_placeholder}"
 
   # ── Security Scan ───────────────────────────────────────────
