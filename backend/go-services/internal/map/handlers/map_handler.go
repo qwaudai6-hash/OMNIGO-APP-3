@@ -68,9 +68,16 @@ func (h *MapHandler) ProxyTile(c *gin.Context) {
 // ProxyGlyphs forwards glyph PBF requests.
 func (h *MapHandler) ProxyGlyphs(c *gin.Context) {
 	fontstack := c.Param("fontstack")
-	start, err1 := strconv.Atoi(c.Param("start"))
-	end, err2 := strconv.Atoi(c.Param("end"))
-	if err1 != nil || err2 != nil || fontstack == "" {
+	rangeParam := strings.TrimPrefix(c.Param("range"), "/")
+	rangeParam = strings.TrimSuffix(rangeParam, ".pbf")
+	parts := strings.Split(rangeParam, "-")
+	if len(parts) != 2 || fontstack == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid glyph params"})
+		return
+	}
+	start, err1 := strconv.Atoi(parts[0])
+	end, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid glyph params"})
 		return
 	}
@@ -83,9 +90,9 @@ func (h *MapHandler) ProxyGlyphs(c *gin.Context) {
 
 // ProxySprite forwards sprite JSON or PNG requests.
 func (h *MapHandler) ProxySprite(c *gin.Context) {
+	file := strings.TrimPrefix(c.Param("file"), "/")
 	id := c.Param("id")
 	ext := c.Param("ext")
-	file := c.Param("file")
 
 	if file != "" {
 		ext = parseExtension(file)
@@ -188,9 +195,8 @@ func (h *MapHandler) RegisterRoutes(router *gin.Engine) {
 		mapGroup.GET("/health", h.Health)
 		mapGroup.GET("/style.json", h.StyleJSON)
 		mapGroup.GET("/tiles/:source/:z/:x/:y", h.ProxyTile)
-		mapGroup.GET("/glyphs/:fontstack/:start-:end.pbf", h.ProxyGlyphs)
-		mapGroup.GET("/sprites/:id@2x.:ext", h.ProxySprite)
-		mapGroup.GET("/sprites/:file", h.ProxySprite)
+		mapGroup.GET("/glyphs/:fontstack/*range", h.ProxyGlyphs)
+		mapGroup.GET("/sprites/*file", h.ProxySprite)
 		mapGroup.GET("/route", h.Route)
 		mapGroup.GET("/search", h.Search)
 		mapGroup.GET("/reverse", h.Reverse)

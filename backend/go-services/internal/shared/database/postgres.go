@@ -31,6 +31,7 @@ func NewDB(ctx context.Context, writerDSN, readerDSN string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse writer DSN: %w", err)
 	}
+	writerCfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	writerCfg.MaxConns = envInt32("DB_MAX_CONNS_WRITER", 10)
 	writerCfg.MinConns = envInt32("DB_MIN_CONNS_WRITER", 2)
 	writerCfg.MaxConnLifetime = maxLifetime
@@ -41,6 +42,7 @@ func NewDB(ctx context.Context, writerDSN, readerDSN string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse reader DSN: %w", err)
 	}
+	readerCfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	readerCfg.MaxConns = envInt32("DB_MAX_CONNS_READER", 20)
 	readerCfg.MinConns = envInt32("DB_MIN_CONNS_READER", 4)
 	readerCfg.MaxConnLifetime = maxLifetime

@@ -29,9 +29,10 @@ func NewRedisClient(ctx context.Context, addrs []string) (*RedisClient, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse redis url %s: %w", firstAddr, err)
 		}
-		opts.DialTimeout = 5 * time.Second
-		opts.ReadTimeout = 3 * time.Second
-		opts.WriteTimeout = 3 * time.Second
+		opts.DialTimeout = 1 * time.Second
+		opts.ReadTimeout = 2 * time.Second
+		opts.WriteTimeout = 2 * time.Second
+		opts.MaxRetries = 1
 		client = redis.NewClient(opts)
 	} else {
 		// Clean up host:port strings
@@ -42,15 +43,19 @@ func NewRedisClient(ctx context.Context, addrs []string) (*RedisClient, error) {
 		}
 		client = redis.NewUniversalClient(&redis.UniversalOptions{
 			Addrs:        cleanedAddrs,
-			PoolSize:     100,
-			MinIdleConns: 20,
-			DialTimeout:  5 * time.Second,
-			ReadTimeout:  3 * time.Second,
-			WriteTimeout: 3 * time.Second,
+			PoolSize:     50,
+			MinIdleConns: 5,
+			DialTimeout:  1 * time.Second,
+			ReadTimeout:  2 * time.Second,
+			WriteTimeout: 2 * time.Second,
+			MaxRetries:   1,
 		})
 	}
 
-	if err := client.Ping(ctx).Err(); err != nil {
+	pingCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
+	defer cancel()
+	if err := client.Ping(pingCtx).Err(); err != nil {
+		_ = client.Close()
 		return nil, fmt.Errorf("failed to ping redis: %w", err)
 	}
 

@@ -48,7 +48,7 @@ type DeliveryService struct {
 
 func NewDeliveryService(repo *repository.DeliveryRepository, kafka *messaging.KafkaClient, rdb redis.UniversalClient, osrmURL string) *DeliveryService {
 	if osrmURL == "" {
-		panic("FATAL: OSRM_URL environment variable is not set")
+		osrmURL = "https://router.project-osrm.org"
 	}
 	return &DeliveryService{
 		repo:       repo,

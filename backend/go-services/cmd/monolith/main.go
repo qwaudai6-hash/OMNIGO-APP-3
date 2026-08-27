@@ -195,8 +195,14 @@ func waitForReady(ctx context.Context, s *serviceEntry) bool {
 func startChild(name, port string) bool {
 	binPath := "/app/bin/" + name
 	if _, err := os.Stat(binPath); os.IsNotExist(err) {
-		log.Printf("⚠ Binary %s not found at %s — service will be marked DOWN", name, binPath)
-		return false
+		if _, err := os.Stat("./bin/" + name); err == nil {
+			binPath = "./bin/" + name
+		} else if lp, err := exec.LookPath(name); err == nil {
+			binPath = lp
+		} else {
+			log.Printf("⚠ Binary %s not found at %s or ./bin/%s — service will be marked DOWN", name, binPath, name)
+			return false
+		}
 	}
 	cmd := exec.Command(binPath)
 	cmd.Stdout = os.Stdout
@@ -402,6 +408,10 @@ func main() {
 	if strings.TrimSpace(os.Getenv("HMAC_SECRET")) == "" {
 		_ = os.Setenv("HMAC_SECRET", "XLZg8xSIgUncVPqiObww9hRzOVc5Y68E+5xjB0+ac7c=")
 		log.Println("ℹ Using default production HMAC_SECRET")
+	}
+	if strings.TrimSpace(os.Getenv("HMAC_TOKEN_ENCRYPTION_KEY")) == "" {
+		_ = os.Setenv("HMAC_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+		log.Println("ℹ Using default production HMAC_TOKEN_ENCRYPTION_KEY")
 	}
 	if strings.TrimSpace(os.Getenv("ADMIN_API_KEY_ENCRYPTION_KEY")) == "" {
 		_ = os.Setenv("ADMIN_API_KEY_ENCRYPTION_KEY", "/N6AKevpb5gqQ7TpEndfYJ9bHvBU54hQV8I2w+ealsQ=")

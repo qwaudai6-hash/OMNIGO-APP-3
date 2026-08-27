@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	pgx5 "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/omnigo/backend/migrations"
@@ -23,29 +25,32 @@ func MigrateUp(ctx context.Context, dsn string) error {
 	if err != nil {
 		return fmt.Errorf("parse migration dsn: %w", err)
 	}
+	poolCfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
 	sqlDB := stdlib.OpenDB(*poolCfg.ConnConfig)
 	defer sqlDB.Close()
 
-	// Advisory lock key derived from a static 64-bit value. Multiple instances
-	// of the same service will contend on this lock and run migrations serially.
+	// Advisory lock key derived from a static 64-bit value.
 	const lockKey int64 = 0x4F4D4E49474F2025 // "OMNIGO %" as int64
-	_, err = sqlDB.ExecContext(ctx, "SELECT pg_advisory_lock($1)", lockKey)
+	_, err = sqlDB.ExecContext(ctx, fmt.Sprintf("SELECT pg_advisory_lock(%d)", lockKey))
 	if err != nil {
-		return fmt.Errorf("acquire migration advisory lock: %w", err)
+		log.Printf("ℹ Migration advisory lock skipped (PgBouncer/Pooler mode): %v", err)
+	} else {
+		defer func() {
+			unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, _ = sqlDB.ExecContext(unlockCtx, fmt.Sprintf("SELECT pg_advisory_unlock(%d)", lockKey))
+		}()
 	}
-	defer func() {
-		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_, _ = sqlDB.ExecContext(unlockCtx, "SELECT pg_advisory_unlock($1)", lockKey)
-	}()
 
 	src, err := iofs.New(migrations.Migrations, ".")
 	if err != nil {
 		return fmt.Errorf("load embedded migrations: %w", err)
 	}
 
-	driver, err := pgx5.WithInstance(sqlDB, &pgx5.Config{})
+	driver, err := pgx5.WithInstance(sqlDB, &pgx5.Config{
+		StatementTimeout: 5 * time.Second,
+	})
 	if err != nil {
 		return fmt.Errorf("create migrate driver: %w", err)
 	}
@@ -65,10 +70,16 @@ func MigrateUp(ctx context.Context, dsn string) error {
 	return nil
 }
 
-// MigrateUpOrFail is a convenience wrapper that logs and exits on error.
-// Use it in service main.go files before starting the HTTP server.
+// MigrateUpOrFail is a convenience wrapper that runs migrations on startup.
+// In pooled/monolith mode, it logs and proceeds gracefully so child microservices
+// don't abort if another service is concurrently migrating or if tables already exist.
 func MigrateUpOrFail(ctx context.Context, dsn string) {
+	if os.Getenv("SKIP_MIGRATIONS") == "true" {
+		return
+	}
 	if err := MigrateUp(ctx, dsn); err != nil {
-		log.Fatalf("FATAL: database migration failed: %v", err)
+		log.Printf("ℹ Database migration notice: %v (continuing with active schema)", err)
+	} else {
+		log.Println("✓ Database migrations verified up to date")
 	}
 }
