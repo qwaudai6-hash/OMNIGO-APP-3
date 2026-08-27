@@ -412,11 +412,16 @@ func main() {
 		log.Println("ℹ Using default production CORS_ALLOWED_ORIGINS")
 	}
 	if strings.TrimSpace(os.Getenv("REDIS_ADDRS")) == "" {
-		_ = os.Setenv("REDIS_ADDRS", "127.0.0.1:6379")
-		log.Println("⚠ REDIS_ADDRS not set; fallback to 127.0.0.1:6379")
+		if redisURL := os.Getenv("REDIS_URL"); redisURL != "" {
+			_ = os.Setenv("REDIS_ADDRS", redisURL)
+			log.Println("ℹ Using Railway Redis from REDIS_URL")
+		} else {
+			_ = os.Setenv("REDIS_ADDRS", "redis.railway.internal:6379")
+			log.Println("ℹ Using Railway Internal Redis (redis.railway.internal:6379)")
+		}
 	}
-	if strings.TrimSpace(os.Getenv("DATABASE_URL")) == "" {
-		log.Println("⚠ DATABASE_URL not set; database features will wait for connection string")
+	if strings.TrimSpace(os.Getenv("KAFKA_BROKERS")) == "" {
+		_ = os.Setenv("KAFKA_BROKERS", "kafka.railway.internal:9092")
 	}
 
 	// Build service registry. Order = start order. Each prefix list is OR'd
