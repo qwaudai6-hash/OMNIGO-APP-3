@@ -23,20 +23,27 @@ type MapService struct {
 	tileSources map[string]string
 }
 
-// NewMapService creates the proxy. In production the style URL can be set
-// via MAPLIBRE_STYLE_URL or TILESERVER_URL to point at self-hosted TileServer GL
-// (e.g. http://omnigo-tileserver:8080/styles/streets/style.json), or fall back to MapTiler or DemoTiles.
+// NewMapService creates the map proxy.
+//
+// ENVIRONMENT VARIABLE SWITCHING:
+// - MAPLIBRE_STYLE_URL: Set to your private TileServer GL (e.g. http://tileserver.railway.internal:8080/styles/omnigo/style.json)
+//   or leave empty to automatically use open-source demo vector tiles (https://demotiles.maplibre.org/style.json).
+// - OSRM_URL / OSRM_BASE_URL: Set to your private Railway OSRM (e.g. http://osrm.railway.internal:5000)
+//   or leave empty to automatically use public open-source OSRM routing (https://router.project-osrm.org).
+// - PHOTON_URL: Set to your private Railway Photon (e.g. http://photon.railway.internal:2322)
+//   or leave empty to automatically use public open-source Photon geocoding (https://photon.komoot.io).
 func NewMapService(apiKey, styleURL string) *MapService {
 	if styleURL == "" && apiKey != "" {
 		styleURL = fmt.Sprintf("https://api.maptiler.com/maps/streets/style.json?key=%s", apiKey)
 	}
 	if styleURL == "" && apiKey == "" {
-		// Resilient zero-config fallback to OpenMapTiles demo style
+		// Zero-config default: OpenMapTiles / MapLibre open-source demo style
 		styleURL = "https://demotiles.maplibre.org/style.json"
 	}
 
-	osrmURL := "http://omnigo-osrm:5000"
-	photonURL := "http://omnigo-photon:2322"
+	// Default open-source endpoints with seamless private override support
+	osrmURL := "https://router.project-osrm.org"
+	photonURL := "https://photon.komoot.io"
 
 	tileSources := map[string]string{
 		"tiles":           "https://api.maptiler.com/maps/streets/%s?key=" + apiKey,
@@ -73,13 +80,13 @@ func NewMapService(apiKey, styleURL string) *MapService {
 	}
 }
 
-// SetEndpoints allows overriding OSRM and Photon endpoints dynamically.
+// SetEndpoints allows overriding OSRM and Photon endpoints dynamically via ENV.
 func (s *MapService) SetEndpoints(osrmURL, photonURL string) {
 	if osrmURL != "" {
-		s.osrmURL = osrmURL
+		s.osrmURL = strings.TrimRight(osrmURL, "/")
 	}
 	if photonURL != "" {
-		s.photonURL = photonURL
+		s.photonURL = strings.TrimRight(photonURL, "/")
 	}
 }
 
@@ -315,58 +322,78 @@ func (s *MapService) IsConfigured() bool {
 }
 
 // GetRoute fetches a turn-by-turn routing payload from OSRM backend.
+// If the primary configured OSRM server fails (e.g. private instance down),
+// it automatically falls back to the public open-source OSRM routing server.
 func (s *MapService) GetRoute(ctx context.Context, profile, coordinates string) ([]byte, error) {
 	if profile == "" {
 		profile = "driving"
 	}
-	// OSRM URL format: /route/v1/{profile}/{coordinates}?overview=full&geometries=geojson&steps=true
-	targetURL := fmt.Sprintf("%s/route/v1/%s/%s?overview=full&geometries=geojson&steps=true", s.osrmURL, profile, coordinates)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "OMNIGO-MapService/1.0")
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("osrm routing request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("osrm returned status %d: %s", resp.StatusCode, string(body))
+	urlsToTry := []string{
+		fmt.Sprintf("%s/route/v1/%s/%s?overview=full&geometries=geojson&steps=true", s.osrmURL, profile, coordinates),
+		fmt.Sprintf("https://router.project-osrm.org/route/v1/%s/%s?overview=full&geometries=geojson&steps=true", profile, coordinates),
 	}
 
-	return io.ReadAll(resp.Body)
+	var lastErr error
+	for _, targetURL := range urlsToTry {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("User-Agent", "OMNIGO-MapService/1.0")
+
+		resp, err := s.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			defer resp.Body.Close()
+			return io.ReadAll(resp.Body)
+		}
+		resp.Body.Close()
+	}
+
+	return nil, fmt.Errorf("all OSRM routing endpoints failed: %w", lastErr)
 }
 
 // SearchGeocode queries Photon/Nominatim for matching addresses and landmarks.
+// Automatically falls back to public open-source Photon if primary is unreachable.
 func (s *MapService) SearchGeocode(ctx context.Context, query string, limit int) ([]byte, error) {
 	if limit <= 0 {
 		limit = 10
 	}
-	targetURL := fmt.Sprintf("%s/api?q=%s&limit=%d", s.photonURL, url.QueryEscape(query), limit)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "OMNIGO-MapService/1.0")
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("photon geocode request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("photon returned status %d: %s", resp.StatusCode, string(body))
+	urlsToTry := []string{
+		fmt.Sprintf("%s/api?q=%s&limit=%d", s.photonURL, url.QueryEscape(query), limit),
+		fmt.Sprintf("https://photon.komoot.io/api?q=%s&limit=%d", url.QueryEscape(query), limit),
 	}
 
-	return io.ReadAll(resp.Body)
+	var lastErr error
+	for _, targetURL := range urlsToTry {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("User-Agent", "OMNIGO-MapService/1.0")
+
+		resp, err := s.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			defer resp.Body.Close()
+			return io.ReadAll(resp.Body)
+		}
+		resp.Body.Close()
+	}
+
+	return nil, fmt.Errorf("all Photon geocoding endpoints failed: %w", lastErr)
 }
 
 // ReverseGeocode converts GPS lat/lon to address information via Photon/Nominatim.
