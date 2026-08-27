@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"net"
@@ -411,7 +413,10 @@ func main() {
 		log.Println("ℹ Using default production HMAC_SECRET")
 	}
 	if strings.TrimSpace(os.Getenv("HMAC_TOKEN_ENCRYPTION_KEY")) == "" {
-		_ = os.Setenv("HMAC_TOKEN_ENCRYPTION_KEY", os.Getenv("ADMIN_API_KEY_ENCRYPTION_KEY"))
+		hmacSecret := os.Getenv("HMAC_SECRET")
+		sum := sha256.Sum256([]byte(hmacSecret))
+		_ = os.Setenv("HMAC_TOKEN_ENCRYPTION_KEY", hex.EncodeToString(sum[:]))
+		log.Println("ℹ Derived 64-hex HMAC_TOKEN_ENCRYPTION_KEY from HMAC_SECRET")
 	}
 	if strings.TrimSpace(os.Getenv("ADMIN_API_KEY_ENCRYPTION_KEY")) == "" {
 		_ = os.Setenv("ADMIN_API_KEY_ENCRYPTION_KEY", "/N6AKevpb5gqQ7TpEndfYJ9bHvBU54hQV8I2w+ealsQ=")
