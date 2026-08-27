@@ -86,6 +86,37 @@ func (r *VendorRepository) GetStoreByVendorID(ctx context.Context, vendorTrackin
 	return &store, nil
 }
 
+// ListStores fetches a paginated list of public stores.
+func (r *VendorRepository) ListStores(ctx context.Context, limit, offset int) ([]models.VendorStore, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	query := `
+		SELECT id, vendor_tracking_id, store_tracking_id, store_name, COALESCE(logo_url, ''), COALESCE(banner_url, ''), COALESCE(latitude, 0.0), COALESCE(longitude, 0.0), created_at
+		FROM stores
+		ORDER BY id DESC
+		LIMIT $1 OFFSET $2
+	`
+	rows, err := r.reader.Query(ctx, query, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	stores := make([]models.VendorStore, 0)
+	for rows.Next() {
+		var store models.VendorStore
+		if err := rows.Scan(
+			&store.ID, &store.VendorTrackingID, &store.StoreTrackingID, &store.StoreName,
+			&store.LogoURL, &store.BannerURL, &store.Latitude, &store.Longitude, &store.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		stores = append(stores, store)
+	}
+	return stores, nil
+}
+
 // GetVendorMetricsSecure queries order statistics with COALESCE locks to prevent database NULL crashes
 //
 // Status literals are lowercase to match the canonical `orders.status`

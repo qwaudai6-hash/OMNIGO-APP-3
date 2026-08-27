@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/omnigo/backend/internal/shared/middleware"
@@ -79,10 +80,27 @@ func (h *VendorHandler) GetMyStore(c *gin.Context) {
 	c.JSON(http.StatusOK, store)
 }
 
+// ListStores HTTP handler for GET /stores
+func (h *VendorHandler) ListStores(c *gin.Context) {
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+
+	stores, err := h.svc.ListStores(c.Request.Context(), limit, offset)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, stores)
+}
+
 // RegisterRoutes attaches the handlers to the gin router
 func (h *VendorHandler) RegisterRoutes(router *gin.Engine) {
 	stores := router.Group("/api/v1/stores")
 	{
+		stores.GET("", h.ListStores)
+		stores.GET("/", h.ListStores)
+		stores.POST("", middleware.JWTAuth(), middleware.RoleRequired("vendor", "admin"), h.CreateStore)
 		stores.POST("/", middleware.JWTAuth(), middleware.RoleRequired("vendor", "admin"), h.CreateStore)
 		stores.GET("/:tracking_id", h.GetStore)
 	}

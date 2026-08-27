@@ -91,6 +91,11 @@ func (s *VendorService) GetStoreByVendorID(ctx context.Context, vendorTrackingID
 	return s.repo.GetStoreByVendorID(ctx, vendorTrackingID)
 }
 
+// ListStores returns a paginated list of stores for public browsing.
+func (s *VendorService) ListStores(ctx context.Context, limit, offset int) ([]models.VendorStore, error) {
+	return s.repo.ListStores(ctx, limit, offset)
+}
+
 // GetVendorMetrics pulls caching-first analytics and handles division-by-zero math guards
 func (s *VendorService) GetVendorMetrics(ctx context.Context, vendorTrackingID string) (*models.VendorMetricsResponse, error) {
 	cacheKey := fmt.Sprintf("vendor:metrics:%s", vendorTrackingID)

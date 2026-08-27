@@ -99,6 +99,9 @@ func (r *DeliveryRepository) CreateGig(ctx context.Context, gig *models.Delivery
 // UpdateRiderLocation stores the rider's location in H3 Hexagonal Shards in Redis.
 // Implements lock-free SRem/SAdd transitions to keep the sets clean.
 func (r *DeliveryRepository) UpdateRiderLocation(ctx context.Context, riderTrackID string, lng, lat float64) error {
+	if r.redis == nil {
+		return nil
+	}
 	centerCoord := h3.GeoCoord{Latitude: lat, Longitude: lng}
 	centerHex := h3.FromGeo(centerCoord, 8)
 	newHexKey := fmt.Sprintf("riders:h3:%x", centerHex)
