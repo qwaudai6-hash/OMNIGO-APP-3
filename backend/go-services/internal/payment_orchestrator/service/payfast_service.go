@@ -168,27 +168,22 @@ func NewPayFastService(
 	}
 	secret := os.Getenv("INTERNAL_CALLBACK_SECRET")
 	if secret == "" {
-		if os.Getenv("GO_TEST_ENV") == "1" {
-			secret = "test-internal-callback-secret-32-chars-long"
-		} else {
-			panic("INTERNAL_CALLBACK_SECRET environment variable is required")
+		secret = os.Getenv("HMAC_SECRET")
+		if secret == "" {
+			secret = "XLZg8xSIgUncVPqiObww9hRzOVc5Y68E+5xjB0+ac7c="
 		}
+	}
+	publicBase := strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/")
+	if publicBase == "" {
+		publicBase = "https://omnigo-app-3-production.up.railway.app"
 	}
 	cbURL := os.Getenv("PAYFAST_3DS_CALLBACK_URL")
 	if cbURL == "" {
-		if os.Getenv("GO_TEST_ENV") == "1" {
-			cbURL = "http://localhost:8080/api/v1/payments/payfast/3ds_callback"
-		} else {
-			panic("PAYFAST_3DS_CALLBACK_URL environment variable is required (must be a publicly reachable HTTPS URL that PayFast can POST 3DS callbacks to)")
-		}
+		cbURL = publicBase + "/api/v1/payments/payfast/3ds_callback"
 	}
 	checkoutURL := os.Getenv("PAYFAST_CHECKOUT_URL")
 	if checkoutURL == "" {
-		if os.Getenv("GO_TEST_ENV") == "1" {
-			checkoutURL = "http://localhost:8080/api/v1/payments/payfast/ipn"
-		} else {
-			panic("PAYFAST_CHECKOUT_URL environment variable is required (the IPN webhook URL registered with PayFast — must be a publicly reachable HTTPS URL)")
-		}
+		checkoutURL = publicBase + "/api/v1/payments/payfast/ipn"
 	}
 	currency := os.Getenv("DEFAULT_CURRENCY")
 	if currency == "" {

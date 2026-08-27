@@ -341,7 +341,7 @@ func handleReady(w http.ResponseWriter, r *http.Request) {
 
 // startTigerBeetleIfConfigured formats and launches TigerBeetle if embedded mode is enabled.
 func startTigerBeetleIfConfigured() {
-	if os.Getenv("TIGERBEETLE_EMBEDDED") != "true" && os.Getenv("TIGERBEETLE_AUTOSTART") != "true" {
+	if os.Getenv("TIGERBEETLE_DISABLED") == "true" {
 		return
 	}
 	tbBin := "tigerbeetle"
@@ -351,7 +351,7 @@ func startTigerBeetleIfConfigured() {
 		} else if _, err := os.Stat("./tigerbeetle"); err == nil {
 			tbBin = "./tigerbeetle"
 		} else {
-			log.Println("ℹ TigerBeetle autostart requested but binary not found in PATH or /app/bin. Assuming external container.")
+			log.Println("ℹ TigerBeetle binary not found in container; using PostgreSQL high-integrity fallback ledger")
 			return
 		}
 	}
