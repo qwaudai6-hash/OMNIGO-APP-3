@@ -87,6 +87,14 @@ jobs:
             --dart-define=API_HOST="${API_HOST:-omnigo-app-3-production.up.railway.app}" \
             --dart-define=STRIPE_PUBLISHABLE_KEY="${STRIPE_KEY:-pk_test_placeholder}"
 
+      - name: Upload Android APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: omnigo-app-debug-apk
+          path: frontend/omnigo_app/build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: warn
+          retention-days: 14
+
   # ── Security Scan ───────────────────────────────────────────
   security-scan:
     name: Security Scan
