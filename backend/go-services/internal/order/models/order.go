@@ -33,7 +33,7 @@ type Order struct {
 
 // CreateOrderRequest is the payload for creating a new order
 type CreateOrderRequest struct {
-	UserTrackID        string               `json:"user_tracking_id" binding:"required"`
+	UserTrackID        string               `json:"user_tracking_id"`
 	VendorStoreTrackID string               `json:"vendor_store_tracking_id" binding:"required"`
 	Items              []CreateOrderItemReq `json:"items" binding:"required,dive"`
 	TotalAmount        float64              `json:"total_amount" binding:"required"`

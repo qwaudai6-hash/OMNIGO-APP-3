@@ -19,7 +19,7 @@ type VendorStore struct {
 
 // CreateStoreRequest is the payload for creating a new store.
 type CreateStoreRequest struct {
-	VendorTrackingID string  `json:"vendor_tracking_id" binding:"required"`
+	VendorTrackingID string  `json:"vendor_tracking_id"`
 	StoreName        string  `json:"store_name" binding:"required"`
 	LogoURL          string  `json:"logo_url"`
 	BannerURL        string  `json:"banner_url"`
