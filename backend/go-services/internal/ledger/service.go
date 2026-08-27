@@ -62,11 +62,10 @@ func ledgerHMACSecret() []byte {
 	_hmacSecretOnce.Do(func() {
 		sec := os.Getenv("HMAC_SECRET")
 		if sec == "" {
-			if os.Getenv("GO_TEST_ENV") == "1" {
-				sec = "test-hmac-secret-do-not-use-in-production"
-			} else {
-				panic("HMAC_SECRET environment variable is required but not set")
-			}
+			sec = os.Getenv("INTERNAL_CALLBACK_SECRET")
+		}
+		if sec == "" {
+			sec = os.Getenv("JWT_SECRET_KEY")
 		}
 		_hmacSecret = []byte(sec)
 	})

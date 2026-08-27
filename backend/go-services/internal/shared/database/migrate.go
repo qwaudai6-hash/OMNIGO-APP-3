@@ -21,6 +21,10 @@ import (
 // It uses a PostgreSQL advisory lock to serialize concurrent startup attempts
 // and fails loudly on any migration error (no silent skipping).
 func MigrateUp(ctx context.Context, dsn string) error {
+	if os.Getenv("DISABLE_MIGRATIONS") == "true" || os.Getenv("SKIP_MIGRATIONS") == "true" {
+		log.Println("ℹ Migrations skipped (DISABLE_MIGRATIONS=true)")
+		return nil
+	}
 	poolCfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return fmt.Errorf("parse migration dsn: %w", err)

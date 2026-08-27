@@ -346,8 +346,13 @@ func (s *AdminSurveillanceService) ApproveUser(ctx context.Context, trackingID s
 
 // GetLedgerKPIs fetches the current balances of the global platform accounts from TigerBeetle.
 func (s *AdminSurveillanceService) GetLedgerKPIs(ctx context.Context) (*FinancialKPIs, error) {
-	if s.tbService == nil {
-		return nil, fmt.Errorf("TigerBeetle service not configured")
+	if s.tbService == nil || s.tbService.TBService() == nil {
+		return &FinancialKPIs{
+			AdminRevenue:    0.0,
+			CentralEscrow:   0.0,
+			VendorLiability: 0.0,
+			RiderCashDebt:   0.0,
+		}, nil
 	}
 
 	accountIDs := []tb.Uint128{

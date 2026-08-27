@@ -40,27 +40,36 @@ func main() {
 	r := gin.Default()
 	r.Use(sentrygin.New(sentrygin.Options{Repanic: true}))
 
-	redisAddr := requireEnv("REDIS_ADDRS")
+	redisAddr := os.Getenv("REDIS_ADDRS")
 	var rdb *redis.Client
-	if strings.HasPrefix(redisAddr, "redis://") || strings.HasPrefix(redisAddr, "rediss://") {
-		opts, err := redis.ParseURL(redisAddr)
-		if err != nil {
-			log.Fatalf("Failed to parse REDIS_ADDRS URL: %v", err)
+	if redisAddr != "" {
+		if strings.HasPrefix(redisAddr, "redis://") || strings.HasPrefix(redisAddr, "rediss://") {
+			opts, err := redis.ParseURL(redisAddr)
+			if err != nil {
+				log.Printf("Warning: Failed to parse REDIS_ADDRS URL: %v", err)
+			} else {
+				rdb = redis.NewClient(opts)
+			}
+		} else {
+			cleanAddr := strings.TrimPrefix(strings.TrimPrefix(redisAddr, "redis://"), "rediss://")
+			rdb = redis.NewClient(&redis.Options{
+				Addr: cleanAddr,
+			})
 		}
-		rdb = redis.NewClient(opts)
-	} else {
-		cleanAddr := strings.TrimPrefix(strings.TrimPrefix(redisAddr, "redis://"), "rediss://")
-		rdb = redis.NewClient(&redis.Options{
-			Addr: cleanAddr,
-		})
 	}
 
-	kafkaBrokers := strings.Split(requireEnv("KAFKA_BROKERS"), ",")
-	kafkaClient, err := messaging.NewKafkaClient(kafkaBrokers, "websocket-gateway")
-	if err != nil {
-		log.Fatalf("Failed to initialize kafka: %v", err)
+	var kafkaClient *messaging.KafkaClient
+	var kafkaBrokers []string
+	if kb := os.Getenv("KAFKA_BROKERS"); kb != "" {
+		kafkaBrokers = strings.Split(kb, ",")
+		var err error
+		kafkaClient, err = messaging.NewKafkaClient(kafkaBrokers, "websocket-gateway")
+		if err != nil {
+			log.Printf("Warning: Failed to initialize kafka: %v", err)
+		} else {
+			defer kafkaClient.Close()
+		}
 	}
-	defer kafkaClient.Close()
 
 	// Open Postgres pool so the gateway can resolve which customer/vendor
 	// should receive a given rider's GPS tick. Falls back to a nil pool

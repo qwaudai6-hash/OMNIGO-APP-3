@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/redis/go-redis/v9"
@@ -22,7 +23,6 @@ import (
 	"github.com/omnigo/backend/internal/analytics"
 	"github.com/omnigo/backend/internal/ledger"
 	"github.com/omnigo/backend/internal/shared/config"
-	"github.com/omnigo/backend/internal/shared/database"
 	"github.com/omnigo/backend/internal/shared/health"
 	"github.com/omnigo/backend/internal/shared/messaging"
 	"github.com/omnigo/backend/internal/shared/middleware"
@@ -48,8 +48,14 @@ func main() {
 	if pgURL == "" {
 		log.Fatal("DATABASE_URL env var is required")
 	}
-	database.MigrateUpOrFail(ctx, pgURL)
-	dbPool, err := pgxpool.New(ctx, pgURL)
+	pgCfg, err := pgxpool.ParseConfig(pgURL)
+	if err != nil {
+		log.Fatalf("Unable to parse DATABASE_URL: %v\n", err)
+	}
+	// Supabase transaction-pooler (port 6543) does NOT support prepared
+	// statement caching.  Force simple-protocol to avoid 42P05 errors.
+	pgCfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	dbPool, err := pgxpool.NewWithConfig(ctx, pgCfg)
 	if err != nil {
 		log.Fatalf("Unable to connect to database: %v\n", err)
 	}

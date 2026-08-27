@@ -148,7 +148,7 @@ func lookupPrefix(path string) (*serviceEntry, bool) {
 
 const (
 	probeTimeout     = 1500 * time.Millisecond
-	probeMaxWait     = 25 * time.Second
+	probeMaxWait     = 45 * time.Second
 	probeInterval    = 250 * time.Millisecond
 	healthRecheckInt = 5 * time.Second
 )
@@ -241,6 +241,7 @@ func startChild(name, port string) bool {
 	if kafkaBrokers := os.Getenv("KAFKA_BROKERS"); kafkaBrokers != "" {
 		env = append(env, "KAFKA_BROKERS="+kafkaBrokers)
 	}
+	env = append(env, "DISABLE_MIGRATIONS=true")
 	cmd.Env = env
 	if err := cmd.Start(); err != nil {
 		log.Printf("✗ Failed to start %s: %v", name, err)
@@ -410,8 +411,7 @@ func main() {
 		log.Println("ℹ Using default production HMAC_SECRET")
 	}
 	if strings.TrimSpace(os.Getenv("HMAC_TOKEN_ENCRYPTION_KEY")) == "" {
-		_ = os.Setenv("HMAC_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
-		log.Println("ℹ Using default production HMAC_TOKEN_ENCRYPTION_KEY")
+		_ = os.Setenv("HMAC_TOKEN_ENCRYPTION_KEY", os.Getenv("ADMIN_API_KEY_ENCRYPTION_KEY"))
 	}
 	if strings.TrimSpace(os.Getenv("ADMIN_API_KEY_ENCRYPTION_KEY")) == "" {
 		_ = os.Setenv("ADMIN_API_KEY_ENCRYPTION_KEY", "/N6AKevpb5gqQ7TpEndfYJ9bHvBU54hQV8I2w+ealsQ=")
@@ -593,19 +593,6 @@ func main() {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"error":"route_not_found","path":"` + path + `"}`))
-			return
-		}
-
-		// If the service is registered but currently unhealthy, fail fast
-		// with 503 instead of waiting for the proxy timeout.
-		if !entry.isReady() {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"error":   "upstream_unhealthy",
-				"service": entry.name,
-				"hint":    "service is restarting; retry with exponential backoff",
-			})
 			return
 		}
 
