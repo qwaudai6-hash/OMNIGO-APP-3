@@ -242,10 +242,14 @@ func main() {
 	// EscrowReleaserWorker (with dispute checks and single commission deduction).
 	// Duplicate escrowCronSvc has been decommissioned to prevent double deductions.
 
+	// Start Order Timeout Worker — auto-cancels orders pending > 30 minutes
+	go svc.StartOrderTimeoutWorker(ctx)
+
 	// Start Delivery Status Consumer — syncs delivery events to order status
+	// Routes through svc (not repo) for transition validation + Kafka event emission.
 	if kafkaClient != nil {
-		go startDeliveryStatusConsumer(ctx, cfg.KafkaBrokers, repo)
-		go startGigAcceptedConsumer(ctx, cfg.KafkaBrokers, repo)
+		go startDeliveryStatusConsumer(ctx, cfg.KafkaBrokers, repo, svc)
+		go startGigAcceptedConsumer(ctx, cfg.KafkaBrokers, repo, svc)
 	}
 
 	// Wait for interrupt signal to gracefully shutdown
@@ -275,7 +279,7 @@ func main() {
 //	in_transit → in_transit
 //	completed  → delivered (also sets delivered_at, releases escrow timer)
 //	failed     → failed
-func startDeliveryStatusConsumer(ctx context.Context, brokers []string, repo *repository.OrderRepository) {
+func startDeliveryStatusConsumer(ctx context.Context, brokers []string, repo *repository.OrderRepository, svc *service.OrderService) {
 	consumer, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
 		kgo.ConsumerGroup("order-service-delivery-status"),
@@ -316,15 +320,14 @@ func startDeliveryStatusConsumer(ctx context.Context, brokers []string, repo *re
 			if !ok {
 				continue
 			}
-			// When the delivery completes, also stamp delivered_at so the
-			// escrow release cron (`escrow_cron.go`) can settle the funds
-			// after the 48-hour dispute window.
+			// Route through service layer for transition validation + Kafka event emission.
+			// Using repo directly bypassed the isValidOrderTransition check.
 			if orderStatus == "delivered" {
-				if err := repo.MarkOrderDelivered(ctx, event.OrderTrackingID); err != nil {
+				if err := svc.MarkOrderDelivered(ctx, event.OrderTrackingID); err != nil {
 					log.Printf("Failed to mark order %s delivered: %v", event.OrderTrackingID, err)
 					continue
 				}
-			} else if err := repo.UpdateOrderStatus(ctx, event.OrderTrackingID, orderStatus); err != nil {
+			} else if err := svc.UpdateOrderStatus(ctx, event.OrderTrackingID, orderStatus); err != nil {
 				log.Printf("Failed to update order %s status to %s: %v", event.OrderTrackingID, orderStatus, err)
 				continue
 			}
@@ -338,7 +341,7 @@ func startDeliveryStatusConsumer(ctx context.Context, brokers []string, repo *re
 // this consumer the order sat in pending until pickup, skipping the accepted
 // step in the customer-facing timeline and breaking RecordVendorHandover
 // (which requires status IN ('accepted','shipped','in_transit')).
-func startGigAcceptedConsumer(ctx context.Context, brokers []string, repo *repository.OrderRepository) {
+func startGigAcceptedConsumer(ctx context.Context, brokers []string, repo *repository.OrderRepository, svc *service.OrderService) {
 	consumer, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
 		kgo.ConsumerGroup("order-service-gig-accepted"),
@@ -371,7 +374,8 @@ func startGigAcceptedConsumer(ctx context.Context, brokers []string, repo *repos
 			if event.OrderTrackingID == "" {
 				continue
 			}
-			if err := repo.UpdateOrderStatus(ctx, event.OrderTrackingID, "accepted"); err != nil {
+			// Route through service layer for transition validation + Kafka event emission.
+			if err := svc.UpdateOrderStatus(ctx, event.OrderTrackingID, "accepted"); err != nil {
 				log.Printf("Failed to update order %s status to accepted: %v", event.OrderTrackingID, err)
 				continue
 			}

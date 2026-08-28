@@ -19,6 +19,7 @@ class ChatMessage {
       content: (json['content'] ?? '').toString(),
       isRead: (json['is_read'] ?? json['isRead'] ?? false) as bool,
       createdAt: DateTime.tryParse((json['created_at'] ?? '').toString()) ?? DateTime.now(),
+      updatedAt: DateTime.tryParse((json['updated_at'] ?? '').toString()),
     );
   }
   const ChatMessage({
@@ -29,6 +30,7 @@ class ChatMessage {
     required this.content,
     required this.isRead,
     required this.createdAt,
+    this.updatedAt,
   });
 
   final String id;
@@ -38,6 +40,7 @@ class ChatMessage {
   final String content;
   final bool isRead;
   final DateTime createdAt;
+  final DateTime? updatedAt;
 
   bool isMine(String myUserId) => senderId == myUserId;
 }

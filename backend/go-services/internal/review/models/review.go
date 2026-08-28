@@ -3,6 +3,8 @@ package models
 import "time"
 
 // Review represents a customer's rating + comment on a product.
+// NOTE: DB column is `user_tracking_id`, not `customer_tracking_id`.
+// The repository maps user_tracking_id → CustomerTrackingID.
 type Review struct {
 	ID                 int64     `json:"id"`
 	ProductTrackingID  string    `json:"product_tracking_id"`

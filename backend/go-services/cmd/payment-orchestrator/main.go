@@ -15,12 +15,12 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/omnigo/backend/internal/admin"
 	"github.com/omnigo/backend/internal/escrow"
 	"github.com/omnigo/backend/internal/ledger"
 	orderRepo "github.com/omnigo/backend/internal/order/repository"
+	stripeClientPkg "github.com/omnigo/backend/internal/payment/stripe"
 	"github.com/omnigo/backend/internal/payment/payfast"
 	paymentRepo "github.com/omnigo/backend/internal/payment/repository"
 	paymentservice "github.com/omnigo/backend/internal/payment/service"
@@ -106,26 +106,20 @@ func main() {
 	}
 	fraudDetector := fraud.NewDetector(rdb, db.Writer)
 
-	// Stripe split handler — always register the route if the webhook secret is
-	// configured; optional Redis/Kafka are passed through and the handler degrades
-	// gracefully when they are unavailable.
-	stripeWebhookSecret := os.Getenv("STRIPE_WEBHOOK_SECRET")
+	// Stripe split handler — full lifecycle (checkout + webhook + refund + ledger split).
+	stripeClient := stripeClientPkg.NewClientFromEnv()
 	var stripeSplitHandler *handlers.StripeSplitHandler
-	if stripeWebhookSecret != "" {
-		var kc *kgo.Client
-		if kafkaClient != nil {
-			kc = kafkaClient.Client
-		}
-		stripeSplitHandler = handlers.NewStripeSplitHandler(
-			rdb,
-			kc,
+	if stripeClient.IsConfigured() {
+		stripeService := payfastSvc.NewStripeService(
 			db.Writer,
 			ledgerSvc,
 			escrowSvc,
 			calculator,
-			stripeWebhookSecret,
+			stripeClient,
 		)
-		log.Println("Stripe split handler initialized")
+		stripeService.SetFraudDetector(fraudDetector)
+		stripeSplitHandler = handlers.NewStripeSplitHandler(stripeService)
+		log.Println("Stripe split handler initialized (checkout + webhook + refund)")
 	}
 
 	// PayFast split handler
@@ -226,12 +220,9 @@ func main() {
 	// Prometheus Metrics
 	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
-	// Register Stripe webhook with split logic
+	// Register Stripe endpoints (checkout + webhook + refund)
 	if stripeSplitHandler != nil {
-		router.POST("/api/v1/webhooks/stripe", func(c *gin.Context) {
-			stripeSplitHandler.ServeHTTP(c.Writer, c.Request)
-		})
-		log.Println("Stripe webhook endpoint registered at /api/v1/webhooks/stripe")
+		stripeSplitHandler.RegisterRoutes(router)
 	}
 
 	// Register PayFast split endpoints (payment + 3ds_callback + ipn).
@@ -271,6 +262,7 @@ func main() {
 	go workers.NewEscrowReleaserWorker(escrowSvc, rdb).Start(workerCtx)
 	go workers.NewPayoutWorker(db.Writer, ledgerSvc, rdb).Start(workerCtx)
 	go workers.NewSettlementWorker(db.Writer, ledgerSvc, escrowSvc, calculator, payfastClient, rdb).Start(workerCtx)
+	go workers.NewStripeReplayWorker(db.Writer, stripeClient).Start(workerCtx)
 	go reconWorker.Start(workerCtx)
 
 	// 7. Start Server

@@ -388,7 +388,7 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
       // ── Step 2: Branch on payment method using the REAL order id.
       if (paymentChoice == 'card') {
         // Stripe Payment Intent + Payment Sheet keyed off the real order id.
-        final checkoutUrl = Uri.parse('${ApiEndpoints.orderBase}/checkout');
+        final checkoutUrl = Uri.parse(ApiEndpoints.stripeCheckout());
         final checkoutResponse = await http.post(
           checkoutUrl,
           headers: {
@@ -396,14 +396,14 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
             'Authorization': 'Bearer $token',
           },
           body: jsonEncode({
+            'gateway': 'stripe',
             'customer_id': widget.userTrackingId,
             'store_id': vendorStoreId,
             'order_id': realOrderTrackingId,
-            'nonce': nonce,
-            'items': [{'product_id': prodId, 'quantity': _quantity}],
-            'amount_cents': (totalPrice * 100).round(),
+            'amount': totalPrice,
+            'currency': 'PKR',
           }),
-        ).timeout(const Duration(seconds: 10));
+        ).timeout(const Duration(seconds: 15));
 
         if (checkoutResponse.statusCode == 200) {
           final checkoutData = jsonDecode(checkoutResponse.body) as Map<String, dynamic>;
@@ -522,6 +522,30 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
         if (status == 'failed') {
           if (mounted) setState(() => _isCheckoutProcessing = false);
           if (mounted) _showErrorDialog(pfData['message']?.toString() ?? 'PayFast payment failed');
+          return;
+        }
+
+        // Hosted checkout redirect (apps.net.pk): open PayFast payment page in browser.
+        // After payment, PayFast sends IPN to our callback URL which marks order paid.
+        if (status == 'hosted_redirect') {
+          final redirectUrl = pfData['redirect_url']?.toString() ?? '';
+          if (redirectUrl.isNotEmpty && mounted) {
+            final uri = Uri.parse(redirectUrl);
+            if (await canLaunchUrl(uri)) {
+              await launchUrl(uri, mode: LaunchMode.externalApplication);
+            }
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Payment page opened. Your order will update after payment.'),
+                  duration: Duration(seconds: 5),
+                ),
+              );
+            }
+          } else {
+            if (mounted) setState(() => _isCheckoutProcessing = false);
+            if (mounted) _showErrorDialog('Payment gateway returned no redirect URL');
+          }
           return;
         }
 

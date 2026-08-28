@@ -46,7 +46,10 @@ func (r *RideRepository) CreateRide(ctx context.Context, ride *models.Ride) erro
 // GetRideByTrackingID retrieves a ride by its UTID
 func (r *RideRepository) GetRideByTrackingID(ctx context.Context, trackingID string) (*models.Ride, error) {
 	query := `
-		SELECT id, tracking_id, customer_tracking_id, rider_tracking_id, status, admin_commission, fare_amount, vehicle_type, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, created_at, updated_at
+		SELECT id, tracking_id, customer_tracking_id, rider_tracking_id, status, admin_commission, fare_amount,
+			vehicle_type, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
+			COALESCE(actual_distance_meters, 0.0), COALESCE(actual_duration_seconds, 0.0),
+			created_at, updated_at
 		FROM rides
 		WHERE tracking_id = $1
 	`
@@ -57,6 +60,7 @@ func (r *RideRepository) GetRideByTrackingID(ctx context.Context, trackingID str
 		&ride.ID, &ride.TrackingID, &ride.CustomerTrackID, &riderID,
 		&ride.Status, &ride.AdminCommission, &ride.FareAmount, &ride.VehicleType,
 		&ride.PickupLat, &ride.PickupLng, &ride.DropoffLat, &ride.DropoffLng,
+		&ride.ActualDistanceMeters, &ride.ActualDurationSecs,
 		&ride.CreatedAt, &ride.UpdatedAt,
 	)
 

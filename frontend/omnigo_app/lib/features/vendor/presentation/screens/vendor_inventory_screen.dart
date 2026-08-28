@@ -26,6 +26,7 @@ class ProductModel {
     required this.isFeatured,
     required this.imageUrl,
     required this.category,
+    this.isActive = true,
   });
 
   factory ProductModel.fromJson(Map<String, dynamic> json) {
@@ -42,6 +43,7 @@ class ProductModel {
       isFeatured: (json['is_featured'] as bool?) ?? false,
       imageUrl: (json['image_url'] as String?) ?? '',
       category: (json['category'] as String?) ?? '',
+      isActive: (json['is_active'] as bool?) ?? true,
     );
   }
   final int id;
@@ -56,6 +58,7 @@ class ProductModel {
   final bool isFeatured;
   final String imageUrl;
   final String category;
+  final bool isActive;
 
   ProductModel copyWith({
     int? id,
@@ -70,6 +73,7 @@ class ProductModel {
     bool? isFeatured,
     String? imageUrl,
     String? category,
+    bool? isActive,
   }) {
     return ProductModel(
       id: id ?? this.id,
@@ -84,6 +88,7 @@ class ProductModel {
       isFeatured: isFeatured ?? this.isFeatured,
       imageUrl: imageUrl ?? this.imageUrl,
       category: category ?? this.category,
+      isActive: isActive ?? this.isActive,
     );
   }
 
@@ -99,6 +104,7 @@ class ProductModel {
       'base_price': basePrice,
       'stock': stock,
       'is_featured': isFeatured,
+      'is_active': isActive,
       'image_url': imageUrl,
       'category': category,
     };

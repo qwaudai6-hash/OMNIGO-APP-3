@@ -359,7 +359,7 @@ func (h *OrderHandler) VendorHandoverOrder(c *gin.Context) {
 	// model layer can keep audit timestamps and enforce shape (e.g. only
 	// accept if status = 'accepted'). Photo + notes are stored alongside
 	// the order so admin can review any handover dispute.
-	if err := h.repo.RecordVendorHandover(c.Request.Context(), req.OrderTrackingID, req.PhotoURL, req.Notes); err != nil {
+	if err := h.repo.RecordVendorHandover(c.Request.Context(), req.OrderTrackingID, callerID, req.PhotoURL, req.Notes); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

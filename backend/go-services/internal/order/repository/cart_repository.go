@@ -19,9 +19,9 @@ func NewCartRepository(db *pgxpool.Pool) *CartRepository {
 
 // GetCart fetches the cart and its items for a specific user
 func (r *CartRepository) GetCart(ctx context.Context, userID string) (*models.Cart, error) {
-	queryCart := `SELECT id, user_id, store_id, created_at, updated_at FROM carts WHERE user_id = $1`
+	queryCart := `SELECT id, user_id, store_id, COALESCE(total_amount, 0), created_at, updated_at FROM carts WHERE user_id = $1`
 	var cart models.Cart
-	err := r.db.QueryRow(ctx, queryCart, userID).Scan(&cart.ID, &cart.UserID, &cart.StoreID, &cart.CreatedAt, &cart.UpdatedAt)
+	err := r.db.QueryRow(ctx, queryCart, userID).Scan(&cart.ID, &cart.UserID, &cart.StoreID, &cart.TotalAmount, &cart.CreatedAt, &cart.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -49,7 +49,7 @@ func (r *CartRepository) CreateCart(ctx context.Context, userID, storeID string)
 	query := `
 		INSERT INTO carts (user_id, store_id, created_at, updated_at)
 		VALUES ($1, $2, NOW(), NOW())
-		ON CONFLICT (user_id) DO UPDATE SET updated_at = NOW()
+		ON CONFLICT (user_id) DO UPDATE SET store_id = EXCLUDED.store_id, updated_at = NOW()
 		RETURNING id, created_at, updated_at
 	`
 	cart := &models.Cart{

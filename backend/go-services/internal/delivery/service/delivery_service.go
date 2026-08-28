@@ -115,7 +115,7 @@ func (s *DeliveryService) StartKafkaConsumer(ctx context.Context) {
 					}
 					if orderID != "" {
 						log.Printf("[Delivery] Order %s cancelled. Cancelling active/pending delivery gigs.", orderID)
-						_ = s.repo.CancelDeliveryForOrder(ctx, orderID)
+						_ = s.repo.CancelDeliveryForOrder(ctx, orderID, "Order cancelled by customer/vendor")
 					}
 				}
 				continue

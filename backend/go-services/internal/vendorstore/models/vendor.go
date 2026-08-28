@@ -14,7 +14,10 @@ type VendorStore struct {
 	BannerURL        string    `json:"banner_url"`
 	Latitude         float64   `json:"latitude"`
 	Longitude        float64   `json:"longitude"`
+	CommissionRate   float64   `json:"commission_rate"`
+	IsActive         bool      `json:"is_active"`
 	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // CreateStoreRequest is the payload for creating a new store.

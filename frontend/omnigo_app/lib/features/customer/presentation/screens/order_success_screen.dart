@@ -3,15 +3,19 @@ import '../../../../core/theme/app_theme.dart';
 
 class OrderSuccessScreen extends StatelessWidget {
 
-  const OrderSuccessScreen({super.key, required this.trackingId, this.pending = false});
+  const OrderSuccessScreen({super.key, required this.trackingId, this.pending = false, this.failed = false});
   final String trackingId;
 
   /// PF-4 FIX: when true the payment is still processing at the gateway —
   /// render an honest amber "processing" state instead of a green success.
   final bool pending;
 
+  /// When true the payment has failed — render a red "failed" state with retry options.
+  final bool failed;
+
   @override
   Widget build(BuildContext context) {
+    final isFailed = failed && !pending;
     return Scaffold(
       backgroundColor: Colors.white,
       body: SafeArea(
@@ -25,26 +29,28 @@ class OrderSuccessScreen extends StatelessWidget {
                 width: 120,
                 height: 120,
                 decoration: BoxDecoration(
-                  color: pending ? Colors.amber.shade50 : Colors.green.shade50,
+                  color: isFailed ? Colors.red.shade50 : (pending ? Colors.amber.shade50 : Colors.green.shade50),
                   shape: BoxShape.circle,
                 ),
                 child: Icon(
-                  pending ? Icons.hourglass_top_rounded : Icons.check_circle,
-                  color: pending ? Colors.orange : Colors.green,
+                  isFailed ? Icons.error_outline : (pending ? Icons.hourglass_top_rounded : Icons.check_circle),
+                  color: isFailed ? Colors.red : (pending ? Colors.orange : Colors.green),
                   size: 80,
                 ),
               ),
               const SizedBox(height: 32),
               Text(
-                pending ? 'Payment Processing…' : 'Order Placed Successfully!',
+                isFailed ? 'Payment Failed' : (pending ? 'Payment Processing…' : 'Order Placed Successfully!'),
                 style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: AppTheme.blackAccent),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 16),
               Text(
-                pending
-                    ? 'Your payment is being verified with the bank. The order status updates automatically — no action needed.'
-                    : 'Your order has been confirmed. You will receive a notification once a rider is assigned.',
+                isFailed
+                    ? 'Your payment could not be processed. The order has been automatically cancelled. You can try again from your cart.'
+                    : pending
+                        ? 'Your payment is being verified with the bank. The order status updates automatically — no action needed.'
+                        : 'Your order has been confirmed. You will receive a notification once a rider is assigned.',
                 style: TextStyle(fontSize: 16, color: Colors.grey.shade600, height: 1.5),
                 textAlign: TextAlign.center,
               ),
@@ -64,6 +70,25 @@ class OrderSuccessScreen extends StatelessWidget {
                 ),
               ),
               const Spacer(),
+              if (isFailed) ...[
+                SizedBox(
+                  width: double.infinity,
+                  height: 55,
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppTheme.blackAccent,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    ),
+                    onPressed: () {
+                      // Go back to cart to retry
+                      Navigator.pop(context);
+                      Navigator.pop(context);
+                    },
+                    child: const Text('Back to Cart', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
               SizedBox(
                 width: double.infinity,
                 height: 55,
@@ -76,7 +101,7 @@ class OrderSuccessScreen extends StatelessWidget {
                     // Just pop back to dashboard
                     Navigator.pop(context);
                   },
-                  child: const Text('Track Order', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                  child: Text(isFailed ? 'Back to Home' : 'Track Order', style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
                 ),
               ),
               const SizedBox(height: 16),

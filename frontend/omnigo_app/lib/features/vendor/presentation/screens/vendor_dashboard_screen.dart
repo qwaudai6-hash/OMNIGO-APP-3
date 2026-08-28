@@ -43,6 +43,9 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
   // double-tap and race two requests.
   bool _isHandoverInProgress = false;
 
+  // Periodic poll for new orders (vendor live map handles real-time via its own WebSocket)
+  Timer? _orderPollTimer;
+
   // Verification Form State moved to Profile Tab
 
   @override
@@ -51,6 +54,16 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
     _fetchMerchantOrders();
     _fetchVendorMetrics();
     _fetchVendorRating();
+    // Poll orders every 15 seconds for new incoming orders
+    _orderPollTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      _fetchMerchantOrders();
+    });
+  }
+
+  @override
+  void dispose() {
+    _orderPollTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> _fetchVendorRating() async {
@@ -1073,6 +1086,11 @@ class _VendorProfileTabState extends State<VendorProfileTab> {
                     _buildInfoRow('Vendor ID', widget.vendorTrackingId),
                     const SizedBox(height: 12),
                     _buildInfoRow('Store ID', storeTrackingId),
+                    const SizedBox(height: 12),
+                    if (_storeData?['commission_rate'] != null)
+                      _buildInfoRow('Commission Rate', '${(_storeData!['commission_rate'] as num).toDouble().toStringAsFixed(1)}%'),
+                    if (_storeData?['commission_rate'] != null) const SizedBox(height: 12),
+                    _buildInfoRow('Store Status', (_storeData?['is_active'] as bool? ?? true) ? 'Active' : 'Inactive'),
                     const SizedBox(height: 20),
                     const Divider(color: Colors.white24),
                     const SizedBox(height: 12),

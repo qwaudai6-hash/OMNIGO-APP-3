@@ -52,14 +52,17 @@ func (r *VendorRepository) CreateStore(ctx context.Context, store *models.Vendor
 // GetStoreByTrackingID fetches a store using its store_tracking_id DSN column
 func (r *VendorRepository) GetStoreByTrackingID(ctx context.Context, storeTrackingID string) (*models.VendorStore, error) {
 	query := `
-		SELECT id, vendor_tracking_id, store_tracking_id, store_name, COALESCE(logo_url, ''), COALESCE(banner_url, ''), COALESCE(latitude, 0.0), COALESCE(longitude, 0.0), created_at
+		SELECT id, vendor_tracking_id, store_tracking_id, store_name, COALESCE(logo_url, ''), COALESCE(banner_url, ''),
+			COALESCE(latitude, 0.0), COALESCE(longitude, 0.0), COALESCE(commission_rate, 2.0),
+			COALESCE(is_active, true), created_at, updated_at
 		FROM stores
 		WHERE store_tracking_id = $1
 	`
 	var store models.VendorStore
 	err := r.reader.QueryRow(ctx, query, storeTrackingID).Scan(
 		&store.ID, &store.VendorTrackingID, &store.StoreTrackingID, &store.StoreName,
-		&store.LogoURL, &store.BannerURL, &store.Latitude, &store.Longitude, &store.CreatedAt,
+		&store.LogoURL, &store.BannerURL, &store.Latitude, &store.Longitude,
+		&store.CommissionRate, &store.IsActive, &store.CreatedAt, &store.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -70,7 +73,9 @@ func (r *VendorRepository) GetStoreByTrackingID(ctx context.Context, storeTracki
 // GetStoreByVendorID fetches a store using the vendor_tracking_id column.
 func (r *VendorRepository) GetStoreByVendorID(ctx context.Context, vendorTrackingID string) (*models.VendorStore, error) {
 	query := `
-		SELECT id, vendor_tracking_id, store_tracking_id, store_name, COALESCE(logo_url, ''), COALESCE(banner_url, ''), COALESCE(latitude, 0.0), COALESCE(longitude, 0.0), created_at
+		SELECT id, vendor_tracking_id, store_tracking_id, store_name, COALESCE(logo_url, ''), COALESCE(banner_url, ''),
+			COALESCE(latitude, 0.0), COALESCE(longitude, 0.0), COALESCE(commission_rate, 2.0),
+			COALESCE(is_active, true), created_at, updated_at
 		FROM stores
 		WHERE vendor_tracking_id = $1
 		LIMIT 1
@@ -78,7 +83,8 @@ func (r *VendorRepository) GetStoreByVendorID(ctx context.Context, vendorTrackin
 	var store models.VendorStore
 	err := r.reader.QueryRow(ctx, query, vendorTrackingID).Scan(
 		&store.ID, &store.VendorTrackingID, &store.StoreTrackingID, &store.StoreName,
-		&store.LogoURL, &store.BannerURL, &store.Latitude, &store.Longitude, &store.CreatedAt,
+		&store.LogoURL, &store.BannerURL, &store.Latitude, &store.Longitude,
+		&store.CommissionRate, &store.IsActive, &store.CreatedAt, &store.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -92,7 +98,9 @@ func (r *VendorRepository) ListStores(ctx context.Context, limit, offset int) ([
 		limit = 50
 	}
 	query := `
-		SELECT id, vendor_tracking_id, store_tracking_id, store_name, COALESCE(logo_url, ''), COALESCE(banner_url, ''), COALESCE(latitude, 0.0), COALESCE(longitude, 0.0), created_at
+		SELECT id, vendor_tracking_id, store_tracking_id, store_name, COALESCE(logo_url, ''), COALESCE(banner_url, ''),
+			COALESCE(latitude, 0.0), COALESCE(longitude, 0.0), COALESCE(commission_rate, 2.0),
+			COALESCE(is_active, true), created_at, updated_at
 		FROM stores
 		ORDER BY id DESC
 		LIMIT $1 OFFSET $2
@@ -108,7 +116,8 @@ func (r *VendorRepository) ListStores(ctx context.Context, limit, offset int) ([
 		var store models.VendorStore
 		if err := rows.Scan(
 			&store.ID, &store.VendorTrackingID, &store.StoreTrackingID, &store.StoreName,
-			&store.LogoURL, &store.BannerURL, &store.Latitude, &store.Longitude, &store.CreatedAt,
+			&store.LogoURL, &store.BannerURL, &store.Latitude, &store.Longitude,
+			&store.CommissionRate, &store.IsActive, &store.CreatedAt, &store.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}

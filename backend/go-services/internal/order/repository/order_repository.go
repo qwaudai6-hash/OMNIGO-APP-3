@@ -24,6 +24,11 @@ func NewOrderRepository(writer, reader *pgxpool.Pool) *OrderRepository {
 	}
 }
 
+// DB returns the writer connection pool (used by background workers).
+func (r *OrderRepository) DB() *pgxpool.Pool {
+	return r.writer
+}
+
 // CreateOrder inserts a new order, its items, and an outbox event into the database within a transaction
 func (r *OrderRepository) CreateOrder(ctx context.Context, order *models.Order, outboxPayload []byte) error {
 	tx, err := r.writer.Begin(ctx)
@@ -33,8 +38,8 @@ func (r *OrderRepository) CreateOrder(ctx context.Context, order *models.Order, 
 	defer tx.Rollback(ctx)
 
 	query := `
-		INSERT INTO orders (order_tracking_id, customer_tracking_id, store_tracking_id, vendor_tracking_id, status, total_amount, currency, payment_gateway, customer_lat, customer_lng, device_session_nonce, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8, $9, $10, NOW(), NOW())
+		INSERT INTO orders (order_tracking_id, customer_tracking_id, store_tracking_id, vendor_tracking_id, status, total_amount, currency, payment_gateway, payment_status, customer_lat, customer_lng, device_session_nonce, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, 'pending', $8, $9, $10, NOW(), NOW())
 		RETURNING id, created_at, updated_at
 	`
 	err = tx.QueryRow(ctx, query,
@@ -162,7 +167,11 @@ func (r *OrderRepository) fetchBulkOrderItems(ctx context.Context, orderIDs []st
 // GetOrderByTrackingID retrieves an order by its UTID
 func (r *OrderRepository) GetOrderByTrackingID(ctx context.Context, trackingID string) (*models.Order, error) {
 	query := `
-		SELECT id, order_tracking_id, customer_tracking_id, store_tracking_id, vendor_tracking_id, rider_tracking_id, status, delivery_type, payment_gateway, total_amount, currency, otp_code, customer_lat, customer_lng, created_at, updated_at
+		SELECT id, order_tracking_id, customer_tracking_id, store_tracking_id, vendor_tracking_id, rider_tracking_id,
+			status, delivery_type, payment_gateway, total_amount, admin_commission, vendor_escrow, delivery_escrow,
+			currency, payment_status, customer_lat, customer_lng, otp_code, device_session_nonce,
+			escrow_released, dispute_status, delivered_at, created_at, updated_at,
+			handover_photo_url, handover_at, handover_notes, handed_over_by_tracking_id
 		FROM orders
 		WHERE order_tracking_id = $1
 	`
@@ -180,9 +189,11 @@ func (r *OrderRepository) GetOrderByTrackingID(ctx context.Context, trackingID s
 		&order.ID, &order.TrackingID, &order.UserTrackID, &order.VendorStoreTrackID,
 		&order.VendorTrackID, &riderID,
 		&order.Status, &deliveryType, &paymentGateway,
-		&order.TotalAmount, &order.Currency, &otpCode,
-		&customerLat, &customerLng,
+		&order.TotalAmount, &order.AdminCommission, &order.VendorEscrow, &order.DeliveryEscrow,
+		&order.Currency, &order.PaymentStatus, &customerLat, &customerLng, &otpCode, &order.DeviceSessionNonce,
+		&order.EscrowReleased, &order.DisputeStatus, &order.DeliveredAt,
 		&createdAt, &updatedAt,
+		&order.HandoverPhotoURL, &order.HandoverAt, &order.HandoverNotes, &order.HandedByTrackingID,
 	)
 	if err != nil {
 		return nil, err
@@ -241,7 +252,11 @@ func (r *OrderRepository) GetOrdersByCustomerID(ctx context.Context, customerID 
 		limitClause = fmt.Sprintf(" LIMIT $%d", argsLen+1)
 	}
 	query := `
-		SELECT id, order_tracking_id, customer_tracking_id, store_tracking_id, vendor_tracking_id, rider_tracking_id, status, delivery_type, payment_gateway, total_amount, currency, otp_code, customer_lat, customer_lng, created_at, updated_at
+		SELECT id, order_tracking_id, customer_tracking_id, store_tracking_id, vendor_tracking_id, rider_tracking_id,
+			status, delivery_type, payment_gateway, total_amount, admin_commission, vendor_escrow, delivery_escrow,
+			currency, payment_status, customer_lat, customer_lng, otp_code, device_session_nonce,
+			escrow_released, dispute_status, delivered_at, created_at, updated_at,
+			handover_photo_url, handover_at, handover_notes, handed_over_by_tracking_id
 		FROM orders
 		` + where + `
 		ORDER BY created_at DESC
@@ -268,9 +283,11 @@ func (r *OrderRepository) GetOrdersByCustomerID(ctx context.Context, customerID 
 			&order.ID, &order.TrackingID, &order.UserTrackID, &order.VendorStoreTrackID,
 			&order.VendorTrackID, &riderID,
 			&order.Status, &deliveryType, &paymentGateway,
-			&order.TotalAmount, &order.Currency, &otpCode,
-			&customerLat, &customerLng,
+			&order.TotalAmount, &order.AdminCommission, &order.VendorEscrow, &order.DeliveryEscrow,
+			&order.Currency, &order.PaymentStatus, &customerLat, &customerLng, &otpCode, &order.DeviceSessionNonce,
+			&order.EscrowReleased, &order.DisputeStatus, &order.DeliveredAt,
 			&createdAt, &updatedAt,
+			&order.HandoverPhotoURL, &order.HandoverAt, &order.HandoverNotes, &order.HandedByTrackingID,
 		)
 		if err != nil {
 			return nil, err
@@ -329,8 +346,10 @@ func (r *OrderRepository) GetOrdersByVendorID(ctx context.Context, vendorID stri
 	query := `
 		SELECT 
 			o.id, o.order_tracking_id, o.customer_tracking_id, o.store_tracking_id, o.vendor_tracking_id, o.rider_tracking_id, 
-			o.status, o.delivery_type, o.payment_gateway, o.total_amount, o.currency, o.otp_code, o.customer_lat, o.customer_lng, 
-			o.created_at, o.updated_at,
+			o.status, o.delivery_type, o.payment_gateway, o.total_amount, o.admin_commission, o.vendor_escrow, o.delivery_escrow,
+			o.currency, o.payment_status, o.customer_lat, o.customer_lng, o.otp_code, o.device_session_nonce,
+			o.escrow_released, o.dispute_status, o.delivered_at, o.created_at, o.updated_at,
+			o.handover_photo_url, o.handover_at, o.handover_notes, o.handed_over_by_tracking_id,
 			COALESCE(c.full_name, 'Unknown Customer'),
 			COALESCE(c.phone, ''),
 			COALESCE(rd.full_name, 'Unassigned Rider'),
@@ -367,9 +386,11 @@ func (r *OrderRepository) GetOrdersByVendorID(ctx context.Context, vendorID stri
 			&order.ID, &order.TrackingID, &order.UserTrackID, &order.VendorStoreTrackID,
 			&order.VendorTrackID, &riderID,
 			&order.Status, &deliveryType, &paymentGateway,
-			&order.TotalAmount, &order.Currency, &otpCode,
-			&customerLat, &customerLng,
+			&order.TotalAmount, &order.AdminCommission, &order.VendorEscrow, &order.DeliveryEscrow,
+			&order.Currency, &order.PaymentStatus, &customerLat, &customerLng, &otpCode, &order.DeviceSessionNonce,
+			&order.EscrowReleased, &order.DisputeStatus, &order.DeliveredAt,
 			&createdAt, &updatedAt,
+			&order.HandoverPhotoURL, &order.HandoverAt, &order.HandoverNotes, &order.HandedByTrackingID,
 			&custName, &custPhone, &riderName, &riderPhone,
 		)
 		if err != nil {
@@ -480,17 +501,18 @@ func (r *OrderRepository) MarkOrderDelivered(ctx context.Context, trackingID str
 // captured a photo of the package being handed to the rider, plus
 // optional notes. Returns an error if the order is not in a state
 // where a handover makes sense (must be 'accepted' or 'shipped').
-func (r *OrderRepository) RecordVendorHandover(ctx context.Context, orderTrackingID, photoURL, notes string) error {
+func (r *OrderRepository) RecordVendorHandover(ctx context.Context, orderTrackingID, handedOverBy, photoURL, notes string) error {
 	query := `
 		UPDATE orders
 		SET handover_photo_url = $1,
 		    handover_at = NOW(),
 		    handover_notes = NULLIF($2, ''),
+		    handed_over_by_tracking_id = NULLIF($3, ''),
 		    updated_at = NOW()
-		WHERE order_tracking_id = $3
-		  AND status IN ('accepted', 'shipped', 'in_transit')
+		WHERE order_tracking_id = $4
+		  AND status IN ('accepted', 'in_transit')
 	`
-	res, err := r.writer.Exec(ctx, query, photoURL, notes, orderTrackingID)
+	res, err := r.writer.Exec(ctx, query, photoURL, notes, handedOverBy, orderTrackingID)
 	if err != nil {
 		return err
 	}

@@ -648,3 +648,148 @@ func (gw *WebSocketGateway) lookupGigRecipients(ctx context.Context, riderTracki
 
 	return cust, vend, nil
 }
+
+// StartOrderStatusConsuming subscribes to orders.updated and deliveries.status_updated,
+// forwarding real-time status updates to the relevant customer and vendor via WebSocket.
+// This enables real-time order tracking without HTTP polling.
+func (gw *WebSocketGateway) StartOrderStatusConsuming(ctx context.Context) {
+	if len(gw.brokers) == 0 || gw.brokers[0] == "" {
+		return
+	}
+
+	consumer, err := kgo.NewClient(
+		kgo.SeedBrokers(gw.brokers...),
+		kgo.ConsumerGroup("websocket-gateway-order-status"),
+		kgo.ConsumeTopics("orders.updated", "deliveries.status_updated"),
+	)
+	if err != nil {
+		log.Printf("Warning: Failed to create order status consumer: %v", err)
+		return
+	}
+	defer consumer.Close()
+
+	log.Println("Order status consumer started — listening on orders.updated and deliveries.status_updated")
+
+	for {
+		fetches := consumer.PollFetches(ctx)
+		if fetches.IsClientClosed() {
+			return
+		}
+
+		iter := fetches.RecordIter()
+		for !iter.Done() {
+			record := iter.Next()
+			switch record.Topic {
+			case "orders.updated":
+				gw.handleOrderUpdated(ctx, record.Value)
+			case "deliveries.status_updated":
+				gw.handleDeliveryStatusUpdated(ctx, record.Value)
+			}
+		}
+	}
+}
+
+// handleOrderUpdated forwards order status changes to the customer and vendor.
+func (gw *WebSocketGateway) handleOrderUpdated(ctx context.Context, data []byte) {
+	var event struct {
+		OrderID             string `json:"order_id"`
+		Status              string `json:"status"`
+		CustomerTrackingID  string `json:"customer_tracking_id"`
+		VendorTrackingID    string `json:"vendor_tracking_id"`
+		Timestamp           int64  `json:"timestamp"`
+	}
+	if err := json.Unmarshal(data, &event); err != nil {
+		return
+	}
+
+	msg := map[string]interface{}{
+		"action":   "ORDER_STATUS_UPDATED",
+		"order_id": event.OrderID,
+		"status":   event.Status,
+		"timestamp": event.Timestamp,
+	}
+	msgBytes, _ := json.Marshal(msg)
+
+	// Send to customer
+	if event.CustomerTrackingID != "" {
+		gw.sendToCustomer(event.CustomerTrackingID, msgBytes)
+	}
+	// Send to vendor
+	if event.VendorTrackingID != "" {
+		gw.sendToVendor(event.VendorTrackingID, msgBytes)
+	}
+}
+
+// handleDeliveryStatusUpdated forwards delivery status changes to customer and vendor.
+func (gw *WebSocketGateway) handleDeliveryStatusUpdated(ctx context.Context, data []byte) {
+	var event struct {
+		OrderTrackingID     string `json:"order_tracking_id"`
+		Status              string `json:"status"`
+		AssignedRiderID     string `json:"assigned_rider_id"`
+		VendorStoreTrackID  string `json:"vendor_store_tracking_id"`
+		Timestamp           int64  `json:"timestamp"`
+	}
+	if err := json.Unmarshal(data, &event); err != nil {
+		return
+	}
+
+	// Look up customer and vendor from the order
+	if gw.db == nil {
+		return
+	}
+	var customerID, vendorID *string
+	err := gw.db.QueryRow(ctx,
+		`SELECT o.customer_tracking_id, o.vendor_tracking_id
+		 FROM orders o WHERE o.order_tracking_id = $1`,
+		event.OrderTrackingID,
+	).Scan(&customerID, &vendorID)
+	if err != nil {
+		return
+	}
+
+	msg := map[string]interface{}{
+		"action":            "ORDER_STATUS_UPDATED",
+		"order_id":          event.OrderTrackingID,
+		"status":            event.Status,
+		"rider_id":          event.AssignedRiderID,
+		"timestamp":         event.Timestamp,
+	}
+	msgBytes, _ := json.Marshal(msg)
+
+	if customerID != nil && *customerID != "" {
+		gw.sendToCustomer(*customerID, msgBytes)
+	}
+	if vendorID != nil && *vendorID != "" {
+		gw.sendToVendor(*vendorID, msgBytes)
+	}
+}
+
+// sendToCustomer sends a message to a connected customer by tracking ID.
+func (gw *WebSocketGateway) sendToCustomer(trackingID string, data []byte) {
+	gw.mu.Lock()
+	conn, ok := gw.customers[trackingID]
+	gw.mu.Unlock()
+	if ok {
+		conn.WriteMessage(websocket.TextMessage, data)
+	}
+}
+
+// sendToVendor sends a message to a connected vendor by tracking ID.
+func (gw *WebSocketGateway) sendToVendor(trackingID string, data []byte) {
+	gw.mu.Lock()
+	conn, ok := gw.vendors[trackingID]
+	gw.mu.Unlock()
+	if ok {
+		conn.WriteMessage(websocket.TextMessage, data)
+	}
+}
+
+// sendToRider sends a message to a connected rider by tracking ID.
+func (gw *WebSocketGateway) sendToRider(trackingID string, data []byte) {
+	gw.mu.Lock()
+	conn, ok := gw.riders[trackingID]
+	gw.mu.Unlock()
+	if ok {
+		conn.WriteMessage(websocket.TextMessage, data)
+	}
+}

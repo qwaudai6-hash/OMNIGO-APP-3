@@ -439,6 +439,15 @@ func main() {
 		_ = os.Setenv("KAFKA_BROKERS", "kafka.railway.internal:9092")
 	}
 
+	// PayFast return URL validation — required for hosted checkout redirects.
+	// Without these, wallet top-up and legacy charge endpoints return 500.
+	if strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")) == "" {
+		log.Println("⚠ WARNING: PUBLIC_BASE_URL is not set — PayFast return URLs will fail. Set it to https://omnigo-app-3-production.up.railway.app in Railway env vars")
+	}
+	if strings.TrimSpace(os.Getenv("WALLET_RETURN_URL")) == "" && strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")) == "" {
+		log.Println("⚠ WARNING: Neither WALLET_RETURN_URL nor PUBLIC_BASE_URL is set — PayFast hosted checkout will return 500. Set WALLET_RETURN_URL or PUBLIC_BASE_URL in Railway env vars.")
+	}
+
 	// Build service registry. Order = start order. Each prefix list is OR'd
 	// in lookupPrefix. Add new routes here, not in a switch statement, so
 	// adding a service is a one-line change.

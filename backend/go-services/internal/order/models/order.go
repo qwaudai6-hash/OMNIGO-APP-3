@@ -4,31 +4,39 @@ import "time"
 
 // Order represents an e-commerce order
 type Order struct {
-	ID                 int64       `json:"id"`
-	TrackingID         string      `json:"order_tracking_id"`
-	UserTrackID        string      `json:"customer_tracking_id"`
-	VendorStoreTrackID string      `json:"store_tracking_id"`
-	VendorTrackID      string      `json:"vendor_tracking_id"`
-	RiderTrackID       string      `json:"rider_tracking_id"`
-	Items              []OrderItem `json:"items"`
-	Status             string      `json:"status"`
-	DeliveryType       string      `json:"delivery_type"`
-	PaymentGateway     string      `json:"payment_gateway"`
-	TotalAmount        float64     `json:"total_amount"`
-	Currency           string      `json:"currency"`
-	OTPCode            string      `json:"otp_code"`
-	CustomerLat        float64     `json:"customer_lat"`
-	CustomerLng        float64     `json:"customer_lng"`
-	CreatedAt          time.Time   `json:"created_at"`
-	UpdatedAt          time.Time   `json:"updated_at"`
-	DeliveredAt        *time.Time  `json:"delivered_at,omitempty"`
-	EscrowReleased     bool        `json:"escrow_released"`
-	DisputeStatus      string      `json:"dispute_status"`
-	DeviceSessionNonce string      `json:"device_session_nonce"`
-	CustomerName       string      `json:"customer_name,omitempty"`
-	CustomerPhone      string      `json:"customer_phone,omitempty"`
-	RiderName          string      `json:"rider_name,omitempty"`
-	RiderPhone         string      `json:"rider_phone,omitempty"`
+	ID                    int64       `json:"id"`
+	TrackingID            string      `json:"order_tracking_id"`
+	UserTrackID           string      `json:"customer_tracking_id"`
+	VendorStoreTrackID    string      `json:"store_tracking_id"`
+	VendorTrackID         string      `json:"vendor_tracking_id"`
+	RiderTrackID          string      `json:"rider_tracking_id"`
+	Items                 []OrderItem `json:"items"`
+	Status                string      `json:"status"`
+	DeliveryType          string      `json:"delivery_type"`
+	PaymentGateway        string      `json:"payment_gateway"`
+	TotalAmount           float64     `json:"total_amount"`
+	AdminCommission       float64     `json:"admin_commission"`
+	VendorEscrow          float64     `json:"vendor_escrow"`
+	DeliveryEscrow        float64     `json:"delivery_escrow"`
+	Currency              string      `json:"currency"`
+	PaymentStatus         string      `json:"payment_status"`
+	CustomerLat           float64     `json:"customer_lat"`
+	CustomerLng           float64     `json:"customer_lng"`
+	OTPCode               string      `json:"otp_code"`
+	DeviceSessionNonce    string      `json:"device_session_nonce"`
+	EscrowReleased        bool        `json:"escrow_released"`
+	DisputeStatus         string      `json:"dispute_status"`
+	DeliveredAt           *time.Time  `json:"delivered_at,omitempty"`
+	HandoverPhotoURL      string      `json:"handover_photo_url,omitempty"`
+	HandoverAt            *time.Time  `json:"handover_at,omitempty"`
+	HandoverNotes         string      `json:"handover_notes,omitempty"`
+	HandedByTrackingID    string      `json:"handed_over_by_tracking_id,omitempty"`
+	CreatedAt             time.Time   `json:"created_at"`
+	UpdatedAt             time.Time   `json:"updated_at"`
+	CustomerName          string      `json:"customer_name,omitempty"`
+	CustomerPhone         string      `json:"customer_phone,omitempty"`
+	RiderName             string      `json:"rider_name,omitempty"`
+	RiderPhone            string      `json:"rider_phone,omitempty"`
 }
 
 // CreateOrderRequest is the payload for creating a new order
@@ -75,9 +83,14 @@ type CreateOrderItemReq struct {
 
 // OutboxEvent represents an event to be published asynchronously
 type OutboxEvent struct {
-	ID          int64  `json:"id"`
-	AggregateID string `json:"aggregate_id"`
-	Topic       string `json:"topic"`
-	Payload     []byte `json:"payload"`
-	Status      string `json:"status"`
+	ID           int64      `json:"id"`
+	AggregateID  string     `json:"aggregate_id"`
+	Topic        string     `json:"topic"`
+	Payload      []byte     `json:"payload"`
+	Status       string     `json:"status"`
+	RetryCount   int        `json:"retry_count"`
+	ErrorMessage string     `json:"error_message"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	ProcessedAt  *time.Time `json:"processed_at,omitempty"`
 }

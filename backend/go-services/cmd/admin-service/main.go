@@ -535,6 +535,193 @@ func main() {
 			}
 			c.JSON(http.StatusOK, gin.H{"heatmap": heatmap})
 		})
+
+		// ── Vendor Payout Management ────────────────────────────
+		adminRoutes.GET("/finance/vendor-payouts", func(c *gin.Context) {
+			statusFilter := c.DefaultQuery("status", "all")
+			limit, offset := parsePagination(c)
+			ctx := c.Request.Context()
+
+			countQuery := `SELECT COUNT(*) FROM vendor_payouts`
+			whereClause := ""
+			args := []interface{}{}
+			if statusFilter != "all" {
+				whereClause = " WHERE status = $1"
+				args = append(args, statusFilter)
+			}
+			var total int
+			_ = dbPool.QueryRow(ctx, countQuery+whereClause, args...).Scan(&total)
+
+			query := `
+				SELECT id::text, vendor_tracking_id, amount, COALESCE(method, 'bank_transfer'),
+					   status, COALESCE(reference, ''), COALESCE(batch_id, ''),
+					   created_at, COALESCE(completed_at, '0001-01-01T00:00:00Z')
+				FROM vendor_payouts
+			` + whereClause + ` ORDER BY created_at DESC LIMIT $` + strconv.Itoa(len(args)+1) + ` OFFSET $` + strconv.Itoa(len(args)+2)
+			args = append(args, limit, offset)
+
+			rows, err := dbPool.Query(ctx, query, args...)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			defer rows.Close()
+
+			type PayoutRecord struct {
+				ID               string  `json:"id"`
+				VendorTrackingID string  `json:"vendor_tracking_id"`
+				Amount           float64 `json:"amount"`
+				Method           string  `json:"method"`
+				Status           string  `json:"status"`
+				Reference        string  `json:"reference"`
+				BatchID          string  `json:"batch_id"`
+				CreatedAt        string  `json:"created_at"`
+				CompletedAt      string  `json:"completed_at"`
+			}
+			var payouts []PayoutRecord
+			for rows.Next() {
+				var p PayoutRecord
+				if err := rows.Scan(&p.ID, &p.VendorTrackingID, &p.Amount, &p.Method, &p.Status, &p.Reference, &p.BatchID, &p.CreatedAt, &p.CompletedAt); err != nil {
+					continue
+				}
+				payouts = append(payouts, p)
+			}
+			c.JSON(http.StatusOK, gin.H{"payouts": payouts, "total": total, "limit": limit, "offset": offset})
+		})
+
+		adminRoutes.POST("/finance/vendor-payouts/:id/approve", func(c *gin.Context) {
+			payoutID := c.Param("id")
+			_, err := dbPool.Exec(c.Request.Context(),
+				`UPDATE vendor_payouts SET status = 'approved', updated_at = NOW() WHERE id = $1 AND status = 'pending'`, payoutID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"status": "approved", "payout_id": payoutID})
+		})
+
+		adminRoutes.POST("/finance/vendor-payouts/:id/reject", func(c *gin.Context) {
+			payoutID := c.Param("id")
+			_, err := dbPool.Exec(c.Request.Context(),
+				`UPDATE vendor_payouts SET status = 'rejected', updated_at = NOW() WHERE id = $1 AND status = 'pending'`, payoutID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"status": "rejected", "payout_id": payoutID})
+		})
+
+		// ── Stripe Webhook Events (audit trail) ─────────────────
+		adminRoutes.GET("/finance/stripe-events", func(c *gin.Context) {
+			limit, offset := parsePagination(c)
+			ctx := c.Request.Context()
+
+			var total int
+			_ = dbPool.QueryRow(ctx, `SELECT COUNT(*) FROM stripe_events`).Scan(&total)
+
+			rows, err := dbPool.Query(ctx, `
+				SELECT id::text, stripe_event_id, event_type, order_id, payment_intent_id,
+					   processed_at IS NULL as is_unprocessed, process_error, received_at
+				FROM stripe_events ORDER BY received_at DESC LIMIT $1 OFFSET $2`, limit, offset)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			defer rows.Close()
+
+			type StripeEvent struct {
+				ID               string  `json:"id"`
+				StripeEventID    string  `json:"stripe_event_id"`
+				EventType        string  `json:"event_type"`
+				OrderID          *string `json:"order_id"`
+				PaymentIntentID  *string `json:"payment_intent_id"`
+				IsUnprocessed    bool    `json:"is_unprocessed"`
+				ProcessError     *string `json:"process_error"`
+				ReceivedAt       string  `json:"received_at"`
+			}
+			var events []StripeEvent
+			for rows.Next() {
+				var e StripeEvent
+				if err := rows.Scan(&e.ID, &e.StripeEventID, &e.EventType, &e.OrderID, &e.PaymentIntentID, &e.IsUnprocessed, &e.ProcessError, &e.ReceivedAt); err != nil {
+					continue
+				}
+				events = append(events, e)
+			}
+			c.JSON(http.StatusOK, gin.H{"events": events, "total": total})
+		})
+
+		// ── Customer Saved Cards (fraud audit) ─────────────────
+		adminRoutes.GET("/payments/cards/:customer_id", func(c *gin.Context) {
+			customerID := c.Param("customer_id")
+			rows, err := dbPool.Query(c.Request.Context(), `
+				SELECT card_id, gateway, card_brand, last_four, expiry_month, expiry_year,
+					   COALESCE(cardholder_name, ''), is_default, created_at
+				FROM customer_saved_cards WHERE customer_tracking_id = $1 ORDER BY is_default DESC, created_at DESC`, customerID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			defer rows.Close()
+
+			type CardRecord struct {
+				CardID          string `json:"card_id"`
+				Gateway         string `json:"gateway"`
+				CardBrand       string `json:"card_brand"`
+				LastFour        string `json:"last_four"`
+				ExpiryMonth     string `json:"expiry_month"`
+				ExpiryYear      string `json:"expiry_year"`
+				CardholderName  string `json:"cardholder_name"`
+				IsDefault       bool   `json:"is_default"`
+				CreatedAt       string `json:"created_at"`
+			}
+			var cards []CardRecord
+			for rows.Next() {
+				var cr CardRecord
+				if err := rows.Scan(&cr.CardID, &cr.Gateway, &cr.CardBrand, &cr.LastFour, &cr.ExpiryMonth, &cr.ExpiryYear, &cr.CardholderName, &cr.IsDefault, &cr.CreatedAt); err != nil {
+					continue
+				}
+				cards = append(cards, cr)
+			}
+			c.JSON(http.StatusOK, gin.H{"cards": cards, "customer_id": customerID})
+		})
+
+		// ── Rider GPS Trail (ride safety audit) ─────────────────
+		adminRoutes.GET("/riders/:rider_id/gps-trail", func(c *gin.Context) {
+			riderID := c.Param("rider_id")
+			hoursAgo, _ := strconv.Atoi(c.DefaultQuery("hours", "24"))
+			if hoursAgo <= 0 || hoursAgo > 168 {
+				hoursAgo = 24
+			}
+
+			rows, err := dbPool.Query(c.Request.Context(), `
+				SELECT latitude, longitude, speed, bearing, battery_pct, created_at
+				FROM rider_location_history
+				WHERE rider_tracking_id = $1 AND created_at > NOW() - INTERVAL '1 hour' * $2
+				ORDER BY created_at ASC`, riderID, hoursAgo)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			defer rows.Close()
+
+			type GPSPoint struct {
+				Latitude    float64 `json:"latitude"`
+				Longitude   float64 `json:"longitude"`
+				Speed       *float64 `json:"speed"`
+				Bearing     *float64 `json:"bearing"`
+				BatteryPct  *int    `json:"battery_pct"`
+				Timestamp   string  `json:"timestamp"`
+			}
+			var trail []GPSPoint
+			for rows.Next() {
+				var p GPSPoint
+				if err := rows.Scan(&p.Latitude, &p.Longitude, &p.Speed, &p.Bearing, &p.BatteryPct, &p.Timestamp); err != nil {
+					continue
+				}
+				trail = append(trail, p)
+			}
+			c.JSON(http.StatusOK, gin.H{"trail": trail, "rider_id": riderID, "hours": hoursAgo})
+		})
 	}
 
 	// ── Health check (public) ────────────────────────────────────

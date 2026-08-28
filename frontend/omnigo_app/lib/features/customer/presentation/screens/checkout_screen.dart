@@ -196,7 +196,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           } catch (e) {
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Payment cancelled or failed')),
+                SnackBar(
+                  content: Text('Payment failed: ${e.toString()}. Your order has been automatically cancelled.'),
+                  duration: const Duration(seconds: 5),
+                  backgroundColor: Colors.red,
+                ),
               );
             }
             return;
@@ -268,9 +272,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       );
 
       final trackingId = realOrderTrackingId.toString();
-      await cart.clearCart();
 
       if (!paidConfirmed && mounted) {
+        // Don't clear cart on payment failure — user may want to retry
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Payment is still processing at the bank. Track this order — status updates automatically.'),
@@ -283,6 +287,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         );
         return;
       }
+
+      // Only clear cart after successful payment confirmation
+      await cart.clearCart();
 
       if (mounted) {
         await Navigator.pushAndRemoveUntil(
@@ -559,19 +566,23 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
 /// PF-4: polls order status up to ~45s waiting for the settlement worker to
 /// mark the order paid. Returns true only on confirmed payment states.
+/// Checks both `status` and `payment_status` fields since the backend may
+/// set payment_status independently of the order status.
 Future<bool> _waitForPaymentConfirmation(
   ApiClient apiClient,
   String orderId,
 ) async {
-  const paidStates = {'paid', 'accepted', 'shipped', 'in_transit', 'delivered', 'completed'};
+  const paidStatuses = {'paid', 'accepted', 'shipped', 'in_transit', 'delivered', 'completed'};
+  const failedStatuses = {'failed', 'cancelled', 'payment_failed', 'refunded'};
   for (var i = 0; i < 15; i++) {
     await Future<void>.delayed(const Duration(seconds: 3));
     try {
       final resp = await apiClient.get('/orders/$orderId');
       if (resp is Map<String, dynamic>) {
-        final st = resp['status']?.toString().toLowerCase();
-        if (st != null && paidStates.contains(st)) return true;
-        if (st == 'failed' || st == 'cancelled') return false;
+        final orderStatus = resp['status']?.toString().toLowerCase() ?? '';
+        final paymentStatus = resp['payment_status']?.toString().toLowerCase() ?? '';
+        if (paidStatuses.contains(orderStatus) || paidStatuses.contains(paymentStatus)) return true;
+        if (failedStatuses.contains(orderStatus) || failedStatuses.contains(paymentStatus)) return false;
       }
     } catch (_) {/* transient network errors — keep polling */}
   }

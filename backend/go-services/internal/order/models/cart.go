@@ -13,12 +13,13 @@ type CartItem struct {
 }
 
 type Cart struct {
-	ID        int64      `json:"id"`
-	UserID    string     `json:"user_id"`  // user_tracking_id
-	StoreID   string     `json:"store_id"` // store_tracking_id (for single-store cart constraint)
-	Items     []CartItem `json:"items,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
+	ID          int64      `json:"id"`
+	UserID      string     `json:"user_id"`  // user_tracking_id
+	StoreID     string     `json:"store_id"` // store_tracking_id (for single-store cart constraint)
+	TotalAmount float64    `json:"total_amount"`
+	Items       []CartItem `json:"items,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 type AddToCartRequest struct {

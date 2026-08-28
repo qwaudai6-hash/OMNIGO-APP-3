@@ -4,20 +4,22 @@ import "time"
 
 // Ride represents a ride-hailing request (Uber/Careem style)
 type Ride struct {
-	ID              int       `json:"id"`
-	TrackingID      string    `json:"tracking_id"` // e.g. RIDE-1234abcd
-	CustomerTrackID string    `json:"customer_tracking_id"`
-	RiderTrackID    string    `json:"rider_tracking_id,omitempty"`
-	VehicleType     string    `json:"vehicle_type"` // e.g. bike, rickshaw, car
-	PickupLat       float64   `json:"pickup_lat"`
-	PickupLng       float64   `json:"pickup_lng"`
-	DropoffLat      float64   `json:"dropoff_lat"`
-	DropoffLng      float64   `json:"dropoff_lng"`
-	Status          string    `json:"status"` // requested, accepted, in_progress, completed
-	AdminCommission float64   `json:"admin_commission"`
-	FareAmount      float64   `json:"fare_amount"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID                   int       `json:"id"`
+	TrackingID           string    `json:"tracking_id"` // e.g. RIDE-1234abcd
+	CustomerTrackID      string    `json:"customer_tracking_id"`
+	RiderTrackID         string    `json:"rider_tracking_id,omitempty"`
+	VehicleType          string    `json:"vehicle_type"` // e.g. bike, rickshaw, car
+	PickupLat            float64   `json:"pickup_lat"`
+	PickupLng            float64   `json:"pickup_lng"`
+	DropoffLat           float64   `json:"dropoff_lat"`
+	DropoffLng           float64   `json:"dropoff_lng"`
+	Status               string    `json:"status"` // requested, accepted, in_progress, completed
+	AdminCommission      float64   `json:"admin_commission"`
+	FareAmount           float64   `json:"fare_amount"`
+	ActualDistanceMeters float64   `json:"actual_distance_meters,omitempty"`
+	ActualDurationSecs  float64   `json:"actual_duration_seconds,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 // RequestRidePayload is used when a customer requests a ride

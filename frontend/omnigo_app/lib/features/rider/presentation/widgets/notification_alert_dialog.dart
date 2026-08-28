@@ -83,6 +83,13 @@ class NotificationAlertDialogState extends State<NotificationAlertDialog> {
               "Earning: PKR ${widget.gigData['rider_earning']}",
               style: const TextStyle(fontSize: 18, color: Colors.green, fontWeight: FontWeight.w600),
             ),
+            if (widget.gigData['delivery_fee'] != null) ...[
+              const SizedBox(height: 6),
+              Text(
+                "Delivery Fee: PKR ${widget.gigData['delivery_fee']}",
+                style: TextStyle(fontSize: 14, color: Colors.grey.shade600, fontWeight: FontWeight.w500),
+              ),
+            ],
             const SizedBox(height: 20),
             Text(
               "00:${_secondsLeft.toString().padLeft(2, '0')}",

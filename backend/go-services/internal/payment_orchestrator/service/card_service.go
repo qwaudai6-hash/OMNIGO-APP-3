@@ -13,9 +13,11 @@ import (
 
 // SavedCard represents a PCI-compliant tokenized customer payment card.
 type SavedCard struct {
+	ID                 int64     `json:"id"`
 	CardID             string    `json:"card_id"`
 	CustomerTrackingID string    `json:"customer_tracking_id"`
 	Gateway            string    `json:"gateway"`
+	InstrumentToken    string    `json:"instrument_token,omitempty"`
 	CardBrand          string    `json:"card_brand"` // visa, mastercard, paypak, unionpay
 	LastFour           string    `json:"last_four"`  // e.g. "4242"
 	ExpiryMonth        string    `json:"expiry_month"`
@@ -23,6 +25,7 @@ type SavedCard struct {
 	CardholderName     string    `json:"cardholder_name,omitempty"`
 	IsDefault          bool      `json:"is_default"`
 	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 // CardVaultService manages customer tokenized cards securely.

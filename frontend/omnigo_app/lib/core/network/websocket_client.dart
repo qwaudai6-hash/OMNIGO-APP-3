@@ -37,6 +37,17 @@ class WSHealthSnapshot {
 ///     mobile (doze mode drops idle sockets).
 ///   - Bounded reconnect attempts with full-jitter backoff, cap from
 ///     ws_config.wsMaxBackoff.
+///
+/// Production-grade additions (Session 66):
+///   - **Message Queue (Offline Buffer)**: Outbound messages are buffered
+///     while the socket is disconnected and flushed automatically on
+///     reconnect. Bounded to wsMaxOutboxSize; oldest messages dropped first.
+///   - **Topic Multiplexing**: Logical channels over the single physical
+///     connection. Call `topicStream('orders')` to get a stream filtered
+///     to messages with `{"topic": "orders", ...}`. Messages without a
+///     `topic` field are broadcast to all listeners (backward compatible).
+///   - **Backpressure (Throttle)**: Per-topic emission throttle prevents
+///     UI flooding when the server pushes bursts of telemetry frames.
 class WebSocketClient {
   WebSocketClient() {
     _host = resolveWsHost();
@@ -60,6 +71,30 @@ class WebSocketClient {
   int _heartbeatsMissed = 0;
   DateTime? _lastMessageAt;
   String? _activeToken;
+
+  // ── Message Queue (Offline Buffer) ────────────────────────────────
+  final List<String> _outbox = [];
+  int get outboxLength => _outbox.length;
+  bool get isConnected => _state == WSConnectionState.connected;
+
+  // ── Topic Multiplexing ────────────────────────────────────────────
+  final Map<String, StreamController<dynamic>> _topicControllers = {};
+  final Map<String, DateTime> _topicLastEmit = {};
+
+  /// Returns a stream filtered to messages whose JSON payload contains
+  /// `"topic": [topic]`. Messages without a `topic` field are included
+  /// (backward compatible with existing gateway frames). The stream is
+  /// throttled per-topic to prevent UI flooding.
+  Stream<dynamic> topicStream(String topic) {
+    return _getOrCreateTopicController(topic).stream;
+  }
+
+  StreamController<dynamic> _getOrCreateTopicController(String topic) {
+    return _topicControllers.putIfAbsent(topic, () {
+      final ctrl = StreamController<dynamic>.broadcast();
+      return ctrl;
+    });
+  }
 
   WSConnectionState _state = WSConnectionState.disconnected;
   final StreamController<WSConnectionState> _stateController =
@@ -146,6 +181,9 @@ class WebSocketClient {
                 message.contains('"type":"pong"'))) {
           _heartbeatsMissed = 0;
         }
+
+        // ── Topic Routing ──────────────────────────────────────────
+        _routeToTopicController(message);
       },
       onError: (Object error) {
         debugLog('WebSocket Error: $error');
@@ -167,6 +205,9 @@ class WebSocketClient {
 
     _setState(WSConnectionState.connected);
     _backoffSeconds = 1; // reset backoff after a successful connect
+
+    // ── Flush Outbox ───────────────────────────────────────────────
+    _flushOutbox();
 
     // Send the register handshake so the gateway knows what kind of client
     // we are. For riders we don't need this (legacy path auto-detects via
@@ -277,15 +318,90 @@ class WebSocketClient {
     }
   }
 
-  /// Sends a message to the gateway. No-op if not connected.
-  void sendMessage(String message) {
+  /// Sends a message to the gateway. If disconnected, the message is
+  /// buffered in the outbox and flushed on the next reconnect. Returns
+  /// `true` if the message was sent immediately, `false` if buffered.
+  bool sendMessage(String message) {
     final ch = _channel;
-    if (ch == null) return;
+    if (ch == null || _state != WSConnectionState.connected) {
+      _enqueueOutbox(message);
+      return false;
+    }
     try {
       ch.sink.add(message);
+      return true;
     } catch (_) {
-      // closed; ignore
+      _enqueueOutbox(message);
+      return false;
     }
+  }
+
+  // ── Message Queue (Offline Buffer) ────────────────────────────────
+
+  void _enqueueOutbox(String message) {
+    if (_outbox.length >= wsMaxOutboxSize) {
+      _outbox.removeAt(0); // drop oldest
+    }
+    _outbox.add(message);
+  }
+
+  void _flushOutbox() {
+    if (_outbox.isEmpty) return;
+    final ch = _channel;
+    if (ch == null) return;
+    final pending = List<String>.from(_outbox);
+    _outbox.clear();
+    for (final msg in pending) {
+      try {
+        ch.sink.add(msg);
+      } catch (_) {
+        // Re-queue remaining messages on failure.
+        _outbox.addAll(pending.sublist(pending.indexOf(msg)));
+        break;
+      }
+    }
+  }
+
+  // ── Topic Multiplexing + Backpressure ─────────────────────────────
+
+  /// Routes an incoming message to the appropriate topic controller.
+  /// Messages with a `"topic"` field go to that specific controller.
+  /// Messages without a `"topic"` are broadcast to ALL topic controllers
+  /// (backward compatible with existing gateway frames that lack topics).
+  void _routeToTopicController(dynamic message) {
+    if (message is! String) return;
+    Map<String, dynamic>? frame;
+    try {
+      frame = jsonDecode(message) as Map<String, dynamic>;
+    } catch (_) {
+      return;
+    }
+    final topic = frame['topic'] as String?;
+
+    if (topic != null && topic.isNotEmpty) {
+      // Targeted delivery to the specific topic.
+      _emitToTopic(topic, message);
+    } else {
+      // Untyped frame — broadcast to all registered topics (backward compat).
+      for (final t in _topicControllers.keys) {
+        _emitToTopic(t, message);
+      }
+    }
+  }
+
+  /// Emits a message to a topic controller, subject to per-topic throttle.
+  void _emitToTopic(String topic, dynamic message) {
+    final ctrl = _topicControllers[topic];
+    if (ctrl == null || ctrl.isClosed) return;
+
+    // Backpressure: skip if within throttle interval.
+    final now = DateTime.now();
+    final last = _topicLastEmit[topic];
+    if (last != null && now.difference(last) < wsThrottleInterval) {
+      return;
+    }
+    _topicLastEmit[topic] = now;
+    ctrl.add(message);
   }
 
   /// Cleanly disconnects and stops any reconnection attempts.
@@ -331,5 +447,9 @@ class WebSocketClient {
     }
     await _stateController.close();
     await _healthController.close();
+    for (final ctrl in _topicControllers.values) {
+      if (!ctrl.isClosed) await ctrl.close();
+    }
+    _topicControllers.clear();
   }
 }

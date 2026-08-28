@@ -95,6 +95,7 @@ func main() {
 	consumerCtx, cancelConsumer := context.WithCancel(context.Background())
 	defer cancelConsumer()
 	go gw.StartConsuming(consumerCtx)
+	go gw.StartOrderStatusConsuming(consumerCtx)
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})

@@ -108,7 +108,7 @@ func (h *WalletHandler) PayFastCharge(c *gin.Context) {
 		baseURL = os.Getenv("PAYFAST_API_URL")
 	}
 	if baseURL == "" {
-		baseURL = "https://sandbox.payfast.co.za"
+		baseURL = "https://ipguat.apps.net.pk/Ecommerce/api/Transaction"
 	}
 	// Return URL: explicit WALLET_RETURN_URL wins, else build from PUBLIC_BASE_URL.
 	// Never assume any deployment domain in code — an unreachable/foreign success_url

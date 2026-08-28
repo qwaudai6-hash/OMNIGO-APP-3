@@ -6,6 +6,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/network/websocket_client.dart';
+import '../../../../core/di/service_locator.dart';
 import '../../../../core/services/session_registry.dart';
 import '../../../shared/presentation/widgets/map_libre_map_widget.dart';
 
@@ -60,9 +61,12 @@ class VendorLiveMapScreenState extends State<VendorLiveMapScreen> {
       ValueNotifier<Map<String, MarkerData>>({});
   final Map<String, int> _markerTimestamps = {};
 
-  // Connected real WebSocket Client querying Port 8087 gateway
-  final WebSocketClient _wsClient = WebSocketClient();
+  // FIXED: Use singleton WebSocketClient from GetIt DI (not a new instance).
+  // Creating a separate instance caused vendor dashboard + live map to have
+  // 2 WebSocket connections, breaking message routing for the live map.
+  late final WebSocketClient _wsClient = sl<WebSocketClient>();
   StreamSubscription<dynamic>? _streamSubscription;
+  StreamSubscription<dynamic>? _telemetryTopicSub;
   StreamSubscription<WSConnectionState>? _stateSub;
   Timer? _stalePruneTimer;
 
@@ -85,12 +89,17 @@ class VendorLiveMapScreenState extends State<VendorLiveMapScreen> {
         clientType: 'vendor',
         trackingId: SessionRegistry.instance.trackingId ?? '',
       );
-      _streamSubscription = _wsClient.stream.listen((rawJsonPayload) {
+
+      // ── Topic Stream: Rider Telemetry ─────────────────────────────
+      // Throttled topic stream prevents UI flooding when multiple riders
+      // push location updates simultaneously. Backward compatible:
+      // untagged gateway frames are broadcast to all topic controllers.
+      _telemetryTopicSub = _wsClient.topicStream('telemetry').listen((rawJsonPayload) {
         if (rawJsonPayload is String) {
           _processIncomingTelemetryFrame(rawJsonPayload);
         }
       }, onError: (Object err) {
-        debugPrint("[WebSocket Connection Error]: $err");
+        debugPrint("[WebSocket Telemetry Error]: $err");
       },);
 
       // Surface connection state changes to the UI overlay.
@@ -290,8 +299,9 @@ class VendorLiveMapScreenState extends State<VendorLiveMapScreen> {
   void dispose() {
     _stalePruneTimer?.cancel();
     _streamSubscription?.cancel();
+    _telemetryTopicSub?.cancel();
     _stateSub?.cancel();
-    _wsClient.disconnect();
+    // Do NOT call _wsClient.disconnect() — singleton persists across screens.
     _liveMarkersNotifier.dispose();
     super.dispose();
   }

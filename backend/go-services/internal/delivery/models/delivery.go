@@ -41,6 +41,10 @@ type DeliveryGig struct {
 	DeliveryPhotoURL        string    `json:"delivery_photo_url,omitempty"`
 	CustomerDisputePhotoURL string    `json:"customer_dispute_photo_url,omitempty"`
 	DisputeStatus           string    `json:"dispute_status,omitempty"` // none, disputed, resolved_rider_guilty, resolved_vendor_guilty
+	ProofOfDeliveryURL      string    `json:"proof_of_delivery_url,omitempty"`
+	ProofOfDeliveryType     string    `json:"proof_of_delivery_type,omitempty"` // photo, signature, pin
+	CancelReason            string    `json:"cancel_reason,omitempty"`
+	DeliveryFee             float64   `json:"delivery_fee"`
 	CreatedAt               time.Time `json:"created_at"`
 	UpdatedAt               time.Time `json:"updated_at"`
 }

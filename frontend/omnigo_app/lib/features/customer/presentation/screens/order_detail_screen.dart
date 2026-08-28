@@ -179,7 +179,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   Future<void> _requestRefundOrCancel() async {
     final reasonController = TextEditingController();
     final status = (_currentOrder['status'] ?? 'pending').toString().toLowerCase();
-    final canCancel = ['pending', 'accepted', 'picked_up'].contains(status);
+    final canCancel = ['pending', 'paid', 'accepted', 'shipped', 'in_transit', 'picked_up'].contains(status);
     final canRefund = ['completed', 'delivered'].contains(status);
 
     final action = await showDialog<String>(
@@ -493,8 +493,16 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     final productIds = (_currentOrder['product_tracking_ids'] as List<dynamic>?) ?? <dynamic>[];
     final otpCode = _currentOrder['otp_code']?.toString();
     final paymentGateway = _currentOrder['payment_gateway']?.toString();
+    final paymentStatus = (_currentOrder['payment_status'] ?? 'pending').toString().toLowerCase();
     final deliveryType = _currentOrder['delivery_type']?.toString();
     final disputeStatus = _currentOrder['dispute_status']?.toString() ?? 'none';
+    final adminCommission = (_currentOrder['admin_commission'] as num?)?.toDouble() ?? 0.0;
+    final vendorEscrow = (_currentOrder['vendor_escrow'] as num?)?.toDouble() ?? 0.0;
+    final deliveryEscrow = (_currentOrder['delivery_escrow'] as num?)?.toDouble() ?? 0.0;
+    final handoverPhotoUrl = _currentOrder['handover_photo_url']?.toString();
+    final handoverAt = _currentOrder['handover_at']?.toString();
+    final handoverNotes = _currentOrder['handover_notes']?.toString();
+    final handedByTrackingId = _currentOrder['handed_over_by_tracking_id']?.toString();
 
     return Scaffold(
       backgroundColor: AppTheme.bgColor,
@@ -669,7 +677,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
             ],
 
             // ── Refund / Cancel Action (NEW) ──────────────────────────────
-            if (['pending', 'accepted', 'picked_up', 'completed', 'delivered'].contains(status)) ...[
+            if (['pending', 'paid', 'accepted', 'shipped', 'in_transit', 'picked_up', 'completed', 'delivered'].contains(status)) ...[
               SizedBox(
                 width: double.infinity,
                 child: OutlinedButton.icon(
@@ -716,10 +724,32 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
             const Text('Payment', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.blackAccent)),
             const SizedBox(height: 12),
             _buildInfoCard(Icons.attach_money, 'Total Amount', '$currency $total'),
+            _buildInfoCard(Icons.payment_outlined, 'Payment Status', paymentStatus.toUpperCase()),
             if (paymentGateway != null && paymentGateway.isNotEmpty)
-              _buildInfoCard(Icons.payment_outlined, 'Payment Method', paymentGateway),
+              _buildInfoCard(Icons.credit_card_outlined, 'Payment Method', paymentGateway),
             if (deliveryType != null && deliveryType.isNotEmpty)
               _buildInfoCard(Icons.local_shipping_outlined, 'Delivery Type', deliveryType),
+            if (adminCommission > 0) ...[
+              const SizedBox(height: 8),
+              _buildInfoCard(Icons.account_balance_outlined, 'Platform Commission', '$currency ${adminCommission.toStringAsFixed(2)}'),
+              _buildInfoCard(Icons.store_outlined, 'Vendor Earning', '$currency ${vendorEscrow.toStringAsFixed(2)}'),
+              _buildInfoCard(Icons.delivery_dining_outlined, 'Rider Earning', '$currency ${deliveryEscrow.toStringAsFixed(2)}'),
+            ],
+            const SizedBox(height: 24),
+
+            // ── Handover Audit ──────────────────────────────────
+            if (handoverPhotoUrl != null && handoverPhotoUrl.isNotEmpty) ...[
+              const Text('Handover', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.blackAccent)),
+              const SizedBox(height: 12),
+              _buildInfoCard(Icons.camera_alt_outlined, 'Handover Photo', handoverPhotoUrl),
+              if (handoverAt != null && handoverAt.isNotEmpty)
+                _buildInfoCard(Icons.access_time, 'Handover At', handoverAt),
+              if (handedByTrackingId != null && handedByTrackingId.isNotEmpty)
+                _buildInfoCard(Icons.person_outlined, 'Handed Over By', handedByTrackingId),
+              if (handoverNotes != null && handoverNotes.isNotEmpty)
+                _buildInfoCard(Icons.notes_outlined, 'Handover Notes', handoverNotes),
+              const SizedBox(height: 24),
+            ],
             if (otpCode != null && otpCode.isNotEmpty && disputeStatus == 'none' && status != 'completed') ...[
               const SizedBox(height: 16),
               Container(
@@ -855,12 +885,18 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 
   String _statusLabel(String status) {
     switch (status) {
-      case 'pending': return 'Pending';
+      case 'pending': return 'Pending Payment';
+      case 'paid': return 'Paid — Awaiting Store';
       case 'accepted': return 'Accepted by Store';
-      case 'shipped': return 'Shipped — Out for Delivery';
+      case 'shipped': return 'Out for Delivery';
+      case 'in_transit': return 'In Transit';
       case 'delivered':
       case 'completed': return 'Delivered';
       case 'cancelled': return 'Cancelled';
+      case 'failed':
+      case 'payment_failed': return 'Payment Failed';
+      case 'refunded': return 'Refunded';
+      case 'returned': return 'Returned';
       default: return status.toUpperCase();
     }
   }
@@ -868,11 +904,17 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   Color _statusColor(String status) {
     switch (status) {
       case 'pending': return Colors.orange;
+      case 'paid': return Colors.blue;
       case 'accepted': return Colors.blue;
-      case 'shipped': return Colors.purple;
+      case 'shipped':
+      case 'in_transit': return Colors.purple;
       case 'delivered':
       case 'completed': return Colors.green;
       case 'cancelled': return Colors.redAccent;
+      case 'failed':
+      case 'payment_failed': return Colors.red;
+      case 'refunded': return Colors.orange;
+      case 'returned': return Colors.deepOrange;
       default: return Colors.grey;
     }
   }

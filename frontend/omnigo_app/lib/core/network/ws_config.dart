@@ -17,6 +17,16 @@ const Duration wsStaleThreshold = Duration(seconds: 45);
 // How long we wait for the WebSocket handshake before giving up.
 const Duration wsConnectTimeout = Duration(seconds: 10);
 
+// ── Message Queue (Offline Buffer) ──────────────────────────────────
+// Max outbound messages buffered while disconnected. Oldest dropped first.
+const int wsMaxOutboxSize = 50;
+
+// ── Backpressure / Throttling ───────────────────────────────────────
+// Minimum interval between consecutive UI-bound messages on the same
+// topic. Prevents flooding the UI layer when the server pushes bursts
+// of rider telemetry or order status frames.
+const Duration wsThrottleInterval = Duration(milliseconds: 500);
+
 String resolveWsHost() {
   // Check for dart-define override first
   const override = String.fromEnvironment('WS_HOST');

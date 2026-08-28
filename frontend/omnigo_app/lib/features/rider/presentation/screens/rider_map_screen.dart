@@ -51,6 +51,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
   double? _routeEtaMinutes;
   double? _routeDistanceKm;
   StreamSubscription<dynamic>? _wsSubscription;
+  StreamSubscription<dynamic>? _wsGigTopicSub;
   StreamSubscription<Position>? _positionStream;
 
   // Deviation & rerouting states
@@ -240,6 +241,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
     WidgetsBinding.instance.removeObserver(this);
     _connectivitySubscription?.cancel();
     _wsSubscription?.cancel();
+    _wsGigTopicSub?.cancel();
     _positionStream?.cancel();
     _heatmapTimer?.cancel();
     super.dispose();
@@ -548,9 +550,36 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
             );
           }
         }
+        // ORDER_CANCELLED / GIG_CANCELLED handled by topic stream below.
       } catch (e) {
         debugPrint('WS error: $e');
       }
+    });
+
+    // ── Topic Stream: Gig Updates ───────────────────────────────────
+    // Throttled topic stream for gig broadcasts. Backward compatible:
+    // untagged gateway frames are broadcast to all topic controllers.
+    _wsGigTopicSub = _wsClient.topicStream('gigs').listen((message) {
+      try {
+        final data = jsonDecode(message as String) as Map<String, dynamic>;
+        final eventType = (data['action'] as String? ?? data['event'] as String? ?? '').toUpperCase();
+        if (eventType == 'ORDER_CANCELLED' || eventType == 'GIG_CANCELLED') {
+          if (mounted && _activeGigStatus != 'No Active Gig') {
+            final orderId = data['order_id']?.toString() ?? '';
+            setState(() {
+              _activeGigStatus = 'No Active Gig';
+              _broadcastedGig = null;
+            });
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Order ${orderId.isNotEmpty ? orderId : ""} has been cancelled. Looking for new deliveries...'),
+                backgroundColor: Colors.orange,
+                duration: const Duration(seconds: 4),
+              ),
+            );
+          }
+        }
+      } catch (_) {}
     });
   }
 
@@ -824,11 +853,16 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
 
     try {
       if (nextStatus == 'ride_completed') {
+        final backendDistanceMeters = (_broadcastedGig!['actual_distance_meters'] as num?)?.toDouble();
+        final backendDurationSecs = (_broadcastedGig!['actual_duration_seconds'] as num?)?.toDouble();
+        final distanceMeters = backendDistanceMeters ?? (_routeDistanceKm ?? 0) * 1000;
+        final durationSecs = backendDurationSecs ?? (_routeEtaMinutes ?? 0) * 60;
+
         await _apiClient.post(ApiEndpoints.rideComplete(rideId), {
           "rider_tracking_id": widget.trackingId,
           "final_fare": ((_broadcastedGig!['fare_amount'] as num?) ?? 0).toDouble(),
-          "distance_meters": (_routeDistanceKm ?? 0) * 1000,
-          "duration_seconds": (_routeEtaMinutes ?? 0) * 60,
+          "distance_meters": distanceMeters,
+          "duration_seconds": durationSecs,
           "payment_method": "cash",
         });
         if (mounted) {
@@ -1404,7 +1438,8 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      'Store: ${_broadcastedGig!['vendor_store_tracking_id']}\nOrder: ${_broadcastedGig!['order_tracking_id']}\nEarning: Rs. ${_broadcastedGig!['rider_earning']}',
+                      'Store: ${_broadcastedGig!['vendor_store_tracking_id']}\nOrder: ${_broadcastedGig!['order_tracking_id']}\nEarning: Rs. ${_broadcastedGig!['rider_earning']}'
+                      '${_broadcastedGig!['delivery_fee'] != null ? '\nDelivery Fee: Rs. ${_broadcastedGig!['delivery_fee']}' : ''}',
                       style: const TextStyle(color: Colors.grey, fontSize: 14),
                     ),
                     if (_routeEtaMinutes != null) ...[

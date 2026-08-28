@@ -12,18 +12,14 @@ import (
 
 // Client handles all interaction with PayFast Pakistan gateway.
 //
-// NOTE: PayFast issues TWO distinct secrets at onboarding:
-//   - securedKey: used ONLY to fetch the OAuth access token (POST /token, "secured_key" field).
-//   - hashKey:    a SEPARATE "Hash Key" used ONLY as the HMAC-SHA256 secret for computing
-//     "secured_hash" on /customer/validate, /transaction, /transaction/token,
-//     /transaction/tokenized, etc. Per the official docs: "A key will be provided
-//     separately for the hash calculation." These two values are NOT interchangeable —
-//     signing with securedKey instead of hashKey produces a hash PayFast's server will
-//     never match, which is why they flagged "merchant secret not included in the hash".
+// Per PayFast's official clarification: "Use the PayFast Secured Key for secured_hash.
+// No separate HASH_KEY is required." The same SECURED_KEY is used for both OAuth
+// token fetch AND HMAC-SHA256 signing of secured_hash on all API requests.
+// PAYFAST_HASH_KEY is optional — if not set, SECURED_KEY is used for everything.
 type Client struct {
 	merchantID     string
 	securedKey     string
-	hashKey        string
+	hashKey        string   // optional override; defaults to securedKey if empty
 	merchantName   string
 	baseURL        string
 	successURL     string
@@ -69,13 +65,9 @@ func NewClient(merchantID, securedKey, hashKey, merchantName, baseURL string) *C
 	cb := NewCircuitBreaker(5, 10*time.Second)
 	tokenCb := NewCircuitBreaker(5, 10*time.Second)
 	if hashKey == "" && securedKey != "" && baseURL != "" {
-		// PayFast issues the Hash Key as a SEPARATE secret from the Secured Key. Signing
-		// with the securedKey instead produces hashes PayFast's server will never match,
-		// so this fallback almost certainly means a misconfigured deployment — make it
-		// impossible to miss in logs instead of failing silently at first payment.
-		log.Printf("WARNING: [payfast] PAYFAST_HASH_KEY is not set — falling back to PAYFAST_SECURED_KEY for HMAC signing. " +
-			"Per PayFast onboarding these are two DIFFERENT secrets; if signatures fail with 'merchant secret not included in the hash', " +
-			"set PAYFAST_HASH_KEY to the separate Hash Key issued by PayFast.")
+		// PayFast: "Use the PayFast Secured Key for secured_hash. No separate HASH_KEY is required."
+		// The same SECURED_KEY is used for both OAuth token and HMAC signing.
+		log.Printf("INFO: [payfast] PAYFAST_HASH_KEY not set — using PAYFAST_SECURED_KEY for HMAC signing (per PayFast spec, no separate hash key needed)")
 		hashKey = securedKey
 	}
 
@@ -134,6 +126,17 @@ func (c *Client) CircuitBreaker() *CircuitBreaker {
 // (Merchant ID + Secured Key alone are useless without an endpoint to call.)
 func (c *Client) IsConfigured() bool {
 	return c.merchantID != "" && c.securedKey != "" && c.baseURL != ""
+}
+
+// BaseURL returns the configured gateway base URL so callers can detect the
+// gateway variant (e.g. apps.net.pk vs gopayfast.com) and choose the right flow.
+func (c *Client) BaseURL() string {
+	return c.baseURL
+}
+
+// MerchantID returns the configured merchant ID for building hosted checkout URLs.
+func (c *Client) MerchantID() string {
+	return c.merchantID
 }
 
 // VerifyIPNHash verifies the integrity hash PayFast attaches to Instant Payment Notification (IPN)

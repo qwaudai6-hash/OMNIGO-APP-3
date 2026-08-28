@@ -84,6 +84,10 @@ func main() {
 	// 4. Start Background Kafka Consumer
 	go svc.StartKafkaConsumer(context.Background())
 
+	// Start Gig Timeout Worker — reaps gigs stuck in broadcasting > 5 minutes
+	gigTimeoutWorker := service.NewGigTimeoutWorker(db.Writer, rdb, kafkaClient.Client)
+	go gigTimeoutWorker.Start(context.Background())
+
 	// 5. Setup Router
 	router := gin.Default()
 	router.Use(sentrygin.New(sentrygin.Options{Repanic: true}))

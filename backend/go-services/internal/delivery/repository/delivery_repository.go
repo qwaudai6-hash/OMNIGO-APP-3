@@ -193,6 +193,21 @@ func (r *DeliveryRepository) AcceptGigWithEligibility(ctx context.Context, track
 		return fmt.Errorf("conflict: gig is no longer available (status: %s)", currentStatus)
 	}
 
+	// CRITICAL: Verify the parent order has been paid before assigning a rider.
+	// Without this check, a rider could be dispatched for an unpaid order
+	// (race condition: order created → gig broadcast → rider accepts → payment fails).
+	var orderPaymentStatus string
+	err = tx.QueryRow(ctx,
+		`SELECT COALESCE(payment_status, '') FROM orders WHERE order_tracking_id = $1`,
+		orderTrackingID,
+	).Scan(&orderPaymentStatus)
+	if err != nil {
+		return fmt.Errorf("failed to verify order payment status: %v", err)
+	}
+	if orderPaymentStatus != "paid" && orderPaymentStatus != "settlement_pending" {
+		return fmt.Errorf("conflict: order payment not confirmed (status: %s). Rider assignment blocked", orderPaymentStatus)
+	}
+
 	if pickupLat == nil || pickupLng == nil {
 		return fmt.Errorf("conflict: gig has no pickup coordinates")
 	}
@@ -478,8 +493,8 @@ func (r *DeliveryRepository) ResolveDispute(ctx context.Context, trackingID stri
 // RecordCODDebt inserts a pending debt for the rider for the COD amount.
 func (r *DeliveryRepository) RecordCODDebt(ctx context.Context, orderTrackingID, riderTrackingID string, amount float64) error {
 	query := `
-		INSERT INTO cod_debts (id, order_tracking_id, rider_tracking_id, amount_owed, status)
-		SELECT gen_random_uuid(), $1, $2, $3, 'pending'
+		INSERT INTO cod_debts (id, order_tracking_id, rider_tracking_id, amount, amount_owed, status)
+		SELECT gen_random_uuid(), $1, $2, $3, $3, 'pending'
 		WHERE NOT EXISTS (
 			SELECT 1 FROM cod_debts d
 			WHERE d.order_tracking_id = $1 AND d.status IN ('pending', 'settled')
@@ -490,11 +505,20 @@ func (r *DeliveryRepository) RecordCODDebt(ctx context.Context, orderTrackingID,
 }
 
 // CancelDeliveryForOrder cancels any pending or broadcasting delivery gig for a given order
-func (r *DeliveryRepository) CancelDeliveryForOrder(ctx context.Context, orderTrackingID string) error {
+func (r *DeliveryRepository) CancelDeliveryForOrder(ctx context.Context, orderTrackingID string, cancelReason string) error {
+	if cancelReason != "" {
+		query := `
+			UPDATE deliveries 
+			SET status = 'cancelled', cancel_reason = $2, updated_at = NOW()
+			WHERE order_tracking_id = $1 AND status IN ('broadcasting', 'accepted')
+		`
+		_, err := r.writer.Exec(ctx, query, orderTrackingID, cancelReason)
+		return err
+	}
 	query := `
 		UPDATE deliveries 
 		SET status = 'cancelled', updated_at = NOW()
-		WHERE order_tracking_id = $1 AND status IN ('pending', 'broadcasting')
+		WHERE order_tracking_id = $1 AND status IN ('broadcasting', 'accepted')
 	`
 	_, err := r.writer.Exec(ctx, query, orderTrackingID)
 	return err
@@ -562,8 +586,8 @@ func (r *DeliveryRepository) SettleCODVendorAndDebt(ctx context.Context, orderTr
 
 	// CLAIM-3: rider now holds this cash — record the debt once.
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO cod_debts (id, order_tracking_id, rider_tracking_id, amount_owed, status)
-		SELECT gen_random_uuid(), $1, $2, $3, 'pending'
+		INSERT INTO cod_debts (id, order_tracking_id, rider_tracking_id, amount, amount_owed, status)
+		SELECT gen_random_uuid(), $1, $2, $3, $3, 'pending'
 		WHERE NOT EXISTS (
 			SELECT 1 FROM cod_debts d
 			WHERE d.order_tracking_id = $1 AND d.status IN ('pending', 'settled')

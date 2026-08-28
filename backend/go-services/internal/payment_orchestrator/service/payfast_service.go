@@ -118,9 +118,10 @@ func (req *PaymentRequest) Validate() error {
 
 // PaymentResponse represents the immediate response from payment initiation.
 type PaymentResponse struct {
-	Status        string `json:"status"` // 3ds_redirect | settlement_pending | failed | gateway_pending
+	Status        string `json:"status"` // 3ds_redirect | settlement_pending | failed | gateway_pending | hosted_redirect
 	Action        string `json:"action,omitempty"`
 	ThreeDSHtml   string `json:"threed_html,omitempty"`
+	RedirectURL   string `json:"redirect_url,omitempty"`
 	OrderID       string `json:"order_id"`
 	TransactionID string `json:"transaction_id"`
 	Message       string `json:"message,omitempty"`
@@ -502,6 +503,41 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("failed to commit initial payment attempt: %w", err)
+	}
+
+	// ── Hosted Checkout Redirect (apps.net.pk) ─────────────────────────────
+	// apps.net.pk does NOT expose /transaction/token — only hosted checkout via
+	// /Transaction/PostTransaction. Detect the gateway variant and redirect the
+	// customer to PayFast's hosted payment page instead of calling the token API.
+	if strings.Contains(s.payfast.BaseURL(), "apps.net.pk") {
+		publicBase := strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/")
+		returnURL := os.Getenv("WALLET_RETURN_URL")
+		if returnURL == "" && publicBase != "" {
+			returnURL = publicBase + "/api/v1/payments/payfast/ipn"
+		}
+		if returnURL == "" {
+			returnURL = s.checkoutURL
+		}
+
+		hostedURL := fmt.Sprintf(
+			"%s/Transaction/PostTransaction?merchant_id=%s&basket_id=%s&txnamt=%.2f&currency_code=PKR&customer_mobile_no=%s&customer_email_address=&success_url=%s&checkout_url=%s",
+			strings.TrimRight(s.payfast.BaseURL(), "/"),
+			url.QueryEscape(s.payfast.MerchantID()),
+			url.QueryEscape(req.OrderID),
+			expectedAmount,
+			url.QueryEscape(authoritativeMobile),
+			url.QueryEscape(returnURL),
+			url.QueryEscape(returnURL),
+		)
+
+		log.Printf("[PayFastService] apps.net.pk detected — returning hosted redirect for order %s (txn %s)", req.OrderID, internalTxnID)
+		return &PaymentResponse{
+			Status:        "hosted_redirect",
+			RedirectURL:   hostedURL,
+			OrderID:       req.OrderID,
+			TransactionID: internalTxnID,
+			Message:       "Redirecting to PayFast hosted checkout",
+		}, nil
 	}
 
 	// ── Saved Card 1-Click Checkout Flow ───────────────────────────────────

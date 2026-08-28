@@ -73,6 +73,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   // ── Live Rider Tracking (WebSocket telemetry) ────────────────────
   WebSocketClient? _wsClient;
   StreamSubscription<dynamic>? _wsSub;
+  StreamSubscription<dynamic>? _wsOrderTopicSub;
   StreamSubscription<WSConnectionState>? _wsStateSub;
   // riderTrackingId → latest LatLng, broadcast so Map tab rebuilds only
   // the marker layer without touching the rest of the dashboard.
@@ -260,6 +261,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   void dispose() {
     _searchDebounce?.cancel();
     _wsSub?.cancel();
+    _wsOrderTopicSub?.cancel();
     _wsStateSub?.cancel();
     _wsClient?.disconnect();
     _riderMarkers.dispose();
@@ -376,6 +378,8 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         final frame = jsonDecode(raw) as Map<String, dynamic>;
         // Skip chat frames — the ChatService handles those.
         if (frame['action'] == 'CHAT_MESSAGE') return;
+
+        // Handle rider telemetry for live map
         final riderId = frame['rider_id']?.toString() ??
             frame['rider_tracking_id']?.toString() ??
             '';
@@ -397,6 +401,39 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     _wsStateSub = _wsClient!.stateStream.listen((s) {
       debugPrint('[Customer WS State]: $s');
     });
+
+    // ── Topic Stream: Order Status Updates ──────────────────────────
+    // Uses throttled topic stream to prevent UI flooding when server
+    // pushes bursts of order status frames. Backward compatible:
+    // untagged gateway frames are broadcast to all topic controllers.
+    _wsOrderTopicSub = _wsClient!.topicStream('orders').listen((raw) {
+      if (raw is! String) return;
+      try {
+        final frame = jsonDecode(raw) as Map<String, dynamic>;
+        if (frame['action'] == 'ORDER_STATUS_UPDATED') {
+          final orderId = frame['order_id']?.toString() ?? '';
+          final newStatus = frame['status']?.toString() ?? '';
+          if (orderId.isNotEmpty && newStatus.isNotEmpty) {
+            _applyOrderStatusUpdate(orderId, newStatus);
+          }
+        }
+      } catch (_) {}
+    });
+  }
+
+  /// Applies a real-time order status update received via WebSocket.
+  /// Updates the local order list without requiring an HTTP refresh.
+  void _applyOrderStatusUpdate(String orderId, String newStatus) {
+    if (!mounted) return;
+    setState(() {
+      for (var i = 0; i < _customerOrders.length; i++) {
+        if ((_customerOrders[i]['order_tracking_id']?.toString() ?? _customerOrders[i]['id']?.toString()) == orderId) {
+          _customerOrders[i] = Map<String, dynamic>.from(_customerOrders[i] as Map) ..['status'] = newStatus;
+          break;
+        }
+      }
+    });
+    debugPrint('[OrderWS] Order $orderId status updated to $newStatus (real-time)');
   }
 
   /// Resets pagination and fetches a fresh page from the backend using the
@@ -750,12 +787,13 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
           _isLoadingOrders = false;
         });
 
-        // If any order is currently shipped, open a WebSocket link to
-        // receive live rider GPS telemetry for the Map tab.
-        final hasShipped = _customerOrders.any(
-          (o) => (o['status']?.toString() ?? '') == 'shipped',
+        // Connect WebSocket for any active order to receive real-time
+        // status updates and live rider GPS telemetry.
+        final activeStatuses = {'pending', 'paid', 'accepted', 'shipped', 'in_transit'};
+        final hasActiveOrder = _customerOrders.any(
+          (o) => activeStatuses.contains(o['status']?.toString() ?? ''),
         );
-        if (hasShipped) {
+        if (hasActiveOrder) {
           _connectRiderTelemetry();
         }
       }
@@ -1463,8 +1501,9 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                                 (order['total_amount'] ?? 0.0).toString();
                             final currency = order['currency']?.toString() ?? 'USD';
                             final status = order['status']?.toString() ?? 'pending';
-                            final activeStatuses = {'pending', 'accepted', 'processing', 'shipped'};
+                            final activeStatuses = {'pending', 'paid', 'accepted', 'processing', 'shipped', 'in_transit'};
                             final isActive = activeStatuses.contains(status);
+                            final isCancelled = status == 'cancelled' || status == 'failed' || status == 'payment_failed';
                             return GestureDetector(
                               onTap: () {
                                 Navigator.push(
@@ -1481,6 +1520,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                                 store,
                                 status.toUpperCase(),
                                 isActive,
+                                isCancelled: isCancelled,
                               ),
                             );
                           },
@@ -1493,7 +1533,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   }
 
   Widget _buildTrackingItem(
-      String id, String desc, String storeId, String status, bool isActive,) {
+      String id, String desc, String storeId, String status, bool isActive, {bool isCancelled = false,}) {
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
       padding: const EdgeInsets.all(20),
@@ -1525,7 +1565,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             decoration: BoxDecoration(
-              color: isActive ? AppTheme.limeAccent : Colors.grey.shade200,
+              color: isCancelled ? Colors.red.shade100 : (isActive ? AppTheme.limeAccent : Colors.grey.shade200),
               borderRadius: BorderRadius.circular(20),
             ),
             child: Text(
