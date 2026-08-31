@@ -85,8 +85,12 @@ func main() {
 	go svc.StartKafkaConsumer(context.Background())
 
 	// Start Gig Timeout Worker — reaps gigs stuck in broadcasting > 5 minutes
-	gigTimeoutWorker := service.NewGigTimeoutWorker(db.Writer, rdb, kafkaClient.Client)
-	go gigTimeoutWorker.Start(context.Background())
+	if kafkaClient != nil {
+		gigTimeoutWorker := service.NewGigTimeoutWorker(db.Writer, rdb, kafkaClient.Client)
+		go gigTimeoutWorker.Start(context.Background())
+	} else {
+		log.Println("Warning: Kafka unavailable, gig timeout worker disabled")
+	}
 
 	// 5. Setup Router
 	router := gin.Default()
