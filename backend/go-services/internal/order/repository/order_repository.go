@@ -171,7 +171,7 @@ func (r *OrderRepository) GetOrderByTrackingID(ctx context.Context, trackingID s
 			status, delivery_type, payment_gateway, total_amount, admin_commission, vendor_escrow, delivery_escrow,
 			currency, payment_status, customer_lat, customer_lng, otp_code, device_session_nonce,
 			escrow_released, dispute_status, delivered_at, created_at, updated_at,
-			handover_photo_url, handover_at, handover_notes, handed_over_by_tracking_id
+			COALESCE(handover_photo_url, ''), handover_at, COALESCE(handover_notes, ''), COALESCE(handed_over_by_tracking_id, '')
 		FROM orders
 		WHERE order_tracking_id = $1
 	`
@@ -256,7 +256,7 @@ func (r *OrderRepository) GetOrdersByCustomerID(ctx context.Context, customerID 
 			status, delivery_type, payment_gateway, total_amount, admin_commission, vendor_escrow, delivery_escrow,
 			currency, payment_status, customer_lat, customer_lng, otp_code, device_session_nonce,
 			escrow_released, dispute_status, delivered_at, created_at, updated_at,
-			handover_photo_url, handover_at, handover_notes, handed_over_by_tracking_id
+			COALESCE(handover_photo_url, ''), handover_at, COALESCE(handover_notes, ''), COALESCE(handed_over_by_tracking_id, '')
 		FROM orders
 		` + where + `
 		ORDER BY created_at DESC
@@ -349,7 +349,7 @@ func (r *OrderRepository) GetOrdersByVendorID(ctx context.Context, vendorID stri
 			o.status, o.delivery_type, o.payment_gateway, o.total_amount, o.admin_commission, o.vendor_escrow, o.delivery_escrow,
 			o.currency, o.payment_status, o.customer_lat, o.customer_lng, o.otp_code, o.device_session_nonce,
 			o.escrow_released, o.dispute_status, o.delivered_at, o.created_at, o.updated_at,
-			o.handover_photo_url, o.handover_at, o.handover_notes, o.handed_over_by_tracking_id,
+			COALESCE(o.handover_photo_url, ''), o.handover_at, COALESCE(o.handover_notes, ''), COALESCE(o.handed_over_by_tracking_id, ''),
 			COALESCE(c.full_name, 'Unknown Customer'),
 			COALESCE(c.phone, ''),
 			COALESCE(rd.full_name, 'Unassigned Rider'),
