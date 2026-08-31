@@ -97,7 +97,7 @@ func (r *Repository) Create(ctx context.Context, txn *PaymentTransaction) (*Paym
 
 	query := `
 		INSERT INTO payment_transactions (transaction_id, order_tracking_id, gateway, gateway_txn_id, amount, currency, status, kind, idempotency_key, metadata, error_message, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, NOW(), NOW())
 		ON CONFLICT (idempotency_key) DO UPDATE SET
 			updated_at = EXCLUDED.updated_at
 		RETURNING id, transaction_id, order_tracking_id, gateway, gateway_txn_id, amount, currency, status, kind, idempotency_key, metadata, error_message, EXTRACT(EPOCH FROM created_at)*1000, EXTRACT(EPOCH FROM updated_at)*1000, callback_processed_at
@@ -105,7 +105,7 @@ func (r *Repository) Create(ctx context.Context, txn *PaymentTransaction) (*Paym
 
 	row := r.db.QueryRow(ctx, query,
 		txn.TransactionID, txn.OrderID, txn.Gateway, txn.GatewayTxnID, txn.Amount, txn.Currency,
-		txn.Status, txn.Kind, txn.IdempotencyKey, metadataJSON, txn.ErrorMessage,
+		txn.Status, txn.Kind, txn.IdempotencyKey, string(metadataJSON), txn.ErrorMessage,
 	)
 	return scanTransaction(row)
 }
@@ -123,10 +123,10 @@ func (r *Repository) UpdateStatus(ctx context.Context, transactionID string, sta
 
 	query := `
 		UPDATE payment_transactions
-		SET status = $1, gateway_txn_id = COALESCE(NULLIF($2, ''), gateway_txn_id), metadata = COALESCE($3, metadata), error_message = COALESCE(NULLIF($4, ''), error_message), updated_at = NOW()
+		SET status = $1, gateway_txn_id = COALESCE(NULLIF($2, ''), gateway_txn_id), metadata = COALESCE($3::jsonb, metadata), error_message = COALESCE(NULLIF($4, ''), error_message), updated_at = NOW()
 		WHERE transaction_id = $5
 	`
-	_, err := r.db.Exec(ctx, query, status, gatewayTxnID, metadataJSON, errorMsg, transactionID)
+	_, err := r.db.Exec(ctx, query, status, gatewayTxnID, string(metadataJSON), errorMsg, transactionID)
 	return err
 }
 

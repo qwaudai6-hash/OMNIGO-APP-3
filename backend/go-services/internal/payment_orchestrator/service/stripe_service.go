@@ -153,13 +153,17 @@ func (s *StripeService) ProcessCheckout(ctx context.Context, merchantUserID, cli
 
 	// 6. Record in payment_transactions
 	internalTxnID := fmt.Sprintf("stripe_%s_%d", req.OrderID, time.Now().UnixMilli())
+	metaBytes, _ := json.Marshal(map[string]any{
+		"payment_intent_id": pi.ID,
+		"customer_ip":       clientIP,
+	})
 	_, err = s.db.Exec(ctx,
 		`INSERT INTO payment_transactions
-		 (transaction_id, order_id, gateway, gateway_txn_id, amount, currency, status, customer_tracking_id, ip_address, metadata, created_at, updated_at)
-		 VALUES ($1, $2, 'stripe', $3, $4, $5, 'pending', $6, $7, $8, NOW(), NOW())
+		 (transaction_id, order_tracking_id, gateway, gateway_txn_id, amount, currency, status, kind, idempotency_key, metadata, created_at, updated_at)
+		 VALUES ($1, $2, 'stripe', $3, $4, $5, 'pending', 'payment', $6, $7::jsonb, NOW(), NOW())
 		 ON CONFLICT (transaction_id) DO NOTHING`,
 		internalTxnID, req.OrderID, pi.ID, req.Amount, req.Currency,
-		merchantUserID, clientIP, `{"payment_intent_id":"`+pi.ID+`"}`,
+		idempotencyKey, string(metaBytes),
 	)
 	if err != nil {
 		log.Printf("[StripeService] WARNING: failed to record payment transaction for order %s: %v", req.OrderID, err)

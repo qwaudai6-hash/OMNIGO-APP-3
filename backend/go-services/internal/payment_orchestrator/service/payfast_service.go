@@ -491,8 +491,8 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 	// 4. Insert Initial Payment Transaction (idempotency key populated)
 	_, err = tx.Exec(ctx,
 		`INSERT INTO payment_transactions (transaction_id, order_tracking_id, gateway, amount, currency, status, kind, idempotency_key, metadata)
-		 VALUES ($1, $2, 'payfast', $3, $4, 'pending', 'payment', $5, $6)`,
-		internalTxnID, req.OrderID, expectedAmount, s.defaultCurrency, idempotencyKey, metaBytes,
+		 VALUES ($1, $2, 'payfast', $3, $4, 'pending', 'payment', $5, $6::jsonb)`,
+		internalTxnID, req.OrderID, expectedAmount, s.defaultCurrency, idempotencyKey, string(metaBytes),
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "ux_payment_active_order") || strings.Contains(err.Error(), "unique constraint") || strings.Contains(err.Error(), "duplicate key") {
@@ -611,9 +611,9 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 			// not send the customer into the ACS challenge with no resumable local state.
 			res, execErr := s.db.Exec(ctx,
 				`UPDATE payment_transactions 
-				 SET status = '3ds_required', gateway_txn_id = NULLIF($1, ''), metadata = $2, updated_at = NOW() 
+				 SET status = '3ds_required', gateway_txn_id = NULLIF($1, ''), metadata = $2::jsonb, updated_at = NOW() 
 				 WHERE transaction_id = $3 AND status IN ('pending', 'processing')`,
-				txnRes.TransactionID, metaBytes, internalTxnID,
+				txnRes.TransactionID, string(metaBytes), internalTxnID,
 			)
 			if execErr != nil || res.RowsAffected() == 0 {
 				failReason := "failed to persist saved-card 3DS state"
@@ -769,9 +769,9 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		// transaction with — so we must NOT tell the client to proceed to 3DS in that case.
 		if _, execErr := s.db.Exec(ctx,
 			`UPDATE payment_transactions 
-			 SET status = '3ds_required', gateway_txn_id = $1, metadata = $2, updated_at = NOW() 
+			 SET status = '3ds_required', gateway_txn_id = $1, metadata = $2::jsonb, updated_at = NOW() 
 			 WHERE transaction_id = $3`,
-			tokenRes.TransactionID, metaBytes, internalTxnID,
+			tokenRes.TransactionID, string(metaBytes), internalTxnID,
 		); execErr != nil {
 			log.Printf("CRITICAL: failed to persist 3ds_required state for txn %s: %v", internalTxnID, execErr)
 			if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "Failed to persist 3DS state: "+execErr.Error()); markErr != nil {

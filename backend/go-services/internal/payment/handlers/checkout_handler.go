@@ -29,7 +29,7 @@ func NewCheckoutHandler(orchestrator *service.Orchestrator, walletSvc *walletSer
 type CheckoutReq struct {
 	Gateway       string  `json:"gateway" binding:"required"`
 	OrderID       string  `json:"order_id" binding:"required"`
-	CustomerID    string  `json:"customer_id" binding:"required"`
+	CustomerID    string  `json:"customer_id"`
 	Amount        float64 `json:"amount" binding:"required"`
 	Currency      string  `json:"currency" binding:"required"`
 	ReturnURL     string  `json:"return_url"`
