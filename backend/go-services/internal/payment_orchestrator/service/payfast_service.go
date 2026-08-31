@@ -1081,10 +1081,11 @@ func (s *PayFastService) ExecuteSplit(ctx context.Context, internalTxnID, orderI
 	// 1. Lock order FIRST (Global lock order: orders -> payment_transactions)
 	var dbAmount float64
 	var storeID string
+	var vendorTrackingID string
 	var orderStatus, paymentStatus string
 	err = tx.QueryRow(ctx,
-		`SELECT total_amount, store_tracking_id, status, COALESCE(payment_status, '') FROM orders WHERE order_tracking_id = $1 FOR UPDATE`, orderID,
-	).Scan(&dbAmount, &storeID, &orderStatus, &paymentStatus)
+		`SELECT total_amount, store_tracking_id, vendor_tracking_id, status, COALESCE(payment_status, '') FROM orders WHERE order_tracking_id = $1 FOR UPDATE`, orderID,
+	).Scan(&dbAmount, &storeID, &vendorTrackingID, &orderStatus, &paymentStatus)
 	if err != nil {
 		return fmt.Errorf("order not found: %w", err)
 	}
@@ -1159,6 +1160,7 @@ func (s *PayFastService) ExecuteSplit(ctx context.Context, internalTxnID, orderI
 		"order_id":             orderID,
 		"gateway_txn_id":       gatewayTxnID,
 		"store_id":             storeID,
+		"vendor_tracking_id":   vendorTrackingID,
 		"delivery_tracking_id": deliveryTrackingID,
 		"total_amount":         dbAmount,
 		"currency":             s.defaultCurrency,

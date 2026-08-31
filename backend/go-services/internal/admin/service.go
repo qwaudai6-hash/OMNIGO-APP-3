@@ -697,11 +697,11 @@ func (s *AdminSurveillanceService) ResolveDispute(ctx context.Context, orderTrac
 		}
 
 		// Mark as refunded and close the linked dispute.
-		_, err = s.dbReader.Exec(ctx, "UPDATE escrow_holds SET status = 'refunded', released_at = NOW() WHERE order_tracking_id = $1", orderTrackingID)
+		_, err = s.dbWriter.Exec(ctx, "UPDATE escrow_holds SET status = 'refunded', released_at = NOW() WHERE order_tracking_id = $1", orderTrackingID)
 		if err != nil {
 			return err
 		}
-		_, _ = s.dbReader.Exec(ctx, "UPDATE disputes SET status = 'resolved', resolution = 'admin_refund', resolved_at = NOW(), updated_at = NOW() WHERE order_tracking_id = $1 AND status = 'open'", orderTrackingID)
+		_, _ = s.dbWriter.Exec(ctx, "UPDATE disputes SET status = 'resolved', resolution = 'admin_refund', resolved_at = NOW(), updated_at = NOW() WHERE order_tracking_id = $1 AND status = 'open'", orderTrackingID)
 
 		// Credit the customer wallet directly so the refund is immediately usable.
 		upsertWallet := `
@@ -709,7 +709,7 @@ func (s *AdminSurveillanceService) ResolveDispute(ctx context.Context, orderTrac
 			VALUES ($1, $2, NOW())
 			ON CONFLICT (customer_tracking_id) DO UPDATE SET balance = customer_wallet.balance + $2, updated_at = NOW()
 		`
-		_, err = s.dbReader.Exec(ctx, upsertWallet, customerID, escrowAmount)
+		_, err = s.dbWriter.Exec(ctx, upsertWallet, customerID, escrowAmount)
 		if err != nil {
 			return err
 		}
@@ -719,14 +719,14 @@ func (s *AdminSurveillanceService) ResolveDispute(ctx context.Context, orderTrac
 			var riderTrackingID string
 			_ = s.dbReader.QueryRow(ctx, "SELECT COALESCE(rider_tracking_id, '') FROM orders WHERE order_tracking_id = $1", orderTrackingID).Scan(&riderTrackingID)
 			if riderTrackingID != "" {
-				_, _ = s.dbReader.Exec(ctx, "UPDATE rider_wallet SET balance = balance - $1, updated_at = NOW() WHERE rider_tracking_id = $2", escrowAmount, riderTrackingID)
+				_, _ = s.dbWriter.Exec(ctx, "UPDATE rider_wallet SET balance = balance - $1, updated_at = NOW() WHERE rider_tracking_id = $2", escrowAmount, riderTrackingID)
 			}
 		}
 		if decision == "vendor_guilty" {
 			var vendorTrackingID string
 			_ = s.dbReader.QueryRow(ctx, "SELECT COALESCE(s.vendor_tracking_id, '') FROM orders o JOIN stores s ON o.store_tracking_id = s.store_tracking_id WHERE o.order_tracking_id = $1", orderTrackingID).Scan(&vendorTrackingID)
 			if vendorTrackingID != "" {
-				_, _ = s.dbReader.Exec(ctx, "UPDATE vendor_wallet SET balance = balance - $1, updated_at = NOW() WHERE vendor_tracking_id = $2", escrowAmount, vendorTrackingID)
+				_, _ = s.dbWriter.Exec(ctx, "UPDATE vendor_wallet SET balance = balance - $1, updated_at = NOW() WHERE vendor_tracking_id = $2", escrowAmount, vendorTrackingID)
 			}
 		}
 
@@ -734,11 +734,11 @@ func (s *AdminSurveillanceService) ResolveDispute(ctx context.Context, orderTrac
 
 	} else if decision == "customer_guilty" {
 		// Unfreeze the escrow, let the cron job settle it
-		_, err = s.dbReader.Exec(ctx, "UPDATE escrow_holds SET status = 'held', dispute_id = NULL WHERE order_tracking_id = $1", orderTrackingID)
+		_, err = s.dbWriter.Exec(ctx, "UPDATE escrow_holds SET status = 'held', dispute_id = NULL WHERE order_tracking_id = $1", orderTrackingID)
 		if err != nil {
 			return err
 		}
-		_, _ = s.dbReader.Exec(ctx, "UPDATE disputes SET status = 'resolved', resolution = 'admin_customer_guilty', resolved_at = NOW(), updated_at = NOW() WHERE order_tracking_id = $1 AND status = 'open'", orderTrackingID)
+		_, _ = s.dbWriter.Exec(ctx, "UPDATE disputes SET status = 'resolved', resolution = 'admin_customer_guilty', resolved_at = NOW(), updated_at = NOW() WHERE order_tracking_id = $1 AND status = 'open'", orderTrackingID)
 		return nil
 	}
 

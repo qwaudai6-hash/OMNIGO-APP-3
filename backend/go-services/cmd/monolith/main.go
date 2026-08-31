@@ -471,7 +471,7 @@ func main() {
 			"/api/v1/finance/refund", "/api/v1/finance/cancel"},
 		envPortOr("ORDER_SERVICE_PORT", "9005"))
 	register("payment-orchestrator",
-		[]string{"/api/v1/payments", "/api/v1/finance"},
+		[]string{"/api/v1/payments", "/api/v1/finance", "/api/v1/ledger"},
 		envPortOr("PAYMENT_ORCHESTRATOR_PORT", "9006"))
 	register("admin-service",
 		[]string{"/api/v1/admin", "/api/v1/geo"},

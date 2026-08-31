@@ -435,11 +435,12 @@ func (s *StripeService) ExecuteSplit(ctx context.Context, orderID, storeID strin
 
 	// 1. Lock order
 	var dbAmount float64
+	var vendorTrackingID string
 	var orderStatus, paymentStatus string
 	err = tx.QueryRow(ctx,
-		`SELECT total_amount, status, COALESCE(payment_status, '') FROM orders WHERE order_tracking_id = $1 FOR UPDATE`,
+		`SELECT total_amount, vendor_tracking_id, status, COALESCE(payment_status, '') FROM orders WHERE order_tracking_id = $1 FOR UPDATE`,
 		orderID,
-	).Scan(&dbAmount, &orderStatus, &paymentStatus)
+	).Scan(&dbAmount, &vendorTrackingID, &orderStatus, &paymentStatus)
 	if err != nil {
 		return fmt.Errorf("order not found: %w", err)
 	}
@@ -497,24 +498,28 @@ func (s *StripeService) ExecuteSplit(ctx context.Context, orderID, storeID strin
 	}
 
 	outboxPayload, err := json.Marshal(map[string]interface{}{
-		"order_id":       orderID,
-		"gateway_txn_id": gatewayTxnID,
-		"amount":         amount,
-		"split": map[string]float64{
-			"admin_commission": split.AdminRevenue,
-			"vendor_escrow":    split.VendorEscrow,
-			"delivery_escrow":  split.DeliveryEscrow,
-		},
-		"transfers": transfers,
+		"internal_txn_id":      "",
+		"order_id":             orderID,
+		"gateway_txn_id":       gatewayTxnID,
+		"store_id":             storeID,
+		"vendor_tracking_id":   vendorTrackingID,
+		"delivery_tracking_id": deliveryTrackingID,
+		"total_amount":         dbAmount,
+		"currency":             "PKR",
+		"admin_revenue":        split.AdminRevenue,
+		"vendor_escrow":        split.VendorEscrow,
+		"delivery_escrow":      split.DeliveryEscrow,
+		"idempotency_key":      idempotencyKey,
+		"transfers":            transfers,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to marshal outbox payload: %w", err)
 	}
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO outbox_events (topic, payload, status, created_at)
-		 VALUES ('payment_settlement', $1, 'PENDING', NOW())`,
-		outboxPayload,
+		`INSERT INTO outbox_events (aggregate_id, topic, payload, status, created_at, updated_at)
+		 VALUES ($1, 'payment_settlement', $2, 'PENDING', NOW(), NOW())`,
+		orderID, outboxPayload,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to insert outbox event: %w", err)
