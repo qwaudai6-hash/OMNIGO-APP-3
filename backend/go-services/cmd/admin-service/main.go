@@ -316,20 +316,20 @@ func main() {
 				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
 			}
-			actorID := admin.ExtractActorID(c.GetString("tracking_id"))
+			actorID := admin.ExtractActorID(c.GetString("admin_tracking_id"))
 			actorIP := admin.ExtractClientIP(c.GetHeader("X-Forwarded-For"), c.Request.RemoteAddr, trustProxy)
 			result, err := apiKeyService.Set(c.Request.Context(), body.Provider, body.KeyName, body.Value, actorID, actorIP)
 			if err != nil {
 				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
 			}
-			c.JSON(http.StatusOK, result)
+			c.JSON(http.StatusCreated, result)
 		})
 
 		adminRoutes.DELETE("/finance/api-keys/:provider/:key_name", func(c *gin.Context) {
 			provider := c.Param("provider")
 			keyName := c.Param("key_name")
-			actorID := admin.ExtractActorID(c.GetString("tracking_id"))
+			actorID := admin.ExtractActorID(c.GetString("admin_tracking_id"))
 			actorIP := admin.ExtractClientIP(c.GetHeader("X-Forwarded-For"), c.Request.RemoteAddr, trustProxy)
 			fp, err := apiKeyService.Delete(c.Request.Context(), provider, keyName, actorID, actorIP)
 			if err != nil {
@@ -553,11 +553,13 @@ func main() {
 			_ = dbPool.QueryRow(ctx, countQuery+whereClause, args...).Scan(&total)
 
 			query := `
-				SELECT id::text, vendor_tracking_id, amount, COALESCE(method, 'bank_transfer'),
-					   status, COALESCE(reference, ''), COALESCE(batch_id, ''),
-					   created_at, COALESCE(completed_at, '0001-01-01T00:00:00Z')
-				FROM vendor_payouts
-			` + whereClause + ` ORDER BY created_at DESC LIMIT $` + strconv.Itoa(len(args)+1) + ` OFFSET $` + strconv.Itoa(len(args)+2)
+				SELECT vp.id::text, vp.vendor_tracking_id, vp.amount, COALESCE(vp.method, 'bank_transfer'),
+					   vp.status, COALESCE(vp.batch_id, ''),
+					   vp.created_at, COALESCE(vp.completed_at, '0001-01-01T00:00:00Z'),
+					   COALESCE(u.full_name, 'Unknown')
+				FROM vendor_payouts vp
+				LEFT JOIN users u ON u.tracking_id = vp.vendor_tracking_id
+			` + whereClause + ` ORDER BY vp.created_at DESC LIMIT $` + strconv.Itoa(len(args)+1) + ` OFFSET $` + strconv.Itoa(len(args)+2)
 			args = append(args, limit, offset)
 
 			rows, err := dbPool.Query(ctx, query, args...)
@@ -570,10 +572,10 @@ func main() {
 			type PayoutRecord struct {
 				ID               string  `json:"id"`
 				VendorTrackingID string  `json:"vendor_tracking_id"`
+				VendorName       string  `json:"vendor_name"`
 				Amount           float64 `json:"amount"`
 				Method           string  `json:"method"`
 				Status           string  `json:"status"`
-				Reference        string  `json:"reference"`
 				BatchID          string  `json:"batch_id"`
 				CreatedAt        string  `json:"created_at"`
 				CompletedAt      string  `json:"completed_at"`
@@ -581,7 +583,7 @@ func main() {
 			var payouts []PayoutRecord
 			for rows.Next() {
 				var p PayoutRecord
-				if err := rows.Scan(&p.ID, &p.VendorTrackingID, &p.Amount, &p.Method, &p.Status, &p.Reference, &p.BatchID, &p.CreatedAt, &p.CompletedAt); err != nil {
+				if err := rows.Scan(&p.ID, &p.VendorTrackingID, &p.Amount, &p.Method, &p.Status, &p.BatchID, &p.CreatedAt, &p.CompletedAt, &p.VendorName); err != nil {
 					continue
 				}
 				payouts = append(payouts, p)

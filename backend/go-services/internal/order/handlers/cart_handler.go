@@ -53,7 +53,7 @@ func (h *CartHandler) AddItem(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Item added to cart"})
+	c.JSON(http.StatusCreated, gin.H{"message": "Item added to cart"})
 }
 
 // UpdateItem PUT /api/v1/cart/items/:product_id

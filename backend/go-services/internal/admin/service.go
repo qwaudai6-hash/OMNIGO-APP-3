@@ -80,6 +80,7 @@ type PendingUser struct {
 	Address      string `json:"address"`
 	CNICURL      string `json:"cnic_url,omitempty"`
 	LicenseURL   string `json:"license_url,omitempty"`
+	IsVerified   bool   `json:"is_verified"`
 }
 
 type FinancialKPIs struct {
@@ -296,7 +297,7 @@ func (s *AdminSurveillanceService) ListPendingVerifications(ctx context.Context,
 	}
 
 	query := `
-		SELECT tracking_id, email, COALESCE(full_name, ''), role, COALESCE(phone, ''), COALESCE(business_name, ''), COALESCE(address, ''), COALESCE(cnic_url, ''), COALESCE(license_url, '')
+		SELECT tracking_id, email, COALESCE(full_name, ''), role, COALESCE(phone, ''), COALESCE(business_name, ''), COALESCE(address, ''), COALESCE(cnic_url, ''), COALESCE(license_url, ''), is_verified
 		FROM users
 		WHERE is_verified = false AND role IN ('rider', 'vendor')
 		ORDER BY created_at ASC
@@ -311,7 +312,7 @@ func (s *AdminSurveillanceService) ListPendingVerifications(ctx context.Context,
 	var users []PendingUser
 	for rows.Next() {
 		var u PendingUser
-		if err := rows.Scan(&u.TrackingID, &u.Email, &u.FullName, &u.Role, &u.Phone, &u.BusinessName, &u.Address, &u.CNICURL, &u.LicenseURL); err != nil {
+		if err := rows.Scan(&u.TrackingID, &u.Email, &u.FullName, &u.Role, &u.Phone, &u.BusinessName, &u.Address, &u.CNICURL, &u.LicenseURL, &u.IsVerified); err != nil {
 			return nil, 0, err
 		}
 		users = append(users, u)
@@ -501,14 +502,14 @@ func (s *AdminSurveillanceService) ListAllUsers(ctx context.Context, role string
 		countQuery = `SELECT COUNT(*) FROM users WHERE role = $1`
 		countArgs = append(countArgs, role)
 		query = `
-			SELECT tracking_id, email, COALESCE(full_name, ''), role, COALESCE(phone, ''), COALESCE(business_name, ''), COALESCE(address, ''), COALESCE(cnic_url, ''), COALESCE(license_url, '')
+			SELECT tracking_id, email, COALESCE(full_name, ''), role, COALESCE(phone, ''), COALESCE(business_name, ''), COALESCE(address, ''), COALESCE(cnic_url, ''), COALESCE(license_url, ''), is_verified
 			FROM users WHERE role = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3
 		`
 		args = append(args, role)
 	} else {
 		countQuery = `SELECT COUNT(*) FROM users`
 		query = `
-			SELECT tracking_id, email, COALESCE(full_name, ''), role, COALESCE(phone, ''), COALESCE(business_name, ''), COALESCE(address, ''), COALESCE(cnic_url, ''), COALESCE(license_url, '')
+			SELECT tracking_id, email, COALESCE(full_name, ''), role, COALESCE(phone, ''), COALESCE(business_name, ''), COALESCE(address, ''), COALESCE(cnic_url, ''), COALESCE(license_url, ''), is_verified
 			FROM users ORDER BY created_at DESC LIMIT $1 OFFSET $2
 		`
 	}
@@ -528,7 +529,7 @@ func (s *AdminSurveillanceService) ListAllUsers(ctx context.Context, role string
 	var users []PendingUser
 	for rows.Next() {
 		var u PendingUser
-		if err := rows.Scan(&u.TrackingID, &u.Email, &u.FullName, &u.Role, &u.Phone, &u.BusinessName, &u.Address, &u.CNICURL, &u.LicenseURL); err != nil {
+		if err := rows.Scan(&u.TrackingID, &u.Email, &u.FullName, &u.Role, &u.Phone, &u.BusinessName, &u.Address, &u.CNICURL, &u.LicenseURL, &u.IsVerified); err != nil {
 			return nil, 0, err
 		}
 		users = append(users, u)

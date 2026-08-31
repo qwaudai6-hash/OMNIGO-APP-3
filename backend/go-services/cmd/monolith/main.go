@@ -461,10 +461,10 @@ func main() {
 		[]string{"/api/v1/vendor", "/api/v1/stores", "/api/v1/geocoding"},
 		envPortOr("VENDOR_SERVICE_PORT", "9002"))
 	register("delivery-gig-service",
-		[]string{"/api/v1/delivery"},
+		[]string{"/api/v1/delivery", "/api/v1/ride"},
 		envPortOr("DELIVERY_SERVICE_PORT", "9003"))
 	register("ride-service",
-		[]string{"/api/v1/rides", "/api/v1/ride"},
+		[]string{"/api/v1/rides"},
 		envPortOr("RIDE_SERVICE_PORT", "9004"))
 	register("order-service",
 		[]string{"/api/v1/orders", "/api/v1/cart", "/api/v1/chat", "/api/v1/ratings", "/api/v1/wallet", "/api/v1/payment",
