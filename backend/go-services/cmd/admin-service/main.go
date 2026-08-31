@@ -554,7 +554,7 @@ func main() {
 
 			query := `
 				SELECT vp.id::text, vp.vendor_tracking_id, vp.amount, COALESCE(vp.method, 'bank_transfer'),
-					   vp.status, COALESCE(vp.batch_id, ''),
+					   vp.status, COALESCE(vp.batch_id::text, ''),
 					   vp.created_at, COALESCE(vp.completed_at, '0001-01-01T00:00:00Z'),
 					   COALESCE(u.full_name, 'Unknown')
 				FROM vendor_payouts vp
