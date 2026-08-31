@@ -40,7 +40,7 @@ const (
 
 // PaymentTransaction is the persistence model for a payment transaction.
 type PaymentTransaction struct {
-	ID             int64             `json:"id"`
+	ID             string            `json:"id"`
 	TransactionID  string            `json:"transaction_id"`
 	OrderID        string            `json:"order_tracking_id"`
 	Gateway        string            `json:"gateway"`
