@@ -50,14 +50,24 @@ func (s *CartService) fetchProductPrice(ctx context.Context, productID int64) (f
 		return 0, errors.New("product service URL not configured")
 	}
 
-	url := fmt.Sprintf("%s/api/v1/products/%d", s.productServiceURL, productID)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return 0, err
-	}
+	var url string
+	var req *http.Request
+	var err error
 
 	if s.internalSigner != nil {
+		// Use internal HMAC-authenticated route to bypass JWT
+		url = fmt.Sprintf("%s/api/v1/internal/products/%d", s.productServiceURL, productID)
+		req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return 0, err
+		}
 		s.internalSigner.SignRequest(req, nil)
+	} else {
+		url = fmt.Sprintf("%s/api/v1/products/%d", s.productServiceURL, productID)
+		req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return 0, err
+		}
 	}
 
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -72,12 +82,16 @@ func (s *CartService) fetchProductPrice(ctx context.Context, productID int64) (f
 	}
 
 	var data struct {
-		Price float64 `json:"price"`
+		Price    float64 `json:"price"`
+		BasePrice float64 `json:"base_price"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return 0, fmt.Errorf("failed to decode product response: %w", err)
 	}
 
+	if data.BasePrice > 0 {
+		return data.BasePrice, nil
+	}
 	return data.Price, nil
 }
 

@@ -97,6 +97,22 @@ func (h *ProductHandler) GetProduct(c *gin.Context) {
 	c.JSON(http.StatusOK, prod)
 }
 
+// GetProductByID handles internal calls by numeric ID (for cart price verification).
+func (h *ProductHandler) GetProductByID(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid product id"})
+		return
+	}
+	prod, err := h.svc.GetProductByNumericID(c.Request.Context(), id)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "product not found"})
+		return
+	}
+	c.JSON(http.StatusOK, prod)
+}
+
 // ListProducts HTTP handler for GET /products (public catalog read).
 func (h *ProductHandler) ListProducts(c *gin.Context) {
 	limitStr := c.DefaultQuery("limit", "20")
@@ -170,6 +186,7 @@ func (h *ProductHandler) RegisterRoutes(router *gin.Engine) {
 		{
 			internal.POST("/reserve", h.ReserveStock)
 			internal.POST("/release", h.ReleaseStock)
+			internal.GET("/:id", h.GetProductByID)
 		}
 	}
 }
