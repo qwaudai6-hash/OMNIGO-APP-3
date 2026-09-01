@@ -123,6 +123,15 @@ func (r *DeliveryRepository) UpdateRiderLocation(ctx context.Context, riderTrack
 		return err
 	}
 
+	// Also maintain the GeoSet used by dispatch (HandleNewOrder / CancelGig) via GeoRadius
+	geoKey := fmt.Sprintf("riders:locations:h3:%x", centerHex)
+	r.redis.GeoAdd(ctx, geoKey, &redis.GeoLocation{
+		Name:      riderTrackID,
+		Longitude: lng,
+		Latitude:  lat,
+	})
+	r.redis.Expire(ctx, geoKey, 300*time.Second)
+
 	// Set expiration on the hexagon key to automatically garbage collect if riders go offline
 	r.redis.Expire(ctx, newHexKey, 300*time.Second)
 
@@ -481,6 +490,19 @@ func (r *DeliveryRepository) CreateOrderDispute(ctx context.Context, orderTracki
 	return err
 }
 
+// ClearOrderRider removes the rider assignment from the parent order when a gig is cancelled
+func (r *DeliveryRepository) ClearOrderRider(ctx context.Context, gigTrackingID string) (int64, error) {
+	result, err := r.writer.Exec(ctx,
+		`UPDATE orders SET rider_tracking_id = NULL, updated_at = NOW()
+		 WHERE order_tracking_id = (SELECT order_tracking_id FROM deliveries WHERE tracking_id = $1)`,
+		gigTrackingID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 // UpdateGigStatus locks and transitions the delivery status with strict state machine validation.
 // Returns the previous status, new status, assigned rider, and any error.
 func (r *DeliveryRepository) UpdateGigStatus(ctx context.Context, trackingID string, status string, pickupPhoto string, deliveryPhoto string) (prevStatus, assignedRider string, err error) {
@@ -521,23 +543,31 @@ func (r *DeliveryRepository) UpdateGigStatus(ctx context.Context, trackingID str
 
 	var updateQuery string
 	var args []interface{}
-	if status == models.StatusPickedUp && pickupPhoto != "" {
+	if status == models.StatusBroadcasting {
+		// When reverting to broadcasting (rider cancelled), clear the rider assignment
 		updateQuery = `
-			UPDATE deliveries 
+			UPDATE deliveries
+			SET status = $1, rider_tracking_id = NULL, updated_at = NOW()
+			WHERE tracking_id = $2
+		`
+		args = []interface{}{status, trackingID}
+	} else if status == models.StatusPickedUp && pickupPhoto != "" {
+		updateQuery = `
+			UPDATE deliveries
 			SET status = $1, pickup_photo_url = $2, updated_at = NOW()
 			WHERE tracking_id = $3
 		`
 		args = []interface{}{status, pickupPhoto, trackingID}
 	} else if status == models.StatusCompleted && deliveryPhoto != "" {
 		updateQuery = `
-			UPDATE deliveries 
+			UPDATE deliveries
 			SET status = $1, delivery_photo_url = $2, updated_at = NOW()
 			WHERE tracking_id = $3
 		`
 		args = []interface{}{status, deliveryPhoto, trackingID}
 	} else {
 		updateQuery = `
-			UPDATE deliveries 
+			UPDATE deliveries
 			SET status = $1, updated_at = NOW()
 			WHERE tracking_id = $2
 		`

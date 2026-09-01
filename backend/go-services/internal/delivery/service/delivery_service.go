@@ -850,6 +850,9 @@ func (s *DeliveryService) CancelGig(ctx context.Context, req *models.CancelGigRe
 		return err
 	}
 
+	// Also clear rider_tracking_id on the parent order so it can be reassigned
+	_, _ = s.repo.ClearOrderRider(ctx, req.TrackingID)
+
 	// Fetch the gig details so we can re-broadcast
 	gig, err := s.repo.GetGigByTrackingID(ctx, req.TrackingID)
 	if err != nil {
