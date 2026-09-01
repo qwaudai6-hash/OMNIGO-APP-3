@@ -194,10 +194,14 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             );
             await Stripe.instance.presentPaymentSheet();
           } catch (e) {
+            // BUG-15 FIX: Actually cancel the order on the backend instead of just saying it's cancelled.
+            try {
+              await apiClient.post(ApiEndpoints.customerCancelOrder(realOrderTrackingId.toString()), {'reason': 'Stripe payment failed: ${e.toString()}'});
+            } catch (_) {}
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(
-                  content: Text('Payment failed: ${e.toString()}. Your order has been automatically cancelled.'),
+                  content: Text('Payment failed: ${e.toString()}. Order has been cancelled.'),
                   duration: const Duration(seconds: 5),
                   backgroundColor: Colors.red,
                 ),
@@ -206,10 +210,32 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             return;
           }
         } else {
+          // BUG-17 FIX: Cancel the orphan order before throwing.
+          try {
+            await apiClient.post(ApiEndpoints.customerCancelOrder(realOrderTrackingId.toString()), {'reason': 'No client secret from Stripe'});
+          } catch (_) {}
           throw Exception('No client secret returned from checkout');
         }
+      } else if (_selectedPaymentMethod == 'wallet') {
+        // Wallet checkout: deduct balance directly via /payment/checkout
+        try {
+          await apiClient.post(
+            ApiEndpoints.stripeCheckout(),
+            {
+              'gateway': 'wallet',
+              'order_id': realOrderTrackingId,
+              'customer_id': userTrackId,
+              'amount': cart.totalAmount,
+              'currency': 'PKR',
+              'return_url': '${ApiEndpoints.gatewayBase}/order-success',
+              'cancel_url': '${ApiEndpoints.gatewayBase}/checkout',
+            },
+          );
+        } catch (e) {
+          final msg = e.toString().replaceAll('Exception: ', '');
+          throw Exception(msg.contains('insufficient') ? msg : 'Wallet payment failed: $msg');
+        }
       } else if (_selectedPaymentMethod == 'payfast') {
-        if (!mounted) return;
         // Collect card details from user (Option C Tokenized Flow)
         final cardDetails = await showPayFastCardDetailsSheet(context);
         if (cardDetails == null) {
@@ -262,6 +288,21 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         }
       }
 
+      final trackingId = realOrderTrackingId.toString();
+
+      // BUG-16 FIX: Skip payment confirmation poll for COD orders — COD is paid on delivery, not at order time.
+      if (_selectedPaymentMethod == 'cod' || _selectedPaymentMethod == 'cash') {
+        await cart.clearCart();
+        if (mounted) {
+          await Navigator.pushAndRemoveUntil(
+            context,
+            MaterialPageRoute<void>(builder: (_) => OrderSuccessScreen(trackingId: trackingId)),
+            (route) => route.isFirst,
+          );
+        }
+        return;
+      }
+
       // PF-4 FIX: never show unconditional success. Poll the order until the
       // SettlementWorker flips it to a paid state (or timeout → honest
       // "processing" handoff). Covers 3DS completion, manual-verify tap, and
@@ -270,8 +311,6 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         apiClient,
         realOrderTrackingId.toString(),
       );
-
-      final trackingId = realOrderTrackingId.toString();
 
       if (!paidConfirmed && mounted) {
         // Don't clear cart on payment failure — user may want to retry
@@ -441,6 +480,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                     _buildPaymentOption('cod', 'Cash on Delivery', Icons.money),
                     _buildPaymentOption('payfast', 'PayFast (Debit/Credit Card & Bank)', Icons.payment_outlined),
                     _buildPaymentOption('card', 'Credit/Debit Card (International)', Icons.credit_card),
+                    _buildPaymentOption('wallet', 'Wallet Balance', Icons.account_balance_wallet),
                     _buildPaymentOption('easypaisa', 'EasyPaisa (Mobile Account)', Icons.account_balance_wallet, isComingSoon: true),
                     _buildPaymentOption('jazzcash', 'JazzCash (Mobile Account)', Icons.phone_android, isComingSoon: true),
                   ],

@@ -65,7 +65,11 @@ func (s *CODService) OnCashCollected(ctx context.Context, orderID string, amount
 	}
 
 	// Record capture if not already present.
-	existing, _ := s.repo.GetByOrderID(ctx, orderID, paymentRepo.KindPayment)
+	// BUG-12 FIX: Check error from GetByOrderID instead of discarding it.
+	existing, err := s.repo.GetByOrderID(ctx, orderID, paymentRepo.KindPayment)
+	if err != nil {
+		return fmt.Errorf("failed to check existing COD transaction: %w", err)
+	}
 	if existing == nil {
 		_, err := s.repo.Create(ctx, &paymentRepo.PaymentTransaction{
 			OrderID:        orderID,
@@ -86,7 +90,7 @@ func (s *CODService) OnCashCollected(ctx context.Context, orderID string, amount
 	}
 
 	// Ledger: rider now owes the platform the cash collected.
-	_, err := s.ledger.Transfer(ctx, ledger.TransferRequest{
+	_, err = s.ledger.Transfer(ctx, ledger.TransferRequest{
 		DebitAccount:   ledger.AccountCashReceivable, // rider owes cash
 		CreditAccount:  ledger.AccountCentralEscrow,  // platform holds it
 		Amount:         amount,

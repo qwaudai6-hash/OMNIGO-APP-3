@@ -46,9 +46,10 @@ type CODRecorder interface {
 	OnOrderDelivered(ctx context.Context, orderID, vendorID, riderID string, orderTotal, commission, riderEarning float64) error
 }
 
-// EscrowHolder creates escrow holds when orders are paid.
+// EscrowHolder creates escrow holds when orders are paid, and cancels them on cancel/return.
 type EscrowHolder interface {
 	CreateHold(ctx context.Context, orderID, vendorID string, amount float64) error
+	CancelForOrder(ctx context.Context, orderTrackingID string) error
 }
 
 func NewOrderService(
@@ -325,6 +326,25 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, trackingID string,
 	if status == "cancelled" || status == "failed" {
 		if len(order.Items) > 0 {
 			_ = s.ReleaseStockForOrder(ctx, order)
+		}
+		// BUG-06 FIX: Cancel escrow hold so vendor doesn't receive funds for cancelled order
+		if s.escrowService != nil {
+			if err := s.escrowService.CancelForOrder(ctx, trackingID); err != nil {
+				log.Printf("[ORDER-%s] Warning: failed to cancel escrow on %s: %v", trackingID, status, err)
+			}
+		}
+		// BUG-09 FIX: Cancel any pending COD debts for this order so riders don't owe for cancelled orders
+		if s.repo != nil {
+			if err := s.repo.CancelCODDebtsForOrder(ctx, trackingID); err != nil {
+				log.Printf("[ORDER-%s] Warning: failed to cancel COD debts: %v", trackingID, err)
+			}
+		}
+	}
+
+	// BUG-06 FIX: Cancel escrow on return as well
+	if status == "returned" && s.escrowService != nil {
+		if err := s.escrowService.CancelForOrder(ctx, trackingID); err != nil {
+			log.Printf("[ORDER-%s] Warning: failed to cancel escrow on return: %v", trackingID, err)
 		}
 	}
 

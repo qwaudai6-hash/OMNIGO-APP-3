@@ -869,3 +869,86 @@ func (s *AdminSurveillanceService) GetPayFastTransactions(ctx context.Context, s
 	}
 	return list, total, rows.Err()
 }
+
+// AdminOrderItem represents a single order for the admin orders listing.
+type AdminOrderItem struct {
+	ID                  int64    `json:"id"`
+	OrderTrackingID     string   `json:"order_tracking_id"`
+	CustomerTrackingID  string   `json:"customer_tracking_id"`
+	VendorTrackingID    string   `json:"vendor_tracking_id"`
+	StoreTrackingID     string   `json:"store_tracking_id"`
+	RiderTrackingID     string   `json:"rider_tracking_id"`
+	Status              string   `json:"status"`
+	PaymentGateway      string   `json:"payment_gateway"`
+	PaymentStatus       string   `json:"payment_status"`
+	TotalAmount         float64  `json:"total_amount"`
+	Currency            string   `json:"currency"`
+	AdminCommission     float64  `json:"admin_commission"`
+	VendorEscrow        float64  `json:"vendor_escrow"`
+	DeliveryEscrow      float64  `json:"delivery_escrow"`
+	EscrowReleased      bool     `json:"escrow_released"`
+	DisputeStatus       string   `json:"dispute_status"`
+	DeliveredAt         *string  `json:"delivered_at,omitempty"`
+	CreatedAt           string   `json:"created_at"`
+	UpdatedAt           string   `json:"updated_at"`
+}
+
+// GetAllOrders returns all orders with optional status filter and pagination.
+func (s *AdminSurveillanceService) GetAllOrders(ctx context.Context, status string, limit, offset int) ([]AdminOrderItem, int, error) {
+	countQuery := "SELECT COUNT(*) FROM orders"
+	args := []any{}
+	if status != "" {
+		countQuery += " WHERE status = $1"
+		args = append(args, status)
+	}
+
+	var total int
+	if err := s.dbReader.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("failed to count orders: %w", err)
+	}
+
+	query := `SELECT id, order_tracking_id, customer_tracking_id, vendor_tracking_id,
+		store_tracking_id, COALESCE(rider_tracking_id,''), status,
+		COALESCE(payment_gateway,''), COALESCE(payment_status,'pending'),
+		total_amount, currency, admin_commission, vendor_escrow, delivery_escrow,
+		escrow_released, dispute_status,
+		CASE WHEN delivered_at IS NOT NULL THEN delivered_at::text END,
+		created_at::text, updated_at::text
+		FROM orders`
+	if status != "" {
+		query += " WHERE status = $1"
+		query += " ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+	} else {
+		query += " ORDER BY created_at DESC LIMIT $1 OFFSET $2"
+	}
+
+	var rows_data []any
+	if status != "" {
+		rows_data = []any{status, limit, offset}
+	} else {
+		rows_data = []any{limit, offset}
+	}
+
+	rows, err := s.dbReader.Query(ctx, query, rows_data...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query orders: %w", err)
+	}
+	defer rows.Close()
+
+	var list []AdminOrderItem
+	for rows.Next() {
+		var item AdminOrderItem
+		if err := rows.Scan(
+			&item.ID, &item.OrderTrackingID, &item.CustomerTrackingID,
+			&item.VendorTrackingID, &item.StoreTrackingID, &item.RiderTrackingID,
+			&item.Status, &item.PaymentGateway, &item.PaymentStatus,
+			&item.TotalAmount, &item.Currency, &item.AdminCommission,
+			&item.VendorEscrow, &item.DeliveryEscrow, &item.EscrowReleased,
+			&item.DisputeStatus, &item.DeliveredAt, &item.CreatedAt, &item.UpdatedAt,
+		); err != nil {
+			return nil, 0, err
+		}
+		list = append(list, item)
+	}
+	return list, total, rows.Err()
+}

@@ -7,6 +7,7 @@ import 'package:image_picker/image_picker.dart';
 import 'dart:io';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/network/api_client.dart';
+import '../../../../core/di/service_locator.dart';
 import '../../../../core/services/session_registry.dart';
 import '../../../../core/theme/app_theme.dart';
 import 'vendor_inventory_screen.dart';
@@ -68,18 +69,8 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
 
   Future<void> _fetchVendorRating() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final jwtToken = prefs.getString('jwt_token') ?? '';
-      final response = await http.get(
-        Uri.parse(ApiEndpoints.ratingForUser(widget.trackingId)),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $jwtToken',
-        },
-      ).timeout(const Duration(seconds: 8));
-
-      if (response.statusCode == 200 && mounted) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final data = await sl<ApiClient>().get('/ratings/${widget.trackingId}') as Map<String, dynamic>;
+      if (mounted) {
         setState(() {
           _avgRating = (data['average_rating'] as num?)?.toDouble() ?? 0.0;
           _totalRatings = (data['total_ratings'] as num?)?.toInt() ?? 0;
@@ -95,31 +86,13 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
     setState(() => _isLoadingMetrics = true);
 
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final jwtToken = prefs.getString('jwt_token') ?? '';
-
-      final response = await http.get(
-        Uri.parse(ApiEndpoints.vendorMetrics(widget.trackingId)),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $jwtToken',
-        },
-      ).timeout(const Duration(seconds: 8));
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
-        if (mounted) {
-          setState(() {
-            _totalRevenue = (data['total_revenue'] as num?)?.toDouble() ?? 0.0;
-            // "Active Gigs" = orders that have been broadcast (status 'shipped').
-            // The metrics endpoint doesn't return this directly, so we count
-            // shipped orders from the orders list once it's loaded.
-            _isLoadingMetrics = false;
-          });
-          _recalculateActiveGigs();
-        }
-      } else {
-        if (mounted) setState(() => _isLoadingMetrics = false);
+      final data = await sl<ApiClient>().get('/vendor/metrics?vendor_id=${widget.trackingId}') as Map<String, dynamic>;
+      if (mounted) {
+        setState(() {
+          _totalRevenue = (data['total_revenue'] as num?)?.toDouble() ?? 0.0;
+          _isLoadingMetrics = false;
+        });
+        _recalculateActiveGigs();
       }
     } catch (e) {
       if (mounted) setState(() => _isLoadingMetrics = false);
@@ -127,9 +100,10 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
     }
   }
 
-  /// Counts orders with status == 'shipped' as the live "Active Gigs" KPI.
+  /// BUG-19 FIX: Count all active gig states, not just 'shipped'.
   void _recalculateActiveGigs() {
-    final count = _orders.where((o) => o['status'] == 'shipped').length;
+    const activeStatuses = {'accepted', 'shipped', 'in_transit', 'picked_up'};
+    final count = _orders.where((o) => activeStatuses.contains(o['status'])).length;
     if (mounted) setState(() => _activeGigs = count);
   }
 
@@ -160,72 +134,36 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
 
   Future<void> _acceptOrder(String orderTrackingId) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-
-      final response = await http.patch(
-        Uri.parse(ApiEndpoints.updateOrderStatus(orderTrackingId)),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-        body: jsonEncode({
-          'status': 'accepted',
-        }),
-      ).timeout(const Duration(seconds: 8));
-
-      if (response.statusCode == 200) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Order accepted! Status: Ready for Slip')),
-        );
-        unawaited(_fetchMerchantOrders());
-      } else {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to accept order: ${response.statusCode}')),
-        );
-      }
+      await sl<ApiClient>().patch('/orders/$orderTrackingId/status', {
+        'status': 'accepted',
+      });
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Order accepted! Status: Ready for Slip')),
+      );
+      unawaited(_fetchMerchantOrders());
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Network error: $e')),
+        SnackBar(content: Text('Failed to accept order: $e')),
       );
     }
   }
 
   Future<void> _broadcastGig(String orderTrackingId) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-
-      final response = await http.patch(
-        Uri.parse(ApiEndpoints.updateOrderStatus(orderTrackingId)),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-        body: jsonEncode({
-          'status': 'shipped',
-        }),
-      ).timeout(const Duration(seconds: 8));
-
-      if (response.statusCode == 200) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Gig Broadcasted to Nearby Riders!')),
-        );
-        unawaited(_fetchMerchantOrders());
-      } else {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to broadcast gig: ${response.statusCode}')),
-        );
-      }
+      await sl<ApiClient>().patch('/orders/$orderTrackingId/status', {
+        'status': 'shipped',
+      });
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Gig Broadcasted to Nearby Riders!')),
+      );
+      unawaited(_fetchMerchantOrders());
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Network error: $e')),
+        SnackBar(content: Text('Failed to broadcast gig: $e')),
       );
     }
   }
@@ -276,31 +214,16 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
       // POST the handover. The vendor gets a one-tap audit record; the
       // rider receives an in-app + push notification that the order is
       // ready for pickup.
-      final handoverResp = await http.post(
-        Uri.parse(ApiEndpoints.orderHandover()),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-        body: jsonEncode({
-          'order_tracking_id': orderTrackingId,
-          'photo_url': photoUrl,
-          'notes': '',
-        }),
-      ).timeout(const Duration(seconds: 8));
-
-      if (handoverResp.statusCode == 200) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Handover recorded. Rider notified.')),
-        );
-        unawaited(_fetchMerchantOrders());
-      } else {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Handover failed: ${handoverResp.statusCode}')),
-        );
-      }
+      await sl<ApiClient>().post('/orders/handover', {
+        'order_tracking_id': orderTrackingId,
+        'photo_url': photoUrl,
+        'notes': '',
+      });
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Handover recorded. Rider notified.')),
+      );
+      unawaited(_fetchMerchantOrders());
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -812,24 +735,12 @@ class _VendorProfileTabState extends State<VendorProfileTab> {
 
   Future<void> _fetchStoreDetails() async {
     try {
-      final token = SessionRegistry.instance.token ?? '';
-      final response = await http.get(
-        Uri.parse(ApiEndpoints.vendorStoreMe()),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-      ).timeout(const Duration(seconds: 8));
-
-      if (response.statusCode == 200) {
-        if (mounted) {
-          setState(() {
-            _storeData = jsonDecode(response.body) as Map<String, dynamic>;
-            _isLoading = false;
-          });
-        }
-      } else {
-        if (mounted) setState(() => _isLoading = false);
+      final data = await sl<ApiClient>().get('/vendor/stores/me') as Map<String, dynamic>;
+      if (mounted) {
+        setState(() {
+          _storeData = data;
+          _isLoading = false;
+        });
       }
     } catch (e) {
       if (mounted) setState(() => _isLoading = false);

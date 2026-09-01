@@ -318,6 +318,12 @@ class ApiEndpoints {
     return '$adminBase/admin/users?${params.join('&')}';
   }
 
+  static String adminOrders({String? status, int limit = 50, int offset = 0}) {
+    final params = <String>['limit=$limit', 'offset=$offset'];
+    if (status != null && status.isNotEmpty) params.add('status=$status');
+    return '$adminBase/admin/orders?${params.join('&')}';
+  }
+
   static String adminFinanceLedgerKpis() =>
       '$adminBase/admin/finance/ledger-kpis';
   static String adminFinanceDailyRevenue({int days = 30, String? method}) {

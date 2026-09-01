@@ -421,10 +421,15 @@ func (h *OrderHandler) CancelOrder(c *gin.Context) {
 		return
 	}
 
-	if role != "admin" && order.UserTrackID != callerID {
+	// Allow: admin, order customer, or the assigned vendor
+	isAllowed := role == "admin" || order.UserTrackID == callerID
+	if !isAllowed && order.VendorTrackID != "" && order.VendorTrackID == callerID {
+		isAllowed = true
+	}
+	if !isAllowed {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 			"error":   "FORBIDDEN_NOT_ORDER_OWNER",
-			"message": "only the order's customer or an admin may cancel",
+			"message": "only the order's customer, assigned vendor, or an admin may cancel",
 		})
 		return
 	}

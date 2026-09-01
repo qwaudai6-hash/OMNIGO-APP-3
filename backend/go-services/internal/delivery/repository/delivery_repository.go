@@ -58,6 +58,16 @@ func (r *DeliveryRepository) CreateGig(ctx context.Context, gig *models.Delivery
 		}
 	}
 
+	// BUG-03 FIX: Check for existing active gig before inserting to prevent duplicates.
+	var existingCount int
+	err := r.writer.QueryRow(ctx,
+		`SELECT COUNT(*) FROM deliveries WHERE order_tracking_id = $1 AND status NOT IN ('cancelled','completed')`,
+		gig.OrderTrackingID,
+	).Scan(&existingCount)
+	if err == nil && existingCount > 0 {
+		return fmt.Errorf("active delivery gig already exists for order %s", gig.OrderTrackingID)
+	}
+
 	query := `
 		INSERT INTO deliveries (tracking_id, order_tracking_id, vendor_store_tracking_id, customer_tracking_id, status, delivery_fee, admin_commission, rider_earning, tips, petrol_allowance, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, otp_code, is_cod, order_total, customer_phone)
 		VALUES ($1, $2, $3, $4, 'broadcasting', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
@@ -606,6 +616,15 @@ func (r *DeliveryRepository) ResolveDispute(ctx context.Context, trackingID stri
 		WHERE tracking_id = $2
 	`
 	_, err := r.writer.Exec(ctx, query, guiltyParty, trackingID)
+	return err
+}
+
+// UpdateOrderDisputeStatus updates the dispute_status on the parent orders row.
+func (r *DeliveryRepository) UpdateOrderDisputeStatus(ctx context.Context, orderTrackingID, status string) error {
+	_, err := r.writer.Exec(ctx,
+		`UPDATE orders SET dispute_status = $1, updated_at = NOW() WHERE order_tracking_id = $2`,
+		status, orderTrackingID,
+	)
 	return err
 }
 

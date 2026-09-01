@@ -120,6 +120,16 @@ func (r *Repository) ReleaseHold(ctx context.Context, holdID uuid.UUID) error {
 	return err
 }
 
+// CancelHoldForOrder cancels all held escrows when an order is cancelled or returned.
+// BUG-06 FIX: Prevents vendor from receiving funds for cancelled orders.
+func (r *Repository) CancelHoldForOrder(ctx context.Context, orderTrackingID string) error {
+	_, err := r.db.Exec(ctx,
+		`UPDATE escrow_holds SET status = 'cancelled', released_at = NOW() WHERE order_tracking_id = $1 AND status = 'held'`,
+		orderTrackingID,
+	)
+	return err
+}
+
 // FreezeForDispute marks an escrow hold as disputed.
 func (r *Repository) FreezeForDispute(ctx context.Context, orderTrackingID string, disputeID uuid.UUID) error {
 	_, err := r.db.Exec(ctx,

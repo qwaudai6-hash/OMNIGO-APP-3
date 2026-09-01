@@ -170,8 +170,8 @@ class ApiClient {
       uri,
       headers: await _getHeaders(),
     ).timeout(_requestTimeout);
-    // Auto-refresh on 401
-    if (response.statusCode == 401 && await _refreshToken()) {
+    // Auto-refresh on 401 (skip for auth endpoints)
+    if (response.statusCode == 401 && !endpoint.contains('/auth/') && await _refreshToken()) {
       response = await http.get(
         uri,
         headers: await _getHeaders(),
@@ -245,8 +245,8 @@ class ApiClient {
       uri,
       headers: await _getHeaders(),
     ).timeout(_requestTimeout);
-    // Auto-refresh on 401
-    if (response.statusCode == 401 && await _refreshToken()) {
+    // Auto-refresh on 401 (skip for auth endpoints)
+    if (response.statusCode == 401 && !endpoint.contains('/auth/') && await _refreshToken()) {
       response = await http.delete(
         uri,
         headers: await _getHeaders(),
@@ -262,6 +262,8 @@ class ApiClient {
 
   dynamic _processResponse(http.Response response) {
     if (response.statusCode >= 200 && response.statusCode < 300) {
+      // BUG-20 FIX: Handle empty response bodies (e.g. 204 No Content).
+      if (response.body.isEmpty) return {'status': 'ok'};
       return jsonDecode(response.body);
     } else {
       throw Exception('API Error: ${response.statusCode} - ${response.body}');

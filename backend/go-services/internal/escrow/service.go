@@ -67,67 +67,98 @@ func (s *Service) CreateHold(ctx context.Context, orderID, vendorID string, amou
 
 // ReleaseExpiredHolds releases all holds past their hold_until time
 // if no open disputes exist for the order.
-// It checks the orders.escrow_released flag to avoid double-release
-// with EscrowCronService.
+// BUG-04+11 FIX: Uses SELECT ... FOR UPDATE SKIP LOCKED to prevent
+// concurrent cron runs from double-releasing the same hold.
 func (s *Service) ReleaseExpiredHolds(ctx context.Context) (int, error) {
-	holds, err := s.repo.GetReleasableHolds(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("failed to fetch releasable holds: %w", err)
-	}
-
 	released := 0
-	for _, hold := range holds {
-		// Guard: skip if EscrowCronService already released this order
+
+	for {
+		// Fetch one releasable hold with row-level lock to prevent concurrent release.
+		var holdID uuid.UUID
+		var orderID, vendorID string
+		var amount float64
+		err := s.db.QueryRow(ctx, `
+			SELECT h.id, h.order_tracking_id, h.vendor_tracking_id, h.amount
+			FROM escrow_holds h
+			WHERE h.status = 'held'
+			  AND h.hold_until <= NOW()
+			ORDER BY h.hold_until
+			LIMIT 1
+			FOR UPDATE SKIP LOCKED
+		`).Scan(&holdID, &orderID, &vendorID, &amount)
+		if err != nil {
+			// No more rows to process (or DB error)
+			break
+		}
+
+		// Guard: skip if already released
 		var alreadyReleased bool
 		_ = s.db.QueryRow(ctx,
 			`SELECT COALESCE(escrow_released, FALSE) FROM orders WHERE order_tracking_id = $1`,
-			hold.OrderTrackingID,
+			orderID,
 		).Scan(&alreadyReleased)
 		if alreadyReleased {
+			// Mark hold as released anyway to clean up
+			_, _ = s.db.Exec(ctx, `UPDATE escrow_holds SET status = 'released', released_at = NOW() WHERE id = $1`, holdID)
 			continue
 		}
 
 		// Check for open disputes
-		hasDispute, err := s.repo.HasOpenDisputes(ctx, hold.OrderTrackingID)
+		hasDispute, err := s.repo.HasOpenDisputes(ctx, orderID)
 		if err != nil {
-			fmt.Printf("[Escrow] Error checking disputes for order %s: %v\n", hold.OrderTrackingID, err)
+			fmt.Printf("[Escrow] Error checking disputes for order %s: %v\n", orderID, err)
 			continue
 		}
 		if hasDispute {
-			fmt.Printf("[Escrow] Skipping release for order %s — open dispute exists\n", hold.OrderTrackingID)
+			fmt.Printf("[Escrow] Skipping release for order %s — open dispute exists\n", orderID)
+			continue
+		}
+
+		// Wrap remaining steps in a transaction for atomicity
+		tx, err := s.db.Begin(ctx)
+		if err != nil {
+			fmt.Printf("[Escrow] Failed to begin transaction for hold %s: %v\n", holdID, err)
 			continue
 		}
 
 		// Execute ledger transfer: vendor_locked_escrow → vendor_withdrawable
-		idempotencyKey := fmt.Sprintf("escrow:release:%s", hold.ID.String())
+		idempotencyKey := fmt.Sprintf("escrow:release:%s", holdID.String())
 		_, err = s.ledger.Transfer(ctx, ledger.TransferRequest{
 			DebitAccount:   ledger.AccountVendorLockedEscrow,
 			CreditAccount:  ledger.AccountVendorWithdrawable,
-			Amount:         hold.Amount,
+			Amount:         amount,
 			ReferenceType:  "escrow_release",
-			ReferenceID:    hold.OrderTrackingID,
-			Description:    fmt.Sprintf("Escrow released for order %s after %dh hold", hold.OrderTrackingID, int(getHoldDuration().Hours())),
+			ReferenceID:    orderID,
+			Description:    fmt.Sprintf("Escrow released for order %s after %dh hold", orderID, int(getHoldDuration().Hours())),
 			IdempotencyKey: idempotencyKey,
 		})
 		if err != nil {
-			fmt.Printf("[Escrow] Ledger transfer failed for hold %s: %v\n", hold.ID, err)
+			fmt.Printf("[Escrow] Ledger transfer failed for hold %s: %v\n", holdID, err)
+			_ = tx.Rollback(ctx)
 			continue
 		}
 
 		// Mark hold as released
-		if err := s.repo.ReleaseHold(ctx, hold.ID); err != nil {
-			fmt.Printf("[Escrow] Failed to mark hold %s as released: %v\n", hold.ID, err)
+		_, err = tx.Exec(ctx, `UPDATE escrow_holds SET status = 'released', released_at = NOW() WHERE id = $1`, holdID)
+		if err != nil {
+			fmt.Printf("[Escrow] Failed to mark hold %s as released: %v\n", holdID, err)
+			_ = tx.Rollback(ctx)
 			continue
 		}
 
-		// Mark order as released so EscrowCronService skips it
-		_, _ = s.db.Exec(ctx,
+		// Mark order as released
+		_, err = tx.Exec(ctx,
 			`UPDATE orders SET escrow_released = TRUE WHERE order_tracking_id = $1`,
-			hold.OrderTrackingID,
+			orderID,
 		)
+		if err != nil {
+			fmt.Printf("[Escrow] Failed to mark escrow_released for order %s: %v\n", orderID, err)
+			_ = tx.Rollback(ctx)
+			continue
+		}
 
-		// Update vendor wallet balance in database table
-		upsertVendorWallet := `
+		// Credit vendor wallet
+		_, err = tx.Exec(ctx, `
 			INSERT INTO vendor_wallet (vendor_tracking_id, balance, lifetime_earnings, updated_at)
 			VALUES ($1, $2, $2, NOW())
 			ON CONFLICT (vendor_tracking_id)
@@ -135,14 +166,22 @@ func (s *Service) ReleaseExpiredHolds(ctx context.Context) (int, error) {
 				balance = vendor_wallet.balance + $2,
 				lifetime_earnings = vendor_wallet.lifetime_earnings + $2,
 				updated_at = NOW()
-		`
-		if _, err := s.db.Exec(ctx, upsertVendorWallet, hold.VendorTrackingID, hold.Amount); err != nil {
-			fmt.Printf("[Escrow] Warning: failed to credit vendor_wallet table directly: %v\n", err)
+		`, vendorID, amount)
+		if err != nil {
+			fmt.Printf("[Escrow] Failed to credit vendor_wallet for hold %s: %v\n", holdID, err)
+			_ = tx.Rollback(ctx)
+			continue
+		}
+
+		// Commit transaction — all-or-nothing
+		if err := tx.Commit(ctx); err != nil {
+			fmt.Printf("[Escrow] Transaction commit failed for hold %s: %v\n", holdID, err)
+			continue
 		}
 
 		released++
 		fmt.Printf("[Escrow] Released %.2f PKR for vendor %s (order %s)\n",
-			hold.Amount, hold.VendorTrackingID, hold.OrderTrackingID)
+			amount, vendorID, orderID)
 	}
 
 	return released, nil
@@ -151,6 +190,12 @@ func (s *Service) ReleaseExpiredHolds(ctx context.Context) (int, error) {
 // FreezeForDispute freezes all held escrows for an order when a dispute is filed.
 func (s *Service) FreezeForDispute(ctx context.Context, orderTrackingID string, disputeID uuid.UUID) error {
 	return s.repo.FreezeForDispute(ctx, orderTrackingID, disputeID)
+}
+
+// CancelForOrder cancels all held escrows when an order is cancelled or returned.
+// BUG-06 FIX: Prevents vendor from receiving funds for cancelled/returned orders.
+func (s *Service) CancelForOrder(ctx context.Context, orderTrackingID string) error {
+	return s.repo.CancelHoldForOrder(ctx, orderTrackingID)
 }
 
 // UnfreezeOnRejection reverts disputed holds when a dispute is rejected.

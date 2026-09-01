@@ -369,6 +369,17 @@ func main() {
 			c.JSON(http.StatusOK, gin.H{"users": users, "total": total, "limit": limit, "offset": offset})
 		})
 
+		adminRoutes.GET("/orders", func(c *gin.Context) {
+			status := c.Query("status")
+			limit, offset := parsePagination(c)
+			orders, total, err := adminService.GetAllOrders(c.Request.Context(), status, limit, offset)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"orders": orders, "total": total, "limit": limit, "offset": offset})
+		})
+
 		// Dispute Resolution endpoints
 		adminRoutes.GET("/disputes", func(c *gin.Context) {
 			disputes, err := adminService.GetDisputedOrders(c.Request.Context())

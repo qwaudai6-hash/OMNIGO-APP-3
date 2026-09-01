@@ -487,9 +487,8 @@ func (r *OrderRepository) UpdatePaymentStatus(ctx context.Context, trackingID st
 var ErrNoStatusChange = errors.New("order status unchanged (terminal state or duplicate)")
 
 // MarkOrderDelivered sets status to 'delivered' AND stamps delivered_at
-// in a single transaction. The escrow release cron
-// (`escrow_cron.go`) requires both columns to settle funds after the
-// 48-hour dispute window.
+// in a single transaction. BUG-05 FIX: Enforces state machine — only
+// allows transition from shipped/in_transit/delivered.
 func (r *OrderRepository) MarkOrderDelivered(ctx context.Context, trackingID string) error {
 	query := `
 		UPDATE orders
@@ -497,13 +496,14 @@ func (r *OrderRepository) MarkOrderDelivered(ctx context.Context, trackingID str
 		    delivered_at = NOW(),
 		    updated_at = NOW()
 		WHERE order_tracking_id = $1
+		  AND status IN ('shipped', 'in_transit', 'delivered')
 	`
 	res, err := r.writer.Exec(ctx, query, trackingID)
 	if err != nil {
 		return err
 	}
 	if res.RowsAffected() == 0 {
-		return errors.New("order not found")
+		return errors.New("order not found or not in a deliverable state")
 	}
 	return nil
 }
@@ -634,4 +634,14 @@ func (r *OrderRepository) GetDeliveryByOrderTrackingID(ctx context.Context, orde
 		return nil, err
 	}
 	return &d, nil
+}
+
+// CancelCODDebtsForOrder cancels any pending COD debts when an order is cancelled/refunded.
+// BUG-09 FIX: Prevents riders from owing money for non-existent deliveries.
+func (r *OrderRepository) CancelCODDebtsForOrder(ctx context.Context, orderTrackingID string) error {
+	_, err := r.writer.Exec(ctx,
+		`UPDATE cod_debts SET status = 'cancelled' WHERE order_tracking_id = $1 AND status = 'pending'`,
+		orderTrackingID,
+	)
+	return err
 }

@@ -115,7 +115,10 @@ func (s *DeliveryService) StartKafkaConsumer(ctx context.Context) {
 					}
 					if orderID != "" {
 						log.Printf("[Delivery] Order %s cancelled. Cancelling active/pending delivery gigs.", orderID)
-						_ = s.repo.CancelDeliveryForOrder(ctx, orderID, "Order cancelled by customer/vendor")
+						if err := s.repo.CancelDeliveryForOrder(ctx, orderID, "Order cancelled by customer/vendor"); err != nil {
+							// BUG-07 FIX: Log error for ops visibility instead of silently discarding.
+							log.Printf("[Delivery] CRITICAL: Failed to cancel delivery for order %s: %v — rider may still see active delivery", orderID, err)
+						}
 					}
 				}
 				continue
@@ -378,15 +381,44 @@ func (s *DeliveryService) UpdateGigStatus(ctx context.Context, trackingID string
 
 	// Credit rider wallet when delivery is completed.
 	if req.Status == models.StatusCompleted && s.walletCredit != nil && assignedRider != "" {
-		if err := s.walletCredit.CreditDelivery(
-			ctx,
-			assignedRider,
-			trackingID,
-			gig.RiderEarning,
-			gig.AdminCommission,
-		); err != nil {
-			log.Printf("Warning: delivery completed but wallet credit failed for rider %s: %v", assignedRider, err)
-			// Do not fail the delivery completion; the credit is audit-reconcilable.
+		// BUG-08 FIX: Retry wallet credit up to 3 times before giving up.
+		var creditErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			creditErr = s.walletCredit.CreditDelivery(
+				ctx,
+				assignedRider,
+				trackingID,
+				gig.RiderEarning,
+				gig.AdminCommission,
+			)
+			if creditErr == nil {
+				break
+			}
+			log.Printf("Warning: wallet credit attempt %d failed for rider %s: %v", attempt+1, assignedRider, creditErr)
+			time.Sleep(time.Duration(500*(attempt+1)) * time.Millisecond)
+		}
+		if creditErr != nil {
+			log.Printf("CRITICAL: delivery completed but wallet credit FAILED after 3 attempts for rider %s: %v", assignedRider, creditErr)
+			// Write a compensating outbox event so a reconciliation worker can retry.
+			if s.kafka != nil {
+				outboxPayload, _ := json.Marshal(map[string]interface{}{
+					"event":                "wallet_credit_retry",
+					"rider_tracking_id":    assignedRider,
+					"delivery_tracking_id": trackingID,
+					"rider_earning":        gig.RiderEarning,
+					"admin_commission":     gig.AdminCommission,
+					"timestamp":            time.Now().UnixMilli(),
+				})
+				s.kafka.Client.Produce(ctx, &kgo.Record{
+					Topic: "wallet.credit.retry",
+					Key:   []byte(trackingID),
+					Value: outboxPayload,
+				}, func(_ *kgo.Record, err error) {
+					if err != nil {
+						log.Printf("CRITICAL: failed to produce wallet.credit.retry event for %s: %v", trackingID, err)
+					}
+				})
+			}
 		}
 
 		if gig.IsCOD {
@@ -934,15 +966,22 @@ func (s *DeliveryService) DisputeGig(ctx context.Context, req *models.DisputeOrd
 		gig, err = s.repo.GetGigByTrackingID(ctx, req.TrackingID)
 		if err != nil {
 			// No gig found — create a dispute record directly for the order
-			return s.repo.CreateOrderDispute(ctx, req.TrackingID, req.Reason, req.PhotoURL)
+			if err := s.repo.CreateOrderDispute(ctx, req.TrackingID, req.Reason, req.PhotoURL); err != nil {
+				return err
+			}
+			// Also mark the order's dispute_status so admin can see it
+			return s.repo.UpdateOrderDisputeStatus(ctx, req.TrackingID, "OPEN")
 		}
 	}
 
 	// 2. Update gig dispute state
-	err = s.repo.DisputeGig(ctx, req.TrackingID, req.PhotoURL)
+	err = s.repo.DisputeGig(ctx, gig.TrackingID, req.PhotoURL)
 	if err != nil {
 		return err
 	}
+
+	// 2b. Also update parent order's dispute_status so admin can see it
+	_ = s.repo.UpdateOrderDisputeStatus(ctx, gig.OrderTrackingID, "OPEN")
 
 	// 3. Evidence-based scoring — each signal adds weight toward rider or vendor guilt.
 	riderScore, vendorScore := 0, 0

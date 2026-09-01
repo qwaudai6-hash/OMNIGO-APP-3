@@ -152,7 +152,13 @@ func (s *CustomerWalletService) DeductForPurchase(ctx context.Context, customerT
 		return fmt.Errorf("wallet deduct query failed: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("insufficient funds or wallet not found")
+		// Distinguish between "wallet not found" and "insufficient funds"
+		var exists bool
+		err := tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM customer_wallet WHERE customer_tracking_id = $1)", customerTrackingID).Scan(&exists)
+		if err != nil || !exists {
+			return fmt.Errorf("wallet not found — please top up your wallet first")
+		}
+		return fmt.Errorf("insufficient wallet balance — your balance is less than PKR %.2f", amount)
 	}
 
 	if err := tx.Commit(ctx); err != nil {

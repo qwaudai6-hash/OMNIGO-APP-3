@@ -51,7 +51,8 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
 
   int get _maxQuantity {
     final stock = widget.product.stock;
-    return stock > 0 ? stock : 1;
+    // BUG-18 FIX: Return 0 when out of stock to prevent purchase.
+    return stock > 0 ? stock : 0;
   }
 
   @override
@@ -242,6 +243,7 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
         children: [
           _buildPaymentOption(ctx, 'card', 'Credit / Debit Card', Icons.credit_card, Colors.blue),
           _buildPaymentOption(ctx, 'payfast', 'PayFast (PK)', Icons.payment_outlined, Colors.deepOrange),
+          _buildPaymentOption(ctx, 'wallet', 'Wallet Balance', Icons.account_balance_wallet, Colors.teal),
           _buildPaymentOption(ctx, 'jazzcash', 'JazzCash', Icons.account_balance_wallet_outlined, Colors.red),
           _buildPaymentOption(ctx, 'easypaisa', 'EasyPaisa', Icons.account_balance_wallet_outlined, Colors.green),
           _buildPaymentOption(ctx, 'cash', 'Cash on Delivery', Icons.money_outlined, Colors.grey),
@@ -365,7 +367,10 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
           'items': reqItems,
           'total_amount': totalPrice,
           'currency': 'PKR',
+          'payment_gateway': paymentChoice == 'cash' ? 'cod' : paymentChoice,
           'device_session_nonce': nonce,
+          'dropoff_lat': 31.5204,
+          'dropoff_lng': 74.3587,
         }),
       ).timeout(const Duration(seconds: 8));
 
@@ -429,6 +434,43 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
               return;
             }
           }
+        }
+      } else if (paymentChoice == 'wallet') {
+        // Wallet balance checkout: deduct directly via /payment/checkout
+        final walletCheckoutUrl = Uri.parse(ApiEndpoints.stripeCheckout());
+        final walletCheckoutResp = await http.post(
+          walletCheckoutUrl,
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer $token',
+          },
+          body: jsonEncode({
+            'gateway': 'wallet',
+            'customer_id': widget.userTrackingId,
+            'order_id': realOrderTrackingId,
+            'amount': totalPrice,
+            'currency': 'PKR',
+          }),
+        ).timeout(const Duration(seconds: 10));
+
+        if (walletCheckoutResp.statusCode == 200) {
+          final wcData = jsonDecode(walletCheckoutResp.body) as Map<String, dynamic>;
+          final wcError = wcData['error']?.toString();
+          if (wcError != null && wcError.isNotEmpty) {
+            if (mounted) setState(() => _isCheckoutProcessing = false);
+            if (mounted) _showErrorDialog(wcError);
+            await prefs.remove('pending_nonce');
+            await prefs.remove('pending_order_product');
+            await prefs.remove('pending_order_status');
+            return;
+          }
+        } else {
+          if (mounted) setState(() => _isCheckoutProcessing = false);
+          if (mounted) _showErrorDialog('Wallet payment failed. Server returned ${walletCheckoutResp.statusCode}');
+          await prefs.remove('pending_nonce');
+          await prefs.remove('pending_order_product');
+          await prefs.remove('pending_order_status');
+          return;
         }
       } else if (paymentChoice == 'jazzcash' || paymentChoice == 'easypaisa') {
         // Mobile wallet redirect flow (scaffolding — redirect URL returned)
