@@ -317,15 +317,16 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, trackingID string,
 
 	// COD settlement: when order is delivered, trigger full COD accounting
 	// (ledger splits + vendor wallet credit + escrow hold + COD debt).
+	log.Printf("[COD-SETTLEMENT] status=%s codService=%v gateway=%s orderID=%s", status, s.codService != nil, order.PaymentGateway, trackingID)
 	if status == "delivered" && s.codService != nil {
 		isCOD := order.PaymentGateway == "" || strings.EqualFold(order.PaymentGateway, "cod")
 		if isCOD {
-			// Default commission: 2% admin, 0 for rider (rider earning settled separately via COD confirm)
 			adminCommission := order.TotalAmount * 0.02
 			riderEarning := 0.0
 			if err := s.codService.OnOrderDelivered(ctx, trackingID, order.VendorTrackID, order.RiderTrackID, order.TotalAmount, adminCommission, riderEarning); err != nil {
-				log.Printf("[COD-SETTLEMENT] Warning: failed to settle COD for order %s: %v", trackingID, err)
-				// Non-fatal: order status already updated, settlement can be retried
+				log.Printf("[COD-SETTLEMENT] FAILED for order %s: %v", trackingID, err)
+			} else {
+				log.Printf("[COD-SETTLEMENT] SUCCESS for order %s — vendor wallet credited, escrow held, ledger split", trackingID)
 			}
 		}
 	}
