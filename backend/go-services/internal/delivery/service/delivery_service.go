@@ -367,7 +367,7 @@ func (s *DeliveryService) UpdateGigStatus(ctx context.Context, trackingID string
 		deliveryPhoto = req.PhotoURL
 	}
 
-	prevStatus, assignedRider, err := s.repo.UpdateGigStatus(ctx, trackingID, req.Status, pickupPhoto, deliveryPhoto)
+	prevStatus, assignedRider, err := s.repo.UpdateGigStatus(ctx, trackingID, req.Status, pickupPhoto, deliveryPhoto, gig.RiderEarning)
 	if err != nil {
 		return nil, err
 	}
@@ -379,9 +379,10 @@ func (s *DeliveryService) UpdateGigStatus(ctx context.Context, trackingID string
 		gig = &models.DeliveryGig{TrackingID: trackingID, Status: req.Status, AssignedRiderID: assignedRider}
 	}
 
-	// Credit rider wallet when delivery is completed.
+	// Record double-entry ledger transfer for rider earnings.
+	// NOTE: The actual Postgres wallet balance is now updated atomically in UpdateGigStatus.
 	if req.Status == models.StatusCompleted && s.walletCredit != nil && assignedRider != "" {
-		// BUG-08 FIX: Retry wallet credit up to 3 times before giving up.
+		// Retry ledger transfer up to 3 times before giving up.
 		var creditErr error
 		for attempt := 0; attempt < 3; attempt++ {
 			creditErr = s.walletCredit.CreditDelivery(
@@ -878,7 +879,7 @@ func (s *DeliveryService) CancelGig(ctx context.Context, req *models.CancelGigRe
 	}
 
 	// Unassign in the database (we could set status to broadcasting again)
-	_, _, err := s.repo.UpdateGigStatus(ctx, req.TrackingID, models.StatusBroadcasting, "", "")
+	_, _, err := s.repo.UpdateGigStatus(ctx, req.TrackingID, models.StatusBroadcasting, "", "", 0)
 	if err != nil {
 		return err
 	}
@@ -1032,10 +1033,10 @@ func (s *DeliveryService) DisputeGig(ctx context.Context, req *models.DisputeOrd
 			s.redis.Set(ctx, suspendKey, "true", 3*24*time.Hour)
 			log.Printf("Rider %s has been suspended for 3 days due to delivery scam on gig %s", gig.AssignedRiderID, gig.TrackingID)
 		}
-		s.repo.ResolveDispute(ctx, req.TrackingID, "resolved_rider_guilty")
+		s.repo.ResolveDispute(ctx, gig.TrackingID, "resolved_rider_guilty")
 	} else {
 		// Vendor scam
-		s.repo.ResolveDispute(ctx, req.TrackingID, "resolved_vendor_guilty")
+		s.repo.ResolveDispute(ctx, gig.TrackingID, "resolved_vendor_guilty")
 	}
 
 	return nil

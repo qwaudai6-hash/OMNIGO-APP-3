@@ -4,8 +4,8 @@ publish_to: 'none'
 version: 1.0.0+1
 
 environment:
-  sdk: '>=3.2.0 <4.0.0'
-  flutter: '>=3.22.0'
+  sdk: '>=3.5.0 <4.0.0'
+  flutter: '>=3.24.0'
 
 dependencies:
   flutter:
@@ -23,7 +23,6 @@ dependencies:
   url_launcher: ^6.2.0
   webview_flutter: ^4.4.0
   geolocator: ^13.0.0
-  geolocator_web: ^4.1.1
   flutter_background_service: ^5.0.5
   battery_plus: ^5.0.3
   hive: ^2.2.3

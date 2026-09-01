@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/omnigo/backend/internal/ledger"
@@ -115,40 +114,17 @@ func (s *RiderWalletService) GetWallet(ctx context.Context, riderTrackingID stri
 	return &resp, nil
 }
 
-// CreditDelivery adds the net rider earning to a rider's wallet atomically.
-// It also creates a double-entry ledger transfer from central_escrow → rider_wallet
-// if a ledger service is configured, keeping the ledger in sync with the wallet table.
+// CreditDelivery creates a double-entry ledger transfer from central_escrow → rider_wallet
+// keeping the ledger in sync with the wallet table.
 //
 // The transfer source is central_escrow (delivery fee pool funded by online payments).
 // For COD orders, central_escrow is funded by the COD settlement handler.
+// NOTE: The actual Postgres rider_wallet balance update is now handled atomically
+// within the delivery_repository's UpdateGigStatus transaction to prevent race conditions.
 func (s *RiderWalletService) CreditDelivery(ctx context.Context, riderTrackingID, deliveryID string, riderEarning, adminCommission float64) error {
 	netCredit := riderEarning
 	if netCredit < 0 {
 		return fmt.Errorf("net credit cannot be negative")
-	}
-
-	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to begin wallet transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	upsertQuery := `
-		INSERT INTO rider_wallet (rider_tracking_id, balance, lifetime_earnings, updated_at)
-		VALUES ($1, $2, $2, NOW())
-		ON CONFLICT (rider_tracking_id)
-		DO UPDATE SET
-			balance = rider_wallet.balance + $2,
-			lifetime_earnings = rider_wallet.lifetime_earnings + $2,
-			updated_at = NOW()
-	`
-	_, err = tx.Exec(ctx, upsertQuery, riderTrackingID, netCredit)
-	if err != nil {
-		return fmt.Errorf("wallet credit failed: %w", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("wallet commit failed: %w", err)
 	}
 
 	// Create double-entry ledger transfer: central_escrow → rider_wallet

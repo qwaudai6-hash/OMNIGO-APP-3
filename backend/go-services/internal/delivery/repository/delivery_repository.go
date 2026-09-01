@@ -520,7 +520,7 @@ func (r *DeliveryRepository) ClearOrderRider(ctx context.Context, gigTrackingID 
 
 // UpdateGigStatus locks and transitions the delivery status with strict state machine validation.
 // Returns the previous status, new status, assigned rider, and any error.
-func (r *DeliveryRepository) UpdateGigStatus(ctx context.Context, trackingID string, status string, pickupPhoto string, deliveryPhoto string) (prevStatus, assignedRider string, err error) {
+func (r *DeliveryRepository) UpdateGigStatus(ctx context.Context, trackingID string, status string, pickupPhoto string, deliveryPhoto string, riderEarning float64) (prevStatus, assignedRider string, err error) {
 	tx, err := r.writer.Begin(ctx)
 	if err != nil {
 		return "", "", err
@@ -592,6 +592,24 @@ func (r *DeliveryRepository) UpdateGigStatus(ctx context.Context, trackingID str
 	_, err = tx.Exec(ctx, updateQuery, args...)
 	if err != nil {
 		return "", assignedRider, fmt.Errorf("failed to update gig status: %v", err)
+	}
+
+	// CLAIM-4 FIX: Atomically credit the rider wallet in the exact same transaction
+	// to prevent race conditions or missed payments if the server crashes right after
+	// the status update.
+	if status == models.StatusCompleted && riderEarning > 0 && assignedRider != "" {
+		upsertWallet := `
+			INSERT INTO rider_wallet (rider_tracking_id, balance, lifetime_earnings, updated_at)
+			VALUES ($1, $2, $2, NOW())
+			ON CONFLICT (rider_tracking_id)
+			DO UPDATE SET
+				balance = rider_wallet.balance + $2,
+				lifetime_earnings = rider_wallet.lifetime_earnings + $2,
+				updated_at = NOW()
+		`
+		if _, err := tx.Exec(ctx, upsertWallet, assignedRider, riderEarning); err != nil {
+			return "", assignedRider, fmt.Errorf("failed to credit rider wallet atomically: %v", err)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -692,7 +710,11 @@ func (r *DeliveryRepository) SettleCODVendorAndDebt(ctx context.Context, orderTr
 		return fmt.Errorf("order lookup failed: %w", err)
 	}
 	if vendorID == "" {
-		vendorID = storeID // legacy fallback
+		// CLAIM-3 FIX: Look up the actual vendor ID from the stores table rather than blindly using storeID
+		err = tx.QueryRow(ctx, `SELECT COALESCE(vendor_tracking_id, '') FROM stores WHERE store_tracking_id = $1`, storeID).Scan(&vendorID)
+		if err != nil || vendorID == "" {
+			return fmt.Errorf("store vendor lookup failed for store %s: %v", storeID, err)
+		}
 	}
 
 	vendorAmount := orderTotal - adminCommission - riderEarning
