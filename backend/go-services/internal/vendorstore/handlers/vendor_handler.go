@@ -94,6 +94,33 @@ func (h *VendorHandler) ListStores(c *gin.Context) {
 	c.JSON(http.StatusOK, stores)
 }
 
+// GetDashboard returns combined store info + metrics for the vendor dashboard.
+func (h *VendorHandler) GetDashboard(c *gin.Context) {
+	trackingID := middleware.GetTrackingID(c)
+	if trackingID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	store, err := h.svc.GetStoreByVendorID(c.Request.Context(), trackingID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "store not found"})
+		return
+	}
+
+	metrics, err := h.svc.GetVendorMetrics(c.Request.Context(), trackingID)
+	if err != nil {
+		metrics = nil
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"dashboard": gin.H{
+			"store":   store,
+			"metrics": metrics,
+		},
+	})
+}
+
 // RegisterRoutes attaches the handlers to the gin router
 func (h *VendorHandler) RegisterRoutes(router *gin.Engine) {
 	stores := router.Group("/api/v1/stores")
@@ -108,6 +135,7 @@ func (h *VendorHandler) RegisterRoutes(router *gin.Engine) {
 	vendor := router.Group("/api/v1/vendor", middleware.JWTAuth(), middleware.RoleRequired("vendor", "admin"))
 	{
 		vendor.GET("/stores/me", h.GetMyStore)
+		vendor.GET("/dashboard", h.GetDashboard)
 	}
 
 	metricsH := NewVendorMetricsHandler(h.svc)

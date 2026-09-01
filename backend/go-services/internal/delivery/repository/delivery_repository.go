@@ -493,9 +493,9 @@ func (r *DeliveryRepository) GetGigByOrderTrackingID(ctx context.Context, orderT
 // CreateOrderDispute creates a dispute record directly when no gig exists for the order.
 func (r *DeliveryRepository) CreateOrderDispute(ctx context.Context, orderTrackingID, reason, photoURL string) error {
 	query := `
-		INSERT INTO disputes (order_tracking_id, reason, status, created_at, updated_at)
-		VALUES ($1, $2, 'open', NOW(), NOW())
-		ON CONFLICT (order_tracking_id) DO UPDATE SET reason = $2, updated_at = NOW()
+		INSERT INTO disputes (order_tracking_id, filed_by, reason, status, created_at, updated_at)
+		VALUES ($1, 'customer', $2, 'open', NOW(), NOW())
+		ON CONFLICT DO NOTHING
 	`
 	_, err := r.writer.Exec(ctx, query, orderTrackingID, reason)
 	return err

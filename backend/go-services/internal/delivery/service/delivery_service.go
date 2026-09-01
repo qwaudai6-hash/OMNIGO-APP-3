@@ -970,7 +970,7 @@ func (s *DeliveryService) DisputeGig(ctx context.Context, req *models.DisputeOrd
 				return err
 			}
 			// Also mark the order's dispute_status so admin can see it
-			return s.repo.UpdateOrderDisputeStatus(ctx, req.TrackingID, "OPEN")
+			return s.repo.UpdateOrderDisputeStatus(ctx, req.TrackingID, "disputed")
 		}
 	}
 
@@ -981,7 +981,14 @@ func (s *DeliveryService) DisputeGig(ctx context.Context, req *models.DisputeOrd
 	}
 
 	// 2b. Also update parent order's dispute_status so admin can see it
-	_ = s.repo.UpdateOrderDisputeStatus(ctx, gig.OrderTrackingID, "OPEN")
+	if err := s.repo.UpdateOrderDisputeStatus(ctx, gig.OrderTrackingID, "disputed"); err != nil {
+		log.Printf("Warning: failed to update order dispute_status for %s: %v", gig.OrderTrackingID, err)
+	}
+
+	// 2c. Insert into disputes table for admin visibility
+	if err := s.repo.CreateOrderDispute(ctx, gig.OrderTrackingID, req.Reason, req.PhotoURL); err != nil {
+		log.Printf("Warning: failed to insert dispute record for %s: %v", gig.OrderTrackingID, err)
+	}
 
 	// 3. Evidence-based scoring — each signal adds weight toward rider or vendor guilt.
 	riderScore, vendorScore := 0, 0

@@ -734,6 +734,150 @@ func main() {
 			}
 			c.JSON(http.StatusOK, gin.H{"trail": trail, "rider_id": riderID, "hours": hoursAgo})
 		})
+
+		// ── Wallet Overview (all wallets summary) ─────────────────
+		adminRoutes.GET("/wallet/overview", func(c *gin.Context) {
+			ctx := c.Request.Context()
+			var customerTotal, vendorTotal, riderTotal float64
+			_ = dbPool.QueryRow(ctx, `SELECT COALESCE(SUM(balance),0) FROM customer_wallet`).Scan(&customerTotal)
+			_ = dbPool.QueryRow(ctx, `SELECT COALESCE(SUM(balance),0) FROM vendor_wallet`).Scan(&vendorTotal)
+			_ = dbPool.QueryRow(ctx, `SELECT COALESCE(SUM(cash_in_hand),0) FROM rider_wallet`).Scan(&riderTotal)
+			c.JSON(http.StatusOK, gin.H{
+				"wallet": gin.H{
+					"customer_total": customerTotal,
+					"vendor_total":   vendorTotal,
+					"rider_total":    riderTotal,
+					"grand_total":    customerTotal + vendorTotal + riderTotal,
+				},
+			})
+		})
+
+		// ── Rider COD Collection Status ─────────────────────────
+		adminRoutes.GET("/rider/cod-collection", func(c *gin.Context) {
+			ctx := c.Request.Context()
+			rows, err := dbPool.Query(ctx, `
+				SELECT rw.rider_tracking_id, COALESCE(rw.cash_in_hand, 0), COALESCE(u.full_name, 'Unknown'),
+					   (SELECT COUNT(*) FROM cod_debts cd WHERE cd.rider_tracking_id = rw.rider_tracking_id AND cd.status = 'pending')
+				FROM rider_wallet rw
+				LEFT JOIN users u ON u.tracking_id = rw.rider_tracking_id
+				WHERE rw.cash_in_hand > 0
+				ORDER BY rw.cash_in_hand DESC`)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			defer rows.Close()
+			type RiderCOD struct {
+				RiderID    string  `json:"rider_tracking_id"`
+				Name       string  `json:"name"`
+				CashInHand float64 `json:"cash_in_hand"`
+				PendingDebts int   `json:"pending_debts"`
+			}
+			var riders []RiderCOD
+			for rows.Next() {
+				var r RiderCOD
+				if err := rows.Scan(&r.RiderID, &r.CashInHand, &r.Name, &r.PendingDebts); err != nil {
+					continue
+				}
+				riders = append(riders, r)
+			}
+			c.JSON(http.StatusOK, gin.H{"pending": riders, "count": len(riders)})
+		})
+
+		// ── Analytics Overview ─────────────────────────────────
+		adminRoutes.GET("/analytics/overview", func(c *gin.Context) {
+			ctx := c.Request.Context()
+			days, _ := strconv.Atoi(c.DefaultQuery("days", "7"))
+			if days <= 0 || days > 365 {
+				days = 7
+			}
+			var totalOrders, totalRevenue, totalUsers, activeRiders int
+			_ = dbPool.QueryRow(ctx, `SELECT COUNT(*) FROM orders WHERE created_at > NOW() - INTERVAL '1 day' * $1`, days).Scan(&totalOrders)
+			_ = dbPool.QueryRow(ctx, `SELECT COALESCE(SUM(total_amount),0) FROM orders WHERE created_at > NOW() - INTERVAL '1 day' * $1 AND status NOT IN ('cancelled','failed')`, days).Scan(&totalRevenue)
+			_ = dbPool.QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE created_at > NOW() - INTERVAL '1 day' * $1`, days).Scan(&totalUsers)
+			_ = dbPool.QueryRow(ctx, `SELECT COUNT(DISTINCT rider_tracking_id) FROM deliveries WHERE created_at > NOW() - INTERVAL '1 day' * $1 AND status != 'broadcasting'`, days).Scan(&activeRiders)
+			c.JSON(http.StatusOK, gin.H{
+				"total_orders":   totalOrders,
+				"total_revenue":  totalRevenue,
+				"new_users":      totalUsers,
+				"active_riders":  activeRiders,
+				"period_days":    days,
+			})
+		})
+
+		// ── Delivery Heatmap (delivery dropoff points) ─────────
+		adminRoutes.GET("/analytics/heatmap/deliveries", func(c *gin.Context) {
+			ctx := c.Request.Context()
+			days, _ := strconv.Atoi(c.DefaultQuery("days", "7"))
+			if days <= 0 || days > 365 {
+				days = 7
+			}
+			rows, err := dbPool.Query(ctx, `
+				SELECT ROUND(o.customer_lat::numeric, 4) as lat, ROUND(o.customer_lng::numeric, 4) as lng, COUNT(*) as count
+				FROM orders o
+				WHERE o.created_at > NOW() - INTERVAL '1 day' * $1
+				  AND o.customer_lat != 0 AND o.customer_lng != 0
+				GROUP BY lat, lng ORDER BY count DESC LIMIT 200`, days)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			defer rows.Close()
+			type Point struct {
+				Lat   float64 `json:"lat"`
+				Lng   float64 `json:"lng"`
+				Count int     `json:"count"`
+			}
+			var heatmap []Point
+			for rows.Next() {
+				var p Point
+				if err := rows.Scan(&p.Lat, &p.Lng, &p.Count); err != nil {
+					continue
+				}
+				heatmap = append(heatmap, p)
+			}
+			c.JSON(http.StatusOK, gin.H{"heatmap": heatmap, "period_days": days})
+		})
+
+		// ── Vendor Heatmap (orders per vendor area) ────────────
+		adminRoutes.GET("/analytics/heatmap/vendors", func(c *gin.Context) {
+			ctx := c.Request.Context()
+			days, _ := strconv.Atoi(c.DefaultQuery("days", "7"))
+			if days <= 0 || days > 365 {
+				days = 7
+			}
+			rows, err := dbPool.Query(ctx, `
+				SELECT o.vendor_tracking_id, COALESCE(vs.name, 'Unknown') as store_name,
+					   ROUND(o.customer_lat::numeric, 4) as lat, ROUND(o.customer_lng::numeric, 4) as lng,
+					   COUNT(*) as order_count
+				FROM orders o
+				LEFT JOIN vendor_stores vs ON vs.tracking_id = o.vendor_tracking_id
+				WHERE o.created_at > NOW() - INTERVAL '1 day' * $1
+				  AND o.customer_lat != 0 AND o.customer_lng != 0
+				GROUP BY o.vendor_tracking_id, store_name, lat, lng
+				ORDER BY order_count DESC LIMIT 100`, days)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			defer rows.Close()
+			type VendorPoint struct {
+				VendorID   string  `json:"vendor_id"`
+				StoreName  string  `json:"store_name"`
+				Lat        float64 `json:"lat"`
+				Lng        float64 `json:"lng"`
+				OrderCount int     `json:"order_count"`
+			}
+			var heatmap []VendorPoint
+			for rows.Next() {
+				var p VendorPoint
+				if err := rows.Scan(&p.VendorID, &p.StoreName, &p.Lat, &p.Lng, &p.OrderCount); err != nil {
+					continue
+				}
+				heatmap = append(heatmap, p)
+			}
+			c.JSON(http.StatusOK, gin.H{"heatmap": heatmap, "period_days": days})
+		})
 	}
 
 	// ── Health check (public) ────────────────────────────────────
