@@ -498,8 +498,8 @@ func (r *DeliveryRepository) CreateOrderDispute(ctx context.Context, orderTracki
 		customerID = "system"
 	}
 	query := `
-		INSERT INTO disputes (order_tracking_id, filed_by, reason, status, created_at, updated_at)
-		VALUES ($1, $2, $3, 'open', NOW(), NOW())
+		INSERT INTO disputes (id, order_tracking_id, filed_by, reason, status, created_at, updated_at)
+		VALUES (gen_random_uuid(), $1, $2, $3, 'open', NOW(), NOW())
 	`
 	_, err := r.writer.Exec(ctx, query, orderTrackingID, customerID, reason)
 	return err
