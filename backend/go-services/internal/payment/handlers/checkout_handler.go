@@ -94,6 +94,9 @@ func (h *CheckoutHandler) CreateCheckout(c *gin.Context) {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "wallet deducted but failed to update order status: " + err.Error()})
 				return
 			}
+			// Also set payment_status='paid' so delivery accept eligibility passes
+			// (the repo UpdateOrderStatus only touches the status column).
+			_ = h.orderRepo.UpdatePaymentStatus(c.Request.Context(), req.OrderID, "paid")
 		}
 		// Return immediate success
 		c.JSON(http.StatusOK, service.CheckoutResponse{

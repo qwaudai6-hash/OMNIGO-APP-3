@@ -471,6 +471,17 @@ func (r *OrderRepository) UpdateOrderStatus(ctx context.Context, trackingID stri
 	return nil
 }
 
+// UpdatePaymentStatus sets the payment_status column for an order.
+func (r *OrderRepository) UpdatePaymentStatus(ctx context.Context, trackingID string, paymentStatus string) error {
+	query := `
+		UPDATE orders
+		SET payment_status = $1, updated_at = NOW()
+		WHERE order_tracking_id = $2
+	`
+	_, err := r.writer.Exec(ctx, query, paymentStatus, trackingID)
+	return err
+}
+
 // ErrNoStatusChange indicates the status transition was a no-op (duplicate
 // event) or the order is in a terminal state that cannot be overwritten.
 var ErrNoStatusChange = errors.New("order status unchanged (terminal state or duplicate)")
