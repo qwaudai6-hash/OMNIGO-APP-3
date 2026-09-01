@@ -193,9 +193,9 @@ func (r *DeliveryRepository) AcceptGigWithEligibility(ctx context.Context, track
 		return fmt.Errorf("conflict: gig is no longer available (status: %s)", currentStatus)
 	}
 
-	// CRITICAL: Verify the parent order has been paid before assigning a rider.
-	// Without this check, a rider could be dispatched for an unpaid order
-	// (race condition: order created → gig broadcast → rider accepts → payment fails).
+	// Verify the parent order payment status before assigning a rider.
+	// COD orders have payment_status='pending' because payment is collected on delivery.
+	// Online orders (Stripe/PayFast/JazzCash/EasyPaisa) must be 'paid' or 'settlement_pending'.
 	var orderPaymentStatus string
 	err = tx.QueryRow(ctx,
 		`SELECT COALESCE(payment_status, '') FROM orders WHERE order_tracking_id = $1`,
@@ -204,7 +204,11 @@ func (r *DeliveryRepository) AcceptGigWithEligibility(ctx context.Context, track
 	if err != nil {
 		return fmt.Errorf("failed to verify order payment status: %v", err)
 	}
-	if orderPaymentStatus != "paid" && orderPaymentStatus != "settlement_pending" {
+	paymentOK := orderPaymentStatus == "paid" || orderPaymentStatus == "settlement_pending"
+	if isCod {
+		paymentOK = paymentOK || orderPaymentStatus == "pending"
+	}
+	if !paymentOK {
 		return fmt.Errorf("conflict: order payment not confirmed (status: %s). Rider assignment blocked", orderPaymentStatus)
 	}
 
