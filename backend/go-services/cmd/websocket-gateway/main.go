@@ -38,6 +38,7 @@ func envOrDefault(key, def string) string {
 
 func main() {
 	r := gin.Default()
+	r.RedirectTrailingSlash = false
 	r.Use(sentrygin.New(sentrygin.Options{Repanic: true}))
 
 	redisAddr := os.Getenv("REDIS_ADDRS")

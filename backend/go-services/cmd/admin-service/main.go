@@ -165,6 +165,7 @@ func main() {
 	}
 
 	r := gin.Default()
+	r.RedirectTrailingSlash = false
 	r.Use(sentrygin.New(sentrygin.Options{Repanic: true}))
 
 	// Security audit middleware: inject Correlation Trace ID

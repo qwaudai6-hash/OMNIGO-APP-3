@@ -350,7 +350,7 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, trackingID string,
 				Key:   []byte(trackingID),
 				Value: eventBytes,
 			}
-			s.kafka.Client.Produce(ctx, record, func(_ *kgo.Record, err error) {
+			s.kafka.Client.Produce(context.Background(), record, func(_ *kgo.Record, err error) {
 				if err != nil {
 					fmt.Printf("Warning: Failed to produce orders.updated event: %v\n", err)
 				}

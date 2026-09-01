@@ -908,10 +908,14 @@ func (s *DeliveryService) CancelGig(ctx context.Context, req *models.CancelGigRe
 
 // DisputeGig processes a customer complaint, compares photos, and suspends the rider if guilty
 func (s *DeliveryService) DisputeGig(ctx context.Context, req *models.DisputeOrderRequest) error {
-	// 1. Fetch gig
-	gig, err := s.repo.GetGigByTrackingID(ctx, req.TrackingID)
+	// 1. Try to fetch gig — first by order_tracking_id, then by gig tracking_id
+	gig, err := s.repo.GetGigByOrderTrackingID(ctx, req.TrackingID)
 	if err != nil {
-		return err
+		gig, err = s.repo.GetGigByTrackingID(ctx, req.TrackingID)
+		if err != nil {
+			// No gig found — create a dispute record directly for the order
+			return s.repo.CreateOrderDispute(ctx, req.TrackingID, req.Reason, req.PhotoURL)
+		}
 	}
 
 	// 2. Update gig dispute state

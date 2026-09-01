@@ -663,47 +663,35 @@ func (s *AdminSurveillanceService) GetDisputedOrders(ctx context.Context) ([]Dis
 // If vendor_guilty or rider_guilty -> refund to customer wallet and penalize guilty party.
 // If customer_guilty -> release funds to vendor/rider.
 func (s *AdminSurveillanceService) ResolveDispute(ctx context.Context, orderTrackingID string, decision string) error {
-	// First fetch the escrow record
+	// First fetch the escrow record — try disputed escrow, then any escrow
 	var escrowAmount float64
 	var customerID string
+	var escrowStatus string
 	query := `
-		SELECT e.amount, o.customer_tracking_id
+		SELECT e.amount, o.customer_tracking_id, e.status
 		FROM escrow_holds e
 		JOIN orders o ON e.order_tracking_id = o.order_tracking_id
-		WHERE e.order_tracking_id = $1 AND e.status = 'disputed'
+		WHERE e.order_tracking_id = $1
+		ORDER BY e.created_at DESC LIMIT 1
 	`
-	err := s.dbReader.QueryRow(ctx, query, orderTrackingID).Scan(&escrowAmount, &customerID)
+	err := s.dbReader.QueryRow(ctx, query, orderTrackingID).Scan(&escrowAmount, &customerID, &escrowStatus)
 	if err != nil {
-		return fmt.Errorf("escrow not found or not frozen: %w", err)
+		// No escrow record — get order amount directly for COD already-settled orders
+		err2 := s.dbReader.QueryRow(ctx,
+			"SELECT total_amount, customer_tracking_id FROM orders WHERE order_tracking_id = $1",
+			orderTrackingID).Scan(&escrowAmount, &customerID)
+		if err2 != nil {
+			return fmt.Errorf("order not found: %w", err2)
+		}
+		escrowStatus = "paid_out"
 	}
 
+	// Mark the dispute as resolved
+	_, _ = s.dbWriter.Exec(ctx, "UPDATE disputes SET status = 'resolved', resolution = $1, resolved_at = NOW(), updated_at = NOW() WHERE order_tracking_id = $2 AND status = 'open'",
+		fmt.Sprintf("admin_%s", decision), orderTrackingID)
+
 	if decision == "vendor_guilty" || decision == "rider_guilty" {
-		// Refund to customer wallet!
-		idempotencyKey := fmt.Sprintf("dispute_refund:%s", orderTrackingID)
-
-		if s.tbService != nil {
-			if _, err := s.tbService.Transfer(ctx, ledger.TransferRequest{
-				DebitAccount:   ledger.AccountCentralEscrow,
-				CreditAccount:  ledger.AccountCustomerWallet,
-				Amount:         escrowAmount,
-				Currency:       "PKR",
-				ReferenceType:  "dispute_refund",
-				ReferenceID:    orderTrackingID,
-				Description:    fmt.Sprintf("Refund for disputed order %s", orderTrackingID),
-				IdempotencyKey: idempotencyKey,
-			}); err != nil {
-				return fmt.Errorf("ledger refund transfer failed: %w", err)
-			}
-		}
-
-		// Mark as refunded and close the linked dispute.
-		_, err = s.dbWriter.Exec(ctx, "UPDATE escrow_holds SET status = 'refunded', released_at = NOW() WHERE order_tracking_id = $1", orderTrackingID)
-		if err != nil {
-			return err
-		}
-		_, _ = s.dbWriter.Exec(ctx, "UPDATE disputes SET status = 'resolved', resolution = 'admin_refund', resolved_at = NOW(), updated_at = NOW() WHERE order_tracking_id = $1 AND status = 'open'", orderTrackingID)
-
-		// Credit the customer wallet directly so the refund is immediately usable.
+		// Refund to customer wallet
 		upsertWallet := `
 			INSERT INTO customer_wallet (customer_tracking_id, balance, updated_at)
 			VALUES ($1, $2, NOW())
@@ -714,7 +702,12 @@ func (s *AdminSurveillanceService) ResolveDispute(ctx context.Context, orderTrac
 			return err
 		}
 
-		// Penalty debits:
+		// If escrow is still held/frozen, release it
+		if escrowStatus == "disputed" || escrowStatus == "held" {
+			_, _ = s.dbWriter.Exec(ctx, "UPDATE escrow_holds SET status = 'refunded', released_at = NOW() WHERE order_tracking_id = $1", orderTrackingID)
+		}
+
+		// Penalty debits
 		if decision == "rider_guilty" {
 			var riderTrackingID string
 			_ = s.dbReader.QueryRow(ctx, "SELECT COALESCE(rider_tracking_id, '') FROM orders WHERE order_tracking_id = $1", orderTrackingID).Scan(&riderTrackingID)
@@ -733,10 +726,12 @@ func (s *AdminSurveillanceService) ResolveDispute(ctx context.Context, orderTrac
 		return nil
 
 	} else if decision == "customer_guilty" {
-		// Unfreeze the escrow, let the cron job settle it
-		_, err = s.dbWriter.Exec(ctx, "UPDATE escrow_holds SET status = 'held', dispute_id = NULL WHERE order_tracking_id = $1", orderTrackingID)
-		if err != nil {
-			return err
+		// Unfreeze the escrow if still held
+		if escrowStatus == "disputed" || escrowStatus == "held" {
+			_, err = s.dbWriter.Exec(ctx, "UPDATE escrow_holds SET status = 'held', dispute_id = NULL WHERE order_tracking_id = $1", orderTrackingID)
+			if err != nil {
+				return err
+			}
 		}
 		_, _ = s.dbWriter.Exec(ctx, "UPDATE disputes SET status = 'resolved', resolution = 'admin_customer_guilty', resolved_at = NOW(), updated_at = NOW() WHERE order_tracking_id = $1 AND status = 'open'", orderTrackingID)
 		return nil

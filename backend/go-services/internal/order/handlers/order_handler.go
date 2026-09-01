@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"errors"
 	"net/http"
 	"strconv"
 
@@ -248,11 +247,12 @@ func (h *OrderHandler) UpdateOrderStatus(c *gin.Context) {
 	}
 
 	if err := h.svc.UpdateOrderStatus(c.Request.Context(), trackingID, req.Status); err != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"status": "order status updated"})
+	updated, _ := h.svc.GetOrder(c.Request.Context(), trackingID)
+	c.JSON(http.StatusOK, gin.H{"status": "order status updated", "order": updated})
 }
 
 // ConfirmOrder HTTP handler for POST /orders/confirm
@@ -303,7 +303,8 @@ func (h *OrderHandler) ConfirmOrder(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"status": "order delivered successfully"})
+	updated, _ := h.svc.GetOrder(c.Request.Context(), req.OrderTrackingID)
+	c.JSON(http.StatusOK, gin.H{"status": "order delivered successfully", "order": updated})
 }
 
 // VendorHandoverRequest is the body for POST /orders/handover. Vendors
@@ -393,25 +394,148 @@ func (h *OrderHandler) callerCanReadOrder(order *models.Order, callerID, role st
 	return false
 }
 
-// Ensure unused import 'errors' is not flagged — keep the import list minimal.
-// errors is reserved for future validation helpers that will return
-// typed errors handled in the service layer.
-var _ = errors.New
+// CancelOrder allows a customer to cancel their own order before it is shipped.
+// Valid source states: pending, paid, accepted.
+func (h *OrderHandler) CancelOrder(c *gin.Context) {
+	trackingID := c.Param("tracking_id")
+	if trackingID == "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "tracking_id is required"})
+		return
+	}
+
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	_ = c.ShouldBindJSON(&req)
+
+	callerID := middleware.GetTrackingID(c)
+	role := middleware.GetRole(c)
+	if callerID == "" || role == "" {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "AUTH_TOKEN_INVALID"})
+		return
+	}
+
+	order, err := h.svc.GetOrder(c.Request.Context(), trackingID)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "order not found"})
+		return
+	}
+
+	if role != "admin" && order.UserTrackID != callerID {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"error":   "FORBIDDEN_NOT_ORDER_OWNER",
+			"message": "only the order's customer or an admin may cancel",
+		})
+		return
+	}
+
+	if err := h.svc.UpdateOrderStatus(c.Request.Context(), trackingID, "cancelled"); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	updated, _ := h.svc.GetOrder(c.Request.Context(), trackingID)
+	c.JSON(http.StatusOK, gin.H{"status": "order cancelled", "order": updated})
+}
+
+// ReturnOrder allows a customer to request a return on a delivered/completed order.
+// Valid source states: delivered, completed.
+func (h *OrderHandler) ReturnOrder(c *gin.Context) {
+	trackingID := c.Param("tracking_id")
+	if trackingID == "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "tracking_id is required"})
+		return
+	}
+
+	var req struct {
+		Reason string `json:"reason" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	callerID := middleware.GetTrackingID(c)
+	role := middleware.GetRole(c)
+	if callerID == "" || role == "" {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "AUTH_TOKEN_INVALID"})
+		return
+	}
+
+	order, err := h.svc.GetOrder(c.Request.Context(), trackingID)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "order not found"})
+		return
+	}
+
+	if role != "admin" && order.UserTrackID != callerID {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"error":   "FORBIDDEN_NOT_ORDER_OWNER",
+			"message": "only the order's customer or an admin may request return",
+		})
+		return
+	}
+
+	if err := h.svc.UpdateOrderStatus(c.Request.Context(), trackingID, "returned"); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	updated, _ := h.svc.GetOrder(c.Request.Context(), trackingID)
+	c.JSON(http.StatusOK, gin.H{"status": "return requested", "order": updated})
+}
+
+// GetMyOrders returns all orders for the authenticated customer.
+func (h *OrderHandler) GetMyOrders(c *gin.Context) {
+	callerID := middleware.GetTrackingID(c)
+	if callerID == "" {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "AUTH_TOKEN_INVALID"})
+		return
+	}
+
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	status := c.Query("status")
+
+	orders, err := h.svc.GetOrdersByCustomer(c.Request.Context(), callerID, limit, status)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"orders": orders, "total": len(orders)})
+}
+
+// GetVendorMyOrders returns all orders for the authenticated vendor.
+func (h *OrderHandler) GetVendorMyOrders(c *gin.Context) {
+	callerID := middleware.GetTrackingID(c)
+	if callerID == "" {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "AUTH_TOKEN_INVALID"})
+		return
+	}
+
+	orders, err := h.svc.GetOrdersByVendor(c.Request.Context(), callerID)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"orders": orders, "total": len(orders)})
+}
 
 // RegisterRoutes attaches the handlers to the gin router.
-//
-// All routes in this handler require a valid JWT. Per-route authorization
-// (customer vs vendor vs admin) is enforced inside the handler via
-// ownership checks because the rule depends on the data being read.
 func (h *OrderHandler) RegisterRoutes(router *gin.Engine) {
 	orders := router.Group("/api/v1/orders", middleware.JWTAuth())
 	{
 		orders.POST("/", h.CreateOrder)
 		orders.POST("/confirm", h.ConfirmOrder)
 		orders.POST("/handover", h.VendorHandoverOrder)
+		orders.GET("/my", h.GetMyOrders)
+		orders.GET("/vendor/my", h.GetVendorMyOrders)
 		orders.GET("/:tracking_id", h.GetOrder)
 		orders.GET("/customer/:customer_id", h.GetOrdersByCustomer)
 		orders.GET("/vendor/:vendor_id", h.GetOrdersByVendor)
 		orders.PATCH("/:tracking_id/status", h.UpdateOrderStatus)
+		orders.POST("/:tracking_id/cancel", h.CancelOrder)
+		orders.POST("/:tracking_id/return", h.ReturnOrder)
 	}
 }

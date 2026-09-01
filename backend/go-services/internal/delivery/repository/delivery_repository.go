@@ -393,6 +393,90 @@ func (r *DeliveryRepository) GetGigByTrackingID(ctx context.Context, trackingID 
 	return gig, nil
 }
 
+// GetGigByOrderTrackingID returns the most recent gig for a given order tracking ID.
+func (r *DeliveryRepository) GetGigByOrderTrackingID(ctx context.Context, orderTrackingID string) (*models.DeliveryGig, error) {
+	query := `
+		SELECT id, tracking_id, order_tracking_id, vendor_store_tracking_id, customer_tracking_id, status, rider_tracking_id, admin_commission, rider_earning, COALESCE(tips, 0.0), COALESCE(petrol_allowance, 0.0), pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, otp_code, pickup_photo_url, delivery_photo_url, customer_dispute_photo_url, dispute_status, is_cod, order_total, customer_phone, created_at, updated_at
+		FROM deliveries
+		WHERE order_tracking_id = $1
+		ORDER BY created_at DESC LIMIT 1
+	`
+	gig := &models.DeliveryGig{}
+	var riderID, vendorStoreID, customerTrackID *string
+	var pickupLat, pickupLng, dropoffLat, dropoffLng *float64
+	var otpCode, pickupPhoto, deliveryPhoto, disputePhoto, disputeStatus, customerPhone *string
+	var isCod *bool
+	var orderTotal *float64
+
+	err := r.reader.QueryRow(ctx, query, orderTrackingID).Scan(
+		&gig.ID, &gig.TrackingID, &gig.OrderTrackingID, &vendorStoreID, &customerTrackID,
+		&gig.Status, &riderID, &gig.AdminCommission, &gig.RiderEarning, &gig.Tips, &gig.PetrolAllowance,
+		&pickupLat, &pickupLng, &dropoffLat, &dropoffLng,
+		&otpCode, &pickupPhoto, &deliveryPhoto, &disputePhoto, &disputeStatus, &isCod, &orderTotal, &customerPhone,
+		&gig.CreatedAt, &gig.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if riderID != nil {
+		gig.AssignedRiderID = *riderID
+	}
+	if vendorStoreID != nil {
+		gig.VendorStoreTrackID = *vendorStoreID
+	}
+	if customerTrackID != nil {
+		gig.CustomerTrackID = *customerTrackID
+	}
+	if pickupLat != nil {
+		gig.PickupLat = *pickupLat
+	}
+	if pickupLng != nil {
+		gig.PickupLng = *pickupLng
+	}
+	if dropoffLat != nil {
+		gig.DropoffLat = *dropoffLat
+	}
+	if dropoffLng != nil {
+		gig.DropoffLng = *dropoffLng
+	}
+	if otpCode != nil {
+		gig.OTPCode = *otpCode
+	}
+	if pickupPhoto != nil {
+		gig.PickupPhotoURL = *pickupPhoto
+	}
+	if deliveryPhoto != nil {
+		gig.DeliveryPhotoURL = *deliveryPhoto
+	}
+	if disputePhoto != nil {
+		gig.CustomerDisputePhotoURL = *disputePhoto
+	}
+	if disputeStatus != nil {
+		gig.DisputeStatus = *disputeStatus
+	}
+	if isCod != nil {
+		gig.IsCOD = *isCod
+	}
+	if orderTotal != nil {
+		gig.OrderTotal = *orderTotal
+	}
+	if customerPhone != nil {
+		gig.CustomerPhone = *customerPhone
+	}
+	return gig, nil
+}
+
+// CreateOrderDispute creates a dispute record directly when no gig exists for the order.
+func (r *DeliveryRepository) CreateOrderDispute(ctx context.Context, orderTrackingID, reason, photoURL string) error {
+	query := `
+		INSERT INTO disputes (order_tracking_id, reason, status, created_at, updated_at)
+		VALUES ($1, $2, 'open', NOW(), NOW())
+		ON CONFLICT (order_tracking_id) DO UPDATE SET reason = $2, updated_at = NOW()
+	`
+	_, err := r.writer.Exec(ctx, query, orderTrackingID, reason)
+	return err
+}
+
 // UpdateGigStatus locks and transitions the delivery status with strict state machine validation.
 // Returns the previous status, new status, assigned rider, and any error.
 func (r *DeliveryRepository) UpdateGigStatus(ctx context.Context, trackingID string, status string, pickupPhoto string, deliveryPhoto string) (prevStatus, assignedRider string, err error) {

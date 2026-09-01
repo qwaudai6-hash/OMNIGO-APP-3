@@ -55,6 +55,7 @@ USER omnigo
 # because it starts internal services on loopback and proxies external traffic.
 ARG SERVICE=monolith
 ENV SERVICE_NAME=${SERVICE}
+ENV GIN_MODE=release
 
 # Gateway listens on $PORT (Railway injects this). Internal services
 # listen on their own internal ports via EnvPort().

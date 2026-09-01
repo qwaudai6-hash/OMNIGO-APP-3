@@ -121,6 +121,7 @@ func main() {
 
 	// 5. Setup Router
 	router := gin.Default()
+	router.RedirectTrailingSlash = false
 	router.Use(sentrygin.New(sentrygin.Options{Repanic: true}))
 
 	// Security middleware: CORS + rate limiting (auth endpoints: 30 req/min stricter)
