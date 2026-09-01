@@ -73,7 +73,7 @@ func (r *DeliveryRepository) CreateGig(ctx context.Context, gig *models.Delivery
 		VALUES ($1, $2, $3, $4, 'broadcasting', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 		RETURNING id, created_at, updated_at
 	`
-	err := r.writer.QueryRow(ctx, query,
+	err = r.writer.QueryRow(ctx, query,
 		gig.TrackingID,
 		gig.OrderTrackingID,
 		gig.VendorStoreTrackID,
