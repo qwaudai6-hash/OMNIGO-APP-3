@@ -693,8 +693,8 @@ func (r *DeliveryRepository) SettleCODVendorAndDebt(ctx context.Context, orderTr
 		// Audit trail: an already-settled escrow hold (excluded from the
 		// PayoutWorker sweep, which only scans status='released').
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO escrow_holds (id, order_tracking_id, vendor_tracking_id, amount, status, released_at)
-			SELECT gen_random_uuid(), $1, $2, $3, 'paid_out', NOW()
+			INSERT INTO escrow_holds (id, order_tracking_id, vendor_tracking_id, amount, status, hold_until, released_at)
+			SELECT gen_random_uuid(), $1, $2, $3, 'paid_out', NOW(), NOW()
 			WHERE NOT EXISTS (
 				SELECT 1 FROM escrow_holds e WHERE e.order_tracking_id = $1 AND e.status = 'paid_out'
 			)
