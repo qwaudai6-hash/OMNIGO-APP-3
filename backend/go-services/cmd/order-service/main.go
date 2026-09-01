@@ -17,6 +17,7 @@ import (
 	chatHandler "github.com/omnigo/backend/internal/chat/handlers"
 	chatRepo "github.com/omnigo/backend/internal/chat/repository"
 	chatSvc "github.com/omnigo/backend/internal/chat/service"
+	"github.com/omnigo/backend/internal/escrow"
 	"github.com/omnigo/backend/internal/ledger"
 	"github.com/omnigo/backend/internal/order/handlers"
 	"github.com/omnigo/backend/internal/order/repository"
@@ -117,9 +118,14 @@ func main() {
 
 	svc := service.NewOrderService(repo, kafkaClient, redisClient, productGRPCClient, productServiceURL, internalSigner)
 
+	// Escrow service for COD vendor holds
+	escrowSvc := escrow.NewService(db.Writer, ledgerSvc)
+
 	// COD accounting depends on the ledger and the new payment transaction table.
 	paymentTxnRepo := paymentRepo.NewRepository(db.Writer)
 	codSvc := paymentSvc.NewCODService(ledgerSvc, paymentTxnRepo)
+	codSvc.SetDB(db.Writer)
+	codSvc.SetEscrow(escrowSvc)
 	svc.WithCODService(codSvc)
 
 	h := handlers.NewOrderHandler(svc, repo)
