@@ -703,17 +703,9 @@ func (r *DeliveryRepository) SettleCODVendorAndDebt(ctx context.Context, orderTr
 		}
 	}
 
-	// CLAIM-3: rider now holds this cash — record the debt once.
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO cod_debts (id, order_tracking_id, rider_tracking_id, amount, amount_owed, status)
-		SELECT gen_random_uuid(), $1, $2, $3, $3, 'pending'
-		WHERE NOT EXISTS (
-			SELECT 1 FROM cod_debts d
-			WHERE d.order_tracking_id = $1 AND d.status IN ('pending', 'settled')
-		)
-	`, orderTrackingID, riderTrackingID, orderTotal); err != nil {
-		return fmt.Errorf("cod debt insert failed: %w", err)
-	}
+	// Vendor wallet + escrow audit already handled above.
+	// COD debt is created by RecordCODDebt() — do NOT duplicate here
+	// (the old INSERT had `amount` column which doesn't exist in cod_debts).
 
 	return tx.Commit(ctx)
 }
