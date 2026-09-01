@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -150,7 +152,7 @@ type CODPayNowRequest struct {
 }
 
 // PayNow handles POST /api/v1/payments/cod/pay-now
-// Generates a deep-link for the Rider to pay via JazzCash/EasyPaisa.
+// Generates a deep-link for the Rider to pay via JazzCash/EasyPaisa/PayFast.
 func (h *CODHandler) PayNow(c *gin.Context) {
 	var req CODPayNowRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -158,8 +160,8 @@ func (h *CODHandler) PayNow(c *gin.Context) {
 		return
 	}
 
-	if req.Gateway != "jazzcash" && req.Gateway != "easypaisa" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "gateway must be 'jazzcash' or 'easypaisa'"})
+	if req.Gateway != "jazzcash" && req.Gateway != "easypaisa" && req.Gateway != "payfast" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "gateway must be 'jazzcash', 'easypaisa', or 'payfast'"})
 		return
 	}
 
@@ -182,15 +184,74 @@ func (h *CODHandler) PayNow(c *gin.Context) {
 		return
 	}
 
-	// Generate HMAC signature for the deep-link
-	// We use MustEnv to refuse insecure defaults. Week 4 will replace the
-	// raw deep-link with a real JazzCash/EasyPaisa redirect that consumes
-	// the salt server-side, not in the URL.
+	// PayFast gateway: generate hosted checkout redirect URL
+	if req.Gateway == "payfast" {
+		merchantID := os.Getenv("PAYFAST_MERCHANT_ID")
+		if merchantID == "" {
+			merchantID = "10001"
+		}
+		baseURL := os.Getenv("PAYFAST_BASE_URL")
+		if baseURL == "" {
+			baseURL = os.Getenv("PAYFAST_API_URL")
+		}
+		if baseURL == "" {
+			baseURL = "https://ipguat.apps.net.pk/Ecommerce/api/Transaction"
+		}
+		returnURL := os.Getenv("PUBLIC_BASE_URL")
+		if returnURL == "" {
+			returnURL = "https://omnigo-app-3-production.up.railway.app"
+		}
+		returnURL += "/api/v1/payments/cod/settlement"
+
+		basketID := fmt.Sprintf("COD%s", req.CodDebtID[:min(len(req.CodDebtID), 20)])
+
+		var redirectURL string
+		if strings.Contains(baseURL, "apps.net.pk") {
+			formEndpoint := strings.TrimRight(baseURL, "/")
+			if !strings.HasSuffix(formEndpoint, "/PostTransaction") {
+				if strings.HasSuffix(formEndpoint, "/Transaction") {
+					formEndpoint += "/PostTransaction"
+				} else {
+					formEndpoint += "/Transaction/PostTransaction"
+				}
+			}
+			redirectURL = fmt.Sprintf(
+				"%s?merchant_id=%s&basket_id=%s&txnamt=%.2f&currency_code=PKR&success_url=%s&checkout_url=%s",
+				formEndpoint,
+				url.QueryEscape(merchantID),
+				url.QueryEscape(basketID),
+				amountOwed,
+				url.QueryEscape(returnURL),
+				url.QueryEscape(returnURL),
+			)
+		} else {
+			redirectURL = fmt.Sprintf(
+				"%s/hosted?merchant_id=%s&basket_id=%s&txnamt=%.2f&currency_code=PKR&success_url=%s&checkout_url=%s",
+				strings.TrimRight(baseURL, "/"),
+				url.QueryEscape(merchantID),
+				url.QueryEscape(basketID),
+				amountOwed,
+				url.QueryEscape(returnURL),
+				url.QueryEscape(returnURL),
+			)
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":      "redirect_ready",
+			"gateway":     "payfast",
+			"redirect_url": redirectURL,
+			"basket_id":   basketID,
+			"amount_owed": amountOwed,
+			"rider_id":    riderID,
+		})
+		return
+	}
+
+	// JazzCash/EasyPaisa: generate deep-link
 	salt := security.MustEnv("JAZZCASH_SALT")
 	if req.Gateway == "easypaisa" {
 		salt = security.MustEnv("EASYPAISA_SALT")
 	}
-	// Support deprecated alias for backward compatibility.
 	if salt == "" && req.Gateway == "jazzcash" {
 		salt = os.Getenv("JAZZCASH_INTEGRITY_SALT")
 	}
@@ -200,7 +261,6 @@ func (h *CODHandler) PayNow(c *gin.Context) {
 	mac.Write([]byte(payload))
 	signature := hex.EncodeToString(mac.Sum(nil))
 
-	// Build deep-link URL
 	deepLink := fmt.Sprintf("%s://transfer?amount=%.2f&to=OMNIGO_SETTLEMENT&ref=%s&hash=%s",
 		req.Gateway, amountOwed, req.CodDebtID, signature)
 

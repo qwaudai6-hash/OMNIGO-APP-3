@@ -37,12 +37,18 @@ type OrderService struct {
 	// nil means signing is disabled (dev mode); production must set it.
 	internalSigner *security.InternalSigner
 	codService     CODRecorder
+	escrowService  EscrowHolder
 }
 
 // CODRecorder is the small surface the order service needs from the COD service.
 type CODRecorder interface {
 	OnOrderCreated(ctx context.Context, orderID string, amount float64, currency string) error
 	OnOrderDelivered(ctx context.Context, orderID, vendorID, riderID string, orderTotal, commission, riderEarning float64) error
+}
+
+// EscrowHolder creates escrow holds when orders are paid.
+type EscrowHolder interface {
+	CreateHold(ctx context.Context, orderID, vendorID string, amount float64) error
 }
 
 func NewOrderService(
@@ -66,6 +72,12 @@ func NewOrderService(
 // WithCODService attaches the COD recorder so COD orders create a pending payment transaction.
 func (s *OrderService) WithCODService(cs CODRecorder) *OrderService {
 	s.codService = cs
+	return s
+}
+
+// WithEscrowService attaches the escrow holder so paid orders create an escrow hold.
+func (s *OrderService) WithEscrowService(es EscrowHolder) *OrderService {
+	s.escrowService = es
 	return s
 }
 
@@ -315,22 +327,23 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, trackingID string,
 		return err
 	}
 
-	// COD settlement: when order is delivered, trigger full COD accounting
-	// (ledger splits + vendor wallet credit + escrow hold + COD debt).
-	if status == "delivered" {
-		isCOD := order.PaymentGateway == "" || strings.EqualFold(order.PaymentGateway, "cod")
-		if isCOD {
-			if s.codService == nil {
-				log.Printf("[ORDER-%s] CRITICAL: COD order delivered but COD service not configured — vendor will not be paid", trackingID)
-			} else {
-				adminCommission := order.TotalAmount * 0.02
-				riderEarning := 0.0
-				if err := s.codService.OnOrderDelivered(ctx, trackingID, order.VendorTrackID, order.RiderTrackID, order.TotalAmount, adminCommission, riderEarning); err != nil {
-					log.Printf("[ORDER-%s] CRITICAL: COD settlement failed — vendor payment delayed: %v", trackingID, err)
-				}
-			}
+	// When an order is marked paid (online payment via PayFast/Stripe/JazzCash/EasyPaisa),
+	// create an escrow hold so the funds are locked for 48 hours before vendor payout.
+	// This covers both the modern Option C flow AND the deprecated hosted checkout path.
+	if status == "paid" && s.escrowService != nil {
+		if err := s.escrowService.CreateHold(ctx, trackingID, order.VendorTrackID, order.TotalAmount); err != nil {
+			log.Printf("[ORDER-%s] Warning: failed to create escrow hold on payment: %v", trackingID, err)
 		}
 	}
+
+	// COD settlement is handled entirely by delivery_service.UpdateGigStatus() when
+	// the rider completes the delivery. The delivery service has access to the gig's
+	// actual delivery_fee, admin_commission, and rider_earning — so it performs the
+	// correct split. We must NOT duplicate settlement here to avoid double vendor credit.
+	//
+	// Legacy: This block previously called codService.OnOrderDelivered() with hardcoded
+	// 2% commission and zero rider earning, which caused double vendor wallet credit
+	// when combined with delivery_service's settlement. Removed.
 
 	// Outbox handles orders.created, but we keep direct produce for orders.updated for simplicity in Phase 6
 	if s.kafka != nil {

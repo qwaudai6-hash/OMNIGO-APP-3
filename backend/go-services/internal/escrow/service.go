@@ -67,6 +67,8 @@ func (s *Service) CreateHold(ctx context.Context, orderID, vendorID string, amou
 
 // ReleaseExpiredHolds releases all holds past their hold_until time
 // if no open disputes exist for the order.
+// It checks the orders.escrow_released flag to avoid double-release
+// with EscrowCronService.
 func (s *Service) ReleaseExpiredHolds(ctx context.Context) (int, error) {
 	holds, err := s.repo.GetReleasableHolds(ctx)
 	if err != nil {
@@ -75,6 +77,16 @@ func (s *Service) ReleaseExpiredHolds(ctx context.Context) (int, error) {
 
 	released := 0
 	for _, hold := range holds {
+		// Guard: skip if EscrowCronService already released this order
+		var alreadyReleased bool
+		_ = s.db.QueryRow(ctx,
+			`SELECT COALESCE(escrow_released, FALSE) FROM orders WHERE order_tracking_id = $1`,
+			hold.OrderTrackingID,
+		).Scan(&alreadyReleased)
+		if alreadyReleased {
+			continue
+		}
+
 		// Check for open disputes
 		hasDispute, err := s.repo.HasOpenDisputes(ctx, hold.OrderTrackingID)
 		if err != nil {
@@ -107,6 +119,12 @@ func (s *Service) ReleaseExpiredHolds(ctx context.Context) (int, error) {
 			fmt.Printf("[Escrow] Failed to mark hold %s as released: %v\n", hold.ID, err)
 			continue
 		}
+
+		// Mark order as released so EscrowCronService skips it
+		_, _ = s.db.Exec(ctx,
+			`UPDATE orders SET escrow_released = TRUE WHERE order_tracking_id = $1`,
+			hold.OrderTrackingID,
+		)
 
 		// Update vendor wallet balance in database table
 		upsertVendorWallet := `

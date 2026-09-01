@@ -127,6 +127,7 @@ func main() {
 	codSvc.SetDB(db.Writer)
 	codSvc.SetEscrow(escrowSvc)
 	svc.WithCODService(codSvc)
+	svc.WithEscrowService(escrowSvc)
 
 	h := handlers.NewOrderHandler(svc, repo)
 
