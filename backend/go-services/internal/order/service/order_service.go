@@ -317,16 +317,17 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, trackingID string,
 
 	// COD settlement: when order is delivered, trigger full COD accounting
 	// (ledger splits + vendor wallet credit + escrow hold + COD debt).
-	log.Printf("[COD-SETTLEMENT] status=%s codService=%v gateway=%s orderID=%s", status, s.codService != nil, order.PaymentGateway, trackingID)
-	if status == "delivered" && s.codService != nil {
+	if status == "delivered" {
 		isCOD := order.PaymentGateway == "" || strings.EqualFold(order.PaymentGateway, "cod")
 		if isCOD {
-			adminCommission := order.TotalAmount * 0.02
-			riderEarning := 0.0
-			if err := s.codService.OnOrderDelivered(ctx, trackingID, order.VendorTrackID, order.RiderTrackID, order.TotalAmount, adminCommission, riderEarning); err != nil {
-				log.Printf("[COD-SETTLEMENT] FAILED for order %s: %v", trackingID, err)
+			if s.codService == nil {
+				log.Printf("[ORDER-%s] CRITICAL: COD order delivered but COD service not configured — vendor will not be paid", trackingID)
 			} else {
-				log.Printf("[COD-SETTLEMENT] SUCCESS for order %s — vendor wallet credited, escrow held, ledger split", trackingID)
+				adminCommission := order.TotalAmount * 0.02
+				riderEarning := 0.0
+				if err := s.codService.OnOrderDelivered(ctx, trackingID, order.VendorTrackID, order.RiderTrackID, order.TotalAmount, adminCommission, riderEarning); err != nil {
+					log.Printf("[ORDER-%s] CRITICAL: COD settlement failed — vendor payment delayed: %v", trackingID, err)
+				}
 			}
 		}
 	}
