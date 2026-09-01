@@ -860,40 +860,56 @@ func (s *DeliveryService) CancelGig(ctx context.Context, req *models.CancelGigRe
 		return err
 	}
 
-	// Re-broadcast logic: we should find new riders starting from the store's pickup location
-	// (or the cancelled rider's location, but for simplicity we use the store's pickup location again)
+	// Re-broadcast logic: search progressively like initial dispatch (k=1 to k=5, 5km to 25km)
 	centerCoord := h3.GeoCoord{Latitude: gig.PickupLat, Longitude: gig.PickupLng}
 	vendorHex := h3.FromGeo(centerCoord, 5)
 
 	var riders []string
 	var mu sync.Mutex
-	var wg sync.WaitGroup
-	neighbors := h3.KRing(vendorHex, 1)
 
 	if s.redis != nil {
-		for _, hex := range neighbors {
-			wg.Add(1)
-			go func(h h3.H3Index) {
-				defer wg.Done()
-				key := fmt.Sprintf("riders:locations:h3:%x", h)
-				res, err := s.redis.GeoRadius(ctx, key, gig.PickupLng, gig.PickupLat, &redis.GeoRadiusQuery{
-					Radius: 5,
-					Unit:   "km",
-				}).Result()
+		for k := 1; k <= 5; k++ {
+			neighbors := h3.KRing(vendorHex, k)
+			radiusKm := float64(k * 5)
+			var wg sync.WaitGroup
 
-				if err == nil && len(res) > 0 {
-					mu.Lock()
-					for _, loc := range res {
-						// Exclude the rider who just cancelled
-						if loc.Name != req.RiderTrackID {
-							riders = append(riders, loc.Name)
+			for _, hex := range neighbors {
+				wg.Add(1)
+				go func(h h3.H3Index) {
+					defer wg.Done()
+					key := fmt.Sprintf("riders:locations:h3:%x", h)
+					res, err := s.redis.GeoRadius(ctx, key, gig.PickupLng, gig.PickupLat, &redis.GeoRadiusQuery{
+						Radius: radiusKm,
+						Unit:   "km",
+					}).Result()
+
+					if err == nil && len(res) > 0 {
+						mu.Lock()
+						for _, loc := range res {
+							// Exclude the rider who just cancelled
+							if loc.Name != req.RiderTrackID {
+								found := false
+								for _, r := range riders {
+									if r == loc.Name {
+										found = true
+										break
+									}
+								}
+								if !found {
+									riders = append(riders, loc.Name)
+								}
+							}
 						}
+						mu.Unlock()
 					}
-					mu.Unlock()
-				}
-			}(hex)
+				}(hex)
+			}
+			wg.Wait()
+
+			if len(riders) > 0 {
+				break
+			}
 		}
-		wg.Wait()
 	}
 
 	// Take up to top 5 new riders
