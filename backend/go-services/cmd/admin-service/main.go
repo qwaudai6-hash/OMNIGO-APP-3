@@ -74,24 +74,24 @@ func main() {
 		defer driver.Close(context.Background())
 	}
 
-	// Initialize TigerBeetle
-	tbAddrs := []string{}
-	if envAddr := os.Getenv("TIGERBEETLE_ADDRESSES"); envAddr != "" {
-		tbAddrs = strings.Split(envAddr, ",")
-	} else if envAddr := os.Getenv("TIGERBEETLE_ADDR"); envAddr != "" {
-		tbAddrs = []string{envAddr}
-	}
+	// Initialize TigerBeetle (skip if explicitly disabled)
 	var tbService *ledger.TBService
-	if len(tbAddrs) > 0 {
-		tbService, err = ledger.NewTBService(tbAddrs)
-		if err != nil {
-			log.Printf("Warning: TigerBeetle init failed, ledger KPIs will be unavailable: %v", err)
-			tbService = nil
-		} else {
-			defer tbService.Close()
+	if os.Getenv("TIGERBEETLE_DISABLED") != "true" {
+		tbAddrs := []string{}
+		if envAddr := os.Getenv("TIGERBEETLE_ADDRESSES"); envAddr != "" {
+			tbAddrs = strings.Split(envAddr, ",")
+		} else if envAddr := os.Getenv("TIGERBEETLE_ADDR"); envAddr != "" {
+			tbAddrs = []string{envAddr}
 		}
-	} else {
-		log.Println("Warning: TIGERBEETLE_ADDRESSES not set, ledger KPIs will be unavailable")
+		if len(tbAddrs) > 0 {
+			tbService, err = ledger.NewTBService(tbAddrs)
+			if err != nil {
+				log.Printf("ℹ TigerBeetle unavailable, using PostgreSQL fallback ledger: %v", err)
+				tbService = nil
+			} else {
+				defer tbService.Close()
+			}
+		}
 	}
 
 	// Init Services
@@ -130,16 +130,14 @@ func main() {
 	apiKeyService := admin.NewAPIKeyService(dbPool, encPassphrase, kafkaClient)
 	trustProxy := os.Getenv("OMNIGO_TRUST_PROXY") == "true"
 
-	clickhouseAddr := os.Getenv("CLICKHOUSE_ADDR")
-	if clickhouseAddr == "" {
-		log.Println("Warning: CLICKHOUSE_ADDR not set, analytics disabled")
-	}
 	var analyticsService *analytics.AnalyticsService
-	if clickhouseAddr != "" {
-		analyticsService, err = analytics.NewAnalyticsService(strings.Split(clickhouseAddr, ","))
-		if err != nil {
-			log.Printf("Warning: Analytics service init failed (ClickHouse offline): %v", err)
-			analyticsService = nil
+	if os.Getenv("CLICKHOUSE_DISABLED") != "true" {
+		if clickhouseAddr := os.Getenv("CLICKHOUSE_ADDR"); clickhouseAddr != "" {
+			analyticsService, err = analytics.NewAnalyticsService(strings.Split(clickhouseAddr, ","))
+			if err != nil {
+				log.Printf("ℹ ClickHouse unavailable, analytics disabled: %v", err)
+				analyticsService = nil
+			}
 		}
 	}
 

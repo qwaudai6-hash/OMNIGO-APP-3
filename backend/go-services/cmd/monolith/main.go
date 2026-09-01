@@ -230,7 +230,10 @@ func startChild(name, port string) bool {
 		env = append(env, "JWT_ISSUER=omnigo-platform")
 	}
 	// Propagate TigerBeetle Ledger configuration to child microservices
-	if tbAddr := os.Getenv("TIGERBEETLE_ADDRESSES"); tbAddr != "" {
+	if os.Getenv("TIGERBEETLE_DISABLED") == "true" {
+		env = append(env, "TIGERBEETLE_DISABLED=true")
+		env = append(env, "TB_ENABLED=false")
+	} else if tbAddr := os.Getenv("TIGERBEETLE_ADDRESSES"); tbAddr != "" {
 		env = append(env, "TIGERBEETLE_ADDRESSES="+tbAddr)
 		env = append(env, "TIGERBEETLE_ADDR="+tbAddr)
 		env = append(env, "TB_ENABLED=true")
@@ -484,14 +487,16 @@ func main() {
 		envPortOr("MAP_SERVICE_PORT", "9010"))
 
 	// AI Engine — external Python service, not spawned by monolith.
-	// Only register if explicitly configured; optional service that shouldn't block startup.
-	if aiURL := os.Getenv("AI_ENGINE_URL"); aiURL != "" {
-		entry := &serviceEntry{name: "ai-engine", prefixes: []string{"/api/v1/ai"}, port: "0", targetURL: aiURL}
-		entry.healthURL = aiURL + "/health"
-		entry.healthy.Store(true) // assume reachable; health watcher will re-probe
-		entry.started.Store(true) // external services don't block startup
-		registry["ai-engine"] = entry
-		log.Printf("✓ ai-engine registered as external service at %s", aiURL)
+	// Only register if explicitly configured and not disabled.
+	if os.Getenv("AI_ENGINE_DISABLED") != "true" {
+		if aiURL := os.Getenv("AI_ENGINE_URL"); aiURL != "" {
+			entry := &serviceEntry{name: "ai-engine", prefixes: []string{"/api/v1/ai"}, port: "0", targetURL: aiURL}
+			entry.healthURL = aiURL + "/health"
+			entry.healthy.Store(true) // assume reachable; health watcher will re-probe
+			entry.started.Store(true) // external services don't block startup
+			registry["ai-engine"] = entry
+			log.Printf("✓ ai-engine registered as external service at %s", aiURL)
+		}
 	}
 
 	// Wire each registry entry's health URL (same as proxy target, but on /health).
