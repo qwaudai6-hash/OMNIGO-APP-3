@@ -140,7 +140,7 @@ func main() {
 	commissionCalculator := payment_orchestrator.NewCommissionCalculator(db.Writer)
 
 	customerWalletSvc := walletSvc.NewCustomerWalletService(db.Writer, ledgerSvc)
-	newCheckoutHandler := paymentHandlers.NewCheckoutHandler(paymentOrchestrator, customerWalletSvc, repo)
+	newCheckoutHandler := paymentHandlers.NewCheckoutHandler(paymentOrchestrator, customerWalletSvc, repo, escrowSvc)
 
 	var rdbForWebhook redis.UniversalClient
 	if redisClient != nil {

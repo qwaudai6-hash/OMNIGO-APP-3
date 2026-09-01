@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"time"
@@ -16,13 +17,19 @@ type CheckoutHandler struct {
 	orchestrator *service.Orchestrator
 	walletSvc    *walletService.CustomerWalletService
 	orderRepo    *repository.OrderRepository
+	escrowSvc    escrowService
 }
 
-func NewCheckoutHandler(orchestrator *service.Orchestrator, walletSvc *walletService.CustomerWalletService, orderRepo *repository.OrderRepository) *CheckoutHandler {
+type escrowService interface {
+	CreateHold(ctx context.Context, orderID, vendorID string, amount float64) error
+}
+
+func NewCheckoutHandler(orchestrator *service.Orchestrator, walletSvc *walletService.CustomerWalletService, orderRepo *repository.OrderRepository, escrowSvc escrowService) *CheckoutHandler {
 	return &CheckoutHandler{
 		orchestrator: orchestrator,
 		walletSvc:    walletSvc,
 		orderRepo:    orderRepo,
+		escrowSvc:    escrowSvc,
 	}
 }
 
@@ -95,8 +102,14 @@ func (h *CheckoutHandler) CreateCheckout(c *gin.Context) {
 				return
 			}
 			// Also set payment_status='paid' so delivery accept eligibility passes
-			// (the repo UpdateOrderStatus only touches the status column).
 			_ = h.orderRepo.UpdatePaymentStatus(c.Request.Context(), req.OrderID, "paid")
+		}
+		// Create escrow hold for online payment (same as PayFast webhook path).
+		if h.escrowSvc != nil {
+			order, _ := h.orderRepo.GetOrderByTrackingID(c.Request.Context(), req.OrderID)
+			if order != nil {
+				_ = h.escrowSvc.CreateHold(c.Request.Context(), req.OrderID, order.VendorTrackID, req.Amount)
+			}
 		}
 		// Return immediate success
 		c.JSON(http.StatusOK, service.CheckoutResponse{
