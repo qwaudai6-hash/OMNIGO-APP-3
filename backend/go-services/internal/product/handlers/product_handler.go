@@ -165,20 +165,20 @@ func (h *ProductHandler) GetRecommendations(c *gin.Context) {
 
 // RegisterRoutes attaches the handlers to the gin router.
 //
-// The public catalog group requires a JWT. POST /products is additionally
-// gated to vendors only — see CreateProduct. The internal reserve/release
-// group requires a valid HMAC signature on every request.
+// Public catalog: GET routes are open. POST routes require JWT + vendor role.
+// The internal reserve/release group requires a valid HMAC signature on every request.
 func (h *ProductHandler) RegisterRoutes(router *gin.Engine) {
-	products := router.Group("/api/v1/products", middleware.JWTAuth())
+	products := router.Group("/api/v1/products")
 	{
-		products.POST("", h.CreateProduct)
-		products.POST("/", h.CreateProduct)
+		// Public read — no auth required
 		products.GET("", h.ListProducts)
 		products.GET("/", h.ListProducts)
 		products.GET("/:tracking_id", h.GetProduct)
 		products.GET("/:tracking_id/recommendations", h.GetRecommendations)
-		// Product image upload — used by the vendor add/edit product form.
-		products.POST("/upload-image", h.UploadProductImage)
+		// Auth required — vendor/admin only
+		products.POST("", middleware.JWTAuth(), h.CreateProduct)
+		products.POST("/", middleware.JWTAuth(), h.CreateProduct)
+		products.POST("/upload-image", middleware.JWTAuth(), h.UploadProductImage)
 	}
 
 	if h.internalSigner != nil {
