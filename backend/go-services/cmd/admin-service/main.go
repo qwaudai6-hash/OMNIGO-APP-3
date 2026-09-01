@@ -847,11 +847,11 @@ func main() {
 				days = 7
 			}
 			rows, err := dbPool.Query(ctx, `
-				SELECT o.vendor_tracking_id, COALESCE(vs.name, 'Unknown') as store_name,
+				SELECT o.vendor_tracking_id, COALESCE(s.name, 'Unknown') as store_name,
 					   ROUND(o.customer_lat::numeric, 4) as lat, ROUND(o.customer_lng::numeric, 4) as lng,
 					   COUNT(*) as order_count
 				FROM orders o
-				LEFT JOIN vendor_stores vs ON vs.tracking_id = o.vendor_tracking_id
+				LEFT JOIN stores s ON s.tracking_id = o.vendor_tracking_id
 				WHERE o.created_at > NOW() - INTERVAL '1 day' * $1
 				  AND o.customer_lat != 0 AND o.customer_lng != 0
 				GROUP BY o.vendor_tracking_id, store_name, lat, lng
