@@ -612,8 +612,8 @@ func (r *DeliveryRepository) ResolveDispute(ctx context.Context, trackingID stri
 // RecordCODDebt inserts a pending debt for the rider for the COD amount.
 func (r *DeliveryRepository) RecordCODDebt(ctx context.Context, orderTrackingID, riderTrackingID string, amount float64) error {
 	query := `
-		INSERT INTO cod_debts (id, order_tracking_id, rider_tracking_id, amount, amount_owed, status)
-		SELECT gen_random_uuid(), $1, $2, $3, $3, 'pending'
+		INSERT INTO cod_debts (id, order_tracking_id, rider_tracking_id, amount_owed, status)
+		SELECT gen_random_uuid(), $1, $2, $3, 'pending'
 		WHERE NOT EXISTS (
 			SELECT 1 FROM cod_debts d
 			WHERE d.order_tracking_id = $1 AND d.status IN ('pending', 'settled')
