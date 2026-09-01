@@ -434,6 +434,9 @@ func (h *OrderHandler) CancelOrder(c *gin.Context) {
 		return
 	}
 
+	// Emit orders.cancelled so delivery-service cancels the gig and frees the rider.
+	h.svc.EmitCancelEvent(c.Request.Context(), trackingID, req.Reason)
+
 	updated, _ := h.svc.GetOrder(c.Request.Context(), trackingID)
 	c.JSON(http.StatusOK, gin.H{"status": "order cancelled", "order": updated})
 }
