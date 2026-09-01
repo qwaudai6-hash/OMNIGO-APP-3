@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import '../../../../core/di/service_locator.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/network/api_client.dart';
@@ -108,7 +109,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     // 2. Submit the dispute to backend
     try {
       final trackingId = _currentOrder['order_tracking_id'] ?? 'ORD-UNKNOWN';
-      await ApiClient().post('/delivery/gig/dispute', {
+      await sl<ApiClient>().post(ApiEndpoints.deliveryGigDispute(), {
         'tracking_id': trackingId,
         'photo_url': photoUrl,
         'reason': reason,
@@ -148,7 +149,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 
     try {
       final orderId = _currentOrder['order_tracking_id'] ?? 'ORD-UNKNOWN';
-      await ApiClient().post('/orders/confirm', {
+      await sl<ApiClient>().post(ApiEndpoints.orderConfirm(), {
         'order_tracking_id': orderId,
       });
 
@@ -248,7 +249,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       };
 
       if (action == 'cancel') {
-        await ApiClient().post(ApiEndpoints.cancelOrder(), body);
+        await sl<ApiClient>().post(ApiEndpoints.customerCancelOrder(orderId), body);
         setState(() => _currentOrder['status'] = 'cancelled');
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -256,10 +257,10 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
           );
         }
       } else {
-        await ApiClient().post(ApiEndpoints.refundRequest(), body);
+        await sl<ApiClient>().post(ApiEndpoints.customerReturnOrder(orderId), body);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Refund request submitted'), backgroundColor: Colors.green),
+            const SnackBar(content: Text('Return request submitted'), backgroundColor: Colors.green),
           );
         }
       }
@@ -490,7 +491,8 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     final storeId = (_currentOrder['store_tracking_id'] ?? 'STOR-N/A').toString();
     final vendorId = (_currentOrder['vendor_tracking_id'] ?? 'N/A').toString();
     final riderId = _currentOrder['rider_tracking_id']?.toString();
-    final productIds = (_currentOrder['product_tracking_ids'] as List<dynamic>?) ?? <dynamic>[];
+    final items = (_currentOrder['items'] as List<dynamic>?) ?? <dynamic>[];
+    final productIds = items.map((item) => (item['product_tracking_id'] ?? '').toString()).where((s) => s.isNotEmpty).toList();
     final otpCode = _currentOrder['otp_code']?.toString();
     final paymentGateway = _currentOrder['payment_gateway']?.toString();
     final paymentStatus = (_currentOrder['payment_status'] ?? 'pending').toString().toLowerCase();

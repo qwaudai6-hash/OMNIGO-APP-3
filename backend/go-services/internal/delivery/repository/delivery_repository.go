@@ -59,8 +59,8 @@ func (r *DeliveryRepository) CreateGig(ctx context.Context, gig *models.Delivery
 	}
 
 	query := `
-		INSERT INTO deliveries (tracking_id, order_tracking_id, vendor_store_tracking_id, customer_tracking_id, status, admin_commission, rider_earning, tips, petrol_allowance, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, otp_code, is_cod, order_total, customer_phone)
-		VALUES ($1, $2, $3, $4, 'broadcasting', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+		INSERT INTO deliveries (tracking_id, order_tracking_id, vendor_store_tracking_id, customer_tracking_id, status, delivery_fee, admin_commission, rider_earning, tips, petrol_allowance, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, otp_code, is_cod, order_total, customer_phone)
+		VALUES ($1, $2, $3, $4, 'broadcasting', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 		RETURNING id, created_at, updated_at
 	`
 	err := r.writer.QueryRow(ctx, query,
@@ -68,6 +68,7 @@ func (r *DeliveryRepository) CreateGig(ctx context.Context, gig *models.Delivery
 		gig.OrderTrackingID,
 		gig.VendorStoreTrackID,
 		gig.CustomerTrackID,
+		gig.DeliveryFee,
 		gig.AdminCommission,
 		gig.RiderEarning,
 		gig.Tips,

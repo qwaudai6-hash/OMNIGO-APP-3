@@ -173,6 +173,7 @@ func (s *DeliveryService) HandleNewOrder(ctx context.Context, order models.Order
 		OrderTrackingID:    order.OrderID,
 		VendorStoreTrackID: order.VendorStoreTrackID,
 		CustomerTrackID:    order.UserTrackID,
+		DeliveryFee:        totalFare,
 		AdminCommission:    adminComm,
 		RiderEarning:       riderEarning,
 		Tips:               order.Tips,

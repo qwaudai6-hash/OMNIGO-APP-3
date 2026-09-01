@@ -199,6 +199,10 @@ class ApiEndpoints {
   // ── Refunds / Cancellations (Order Service) ──────────────────────
   static String refundRequest() => '$orderBase/finance/refund';
   static String cancelOrder() => '$orderBase/finance/cancel';
+  static String customerCancelOrder(String trackingId) =>
+      '$orderBase/orders/$trackingId/cancel';
+  static String customerReturnOrder(String trackingId) =>
+      '$orderBase/orders/$trackingId/return';
   static String refundStatus(String orderId) =>
       '$orderBase/finance/refund/$orderId';
 
