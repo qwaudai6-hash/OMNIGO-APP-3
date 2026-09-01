@@ -242,7 +242,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 
     setState(() => _isSubmitting = true);
     try {
-      final orderId = _currentOrder['order_tracking_id'] ?? 'ORD-UNKNOWN';
+      final orderId = (_currentOrder['order_tracking_id'] ?? 'ORD-UNKNOWN').toString();
       final body = {
         'order_tracking_id': orderId,
         'reason': reasonController.text.trim().isNotEmpty ? reasonController.text.trim() : 'Customer requested',

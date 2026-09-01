@@ -49,7 +49,7 @@ class DynamicSignupScreenState extends State<DynamicSignupScreen> {
   // Vendor specific
   final _businessNameController = TextEditingController();
 
-  bool _isUploadingDocs = false; // mutable — set around KYC document upload
+  bool _isUploadingDocs = false;
 
   final _formKey = GlobalKey<FormState>();
   final ApiClient _apiClient = ApiClient();

@@ -234,7 +234,7 @@ class _AdminAiControlCenterScreenState extends State<AdminAiControlCenterScreen>
                                 border: Border.all(color: Colors.greenAccent),
                               ),
                               child: Text(
-                                '${_auditData?['security_score']?.toString() ?? '—'}',
+                                _auditData?['security_score']?.toString() ?? '—',
                                 style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12),
                               ),
                             ),
@@ -389,7 +389,7 @@ class _AdminAiControlCenterScreenState extends State<AdminAiControlCenterScreen>
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
                             const Text('Audited Transactions', style: TextStyle(color: Colors.grey, fontSize: 13)),
-                            Text('${payout?['total_audited_transactions']?.toString() ?? '—'}', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13)),
+                            Text(payout?['total_audited_transactions']?.toString() ?? '—', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13)),
                           ],
                         ),
                         const Divider(color: Colors.white10),
