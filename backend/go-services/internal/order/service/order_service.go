@@ -133,12 +133,18 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *models.CreateOrderR
 	utid := generateUTID()
 	var calculatedTotal float64
 
+	// Support both payment_gateway and payment_method from frontend
+	paymentGW := req.PaymentGateway
+	if paymentGW == "" {
+		paymentGW = req.PaymentMethod
+	}
+
 	order := &models.Order{
 		UserTrackID:        req.UserTrackID,
 		VendorStoreTrackID: res.StoreTrackingId,
 		VendorTrackID:      res.VendorTrackingId,
 		Currency:           req.Currency,
-		PaymentGateway:     req.PaymentGateway,
+		PaymentGateway:     paymentGW,
 		Status:             "pending",
 		CustomerLat:        req.DropoffLat,
 		CustomerLng:        req.DropoffLng,

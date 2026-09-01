@@ -140,19 +140,9 @@ func (s *CODService) ReleaseAfterDelivery(ctx context.Context, orderID, vendorID
 		IdempotencyKey: fmt.Sprintf("cod:vendor:%s", orderID),
 	})
 
-	// 2) Credit rider wallet for their earning.
-	if riderEarning > 0 {
-		transfers = append(transfers, ledger.TransferRequest{
-			DebitAccount:   ledger.AccountAdminRevenue, // sourced from admin revenue pool
-			CreditAccount:  ledger.AccountRiderWallet,
-			Amount:         riderEarning,
-			Currency:       "PKR",
-			ReferenceType:  "cod_rider_earning",
-			ReferenceID:    orderID,
-			Description:    fmt.Sprintf("COD rider earning for order %s", orderID),
-			IdempotencyKey: fmt.Sprintf("cod:rider:%s", orderID),
-		})
-	}
+	// NOTE: Rider wallet credit (balance update + ledger) is already handled
+	// by CreditDelivery() in the delivery service. Do NOT credit rider here
+	// to avoid double-counting in the ledger.
 
 	_, err := s.ledger.MultiTransfer(ctx, transfers)
 	if err != nil {

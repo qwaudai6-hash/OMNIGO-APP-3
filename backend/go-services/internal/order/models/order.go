@@ -47,6 +47,7 @@ type CreateOrderRequest struct {
 	TotalAmount        float64              `json:"total_amount" binding:"required"`
 	Currency           string               `json:"currency" binding:"required"`
 	PaymentGateway     string               `json:"payment_gateway"`
+	PaymentMethod      string               `json:"payment_method"` // alias: frontend sends payment_method
 	DeviceSessionNonce string               `json:"device_session_nonce" binding:"required"`
 	DropoffLat         float64              `json:"dropoff_lat" binding:"required"`
 	DropoffLng         float64              `json:"dropoff_lng" binding:"required"`
