@@ -348,16 +348,42 @@ class _AdminAnalyticsScreenState extends State<AdminAnalyticsScreen> {
           _trackingRow('Payment Method', paymentGateway),
           _trackingRow('Payment Status', paymentStatus),
           if (isCOD) ...[
-            _trackingRow('COD Order', 'Yes — Rider collects cash on delivery'),
-            _trackingRow('Delivery Escrow', 'PKR ${deliveryEscrow.toStringAsFixed(0)} (released to rider on delivery)'),
+            _trackingRow('COD Order', 'Yes — Rider collects cash'),
           ],
           const Divider(),
-          // Escrow & Finance
-          const Text('Escrow & Finance', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+          // Vendor Payment Status
+          const Text('Vendor Payment', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
           const SizedBox(height: 4),
-          _trackingRow('Escrow Released', escrowReleased ? 'Yes' : 'No'),
-          _trackingRow('Vendor Escrow', 'PKR ${vendorEscrow.toStringAsFixed(0)}'),
-          _trackingRow('Delivery Escrow', 'PKR ${deliveryEscrow.toStringAsFixed(0)}'),
+          if (escrowReleased) ...[
+            _trackingRow('Status', '✅ Escrow Released → Wallet'),
+            _trackingRow('In Wallet', 'PKR ${vendorEscrow.toStringAsFixed(0)}'),
+            _trackingRow('Note', 'Vendor can withdraw anytime'),
+          ] else ...[
+            _trackingRow('Status', '🔒 In Escrow Hold'),
+            _trackingRow('Held Amount', 'PKR ${vendorEscrow.toStringAsFixed(0)}'),
+            _trackingRow('Note', 'Released after delivery confirmation'),
+          ],
+          const Divider(),
+          // Rider COD Status (only for COD orders)
+          if (isCOD) ...[
+            const Text('Rider COD Status', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+            const SizedBox(height: 4),
+            _trackingRow('Delivery Escrow', 'PKR ${deliveryEscrow.toStringAsFixed(0)}'),
+            if (status == 'completed' || status == 'delivered') ...[
+              _trackingRow('Cash Collected', 'Yes — delivered'),
+              _trackingRow('Platform Share', 'PKR ${deliveryEscrow.toStringAsFixed(0)}'),
+              _trackingRow('Note', 'Rider deposits via JazzCash/EasyPaisa'),
+            ] else if (status == 'in_transit') ...[
+              _trackingRow('Cash Collected', 'Pending — in transit'),
+              _trackingRow('Note', 'Rider will collect on delivery'),
+            ] else ...[
+              _trackingRow('Cash Collected', 'Not yet'),
+            ],
+          ],
+          const Divider(),
+          // Admin Commission
+          const Text('Finance', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+          const SizedBox(height: 4),
           _trackingRow('Admin Commission', 'PKR ${commission.toStringAsFixed(0)}'),
           if (disputeStatus.isNotEmpty && disputeStatus != 'none')
             _trackingRow('Dispute Status', disputeStatus),
