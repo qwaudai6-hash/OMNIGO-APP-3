@@ -15,7 +15,7 @@ class AdminAnalyticsScreen extends StatefulWidget {
 class _AdminAnalyticsScreenState extends State<AdminAnalyticsScreen> {
   Map<String, dynamic>? _analytics;
   List<dynamic> _dailyRevenue = [];
-  List<dynamic> _recentPayments = [];
+  List<dynamic> _orders = [];
   bool _isLoading = true;
   int _selectedDays = 7;
   int _selectedTab = 0;
@@ -31,20 +31,15 @@ class _AdminAnalyticsScreenState extends State<AdminAnalyticsScreen> {
     try {
       final api = sl<ApiClient>();
 
-      // Fetch analytics overview
       final analytics = await api.get(ApiEndpoints.adminAnalyticsOverview(days: _selectedDays));
-
-      // Fetch daily revenue
       final revenue = await api.get(ApiEndpoints.adminFinanceDailyRevenue(days: _selectedDays));
-
-      // Fetch recent payments
-      final payments = await api.get(ApiEndpoints.adminFinancePayments(limit: 20));
+      final orders = await api.get(ApiEndpoints.adminOrders(limit: 20));
 
       if (mounted) {
         setState(() {
           _analytics = analytics is Map<String, dynamic> ? analytics : null;
           _dailyRevenue = (revenue is Map<String, dynamic> ? revenue['daily_revenue'] : null) as List<dynamic>? ?? [];
-          _recentPayments = (payments is Map<String, dynamic> ? payments['payments'] : null) as List<dynamic>? ?? [];
+          _orders = (orders is Map<String, dynamic> ? orders['orders'] : null) as List<dynamic>? ?? [];
           _isLoading = false;
         });
       }
@@ -238,20 +233,32 @@ class _AdminAnalyticsScreenState extends State<AdminAnalyticsScreen> {
   }
 
   Widget _buildOrderTrackingList() {
-    if (_recentPayments.isEmpty) return const Center(child: Text('No orders found'));
+    if (_orders.isEmpty) return const Center(child: Text('No orders found'));
 
     return Column(
-      children: _recentPayments.map((payment) => _buildOrderTrackingCard(payment as Map<String, dynamic>)).toList(),
+      children: _orders.map((order) => _buildOrderTrackingCard(order as Map<String, dynamic>)).toList(),
     );
   }
 
-  Widget _buildOrderTrackingCard(Map<String, dynamic> payment) {
-    final orderId = payment['order_id']?.toString() ?? '';
-    final customerName = payment['customer_name']?.toString() ?? '';
-    final amount = (payment['total_amount'] as num?)?.toDouble() ?? 0.0;
-    final paymentMethod = payment['payment_method']?.toString() ?? '';
-    final paymentStatus = payment['payment_status']?.toString() ?? '';
-    final createdAt = payment['created_at']?.toString() ?? '';
+  Widget _buildOrderTrackingCard(Map<String, dynamic> order) {
+    final orderId = order['order_tracking_id']?.toString() ?? '';
+    final status = order['status']?.toString() ?? '';
+    final amount = (order['total_amount'] as num?)?.toDouble() ?? 0.0;
+    final paymentGateway = order['payment_gateway']?.toString() ?? '';
+    final paymentStatus = order['payment_status']?.toString() ?? '';
+    final escrowReleased = order['escrow_released'] == true;
+    final disputeStatus = order['dispute_status']?.toString() ?? '';
+    final customerId = order['customer_tracking_id']?.toString() ?? '';
+    final vendorId = order['vendor_tracking_id']?.toString() ?? '';
+    final storeId = order['store_tracking_id']?.toString() ?? '';
+    final riderId = order['rider_tracking_id']?.toString() ?? '';
+    final commission = (order['admin_commission'] as num?)?.toDouble() ?? 0.0;
+    final vendorEscrow = (order['vendor_escrow'] as num?)?.toDouble() ?? 0.0;
+    final deliveryEscrow = (order['delivery_escrow'] as num?)?.toDouble() ?? 0.0;
+    final createdAt = order['created_at']?.toString() ?? '';
+    final deliveredAt = order['delivered_at']?.toString() ?? '';
+
+    final isCOD = paymentGateway.toLowerCase() == 'cod';
 
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
@@ -261,38 +268,104 @@ class _AdminAnalyticsScreenState extends State<AdminAnalyticsScreen> {
         childrenPadding: const EdgeInsets.all(16),
         title: Row(
           children: [
+            // Status badge
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
               decoration: BoxDecoration(
-                color: _paymentStatusColor(paymentStatus).withOpacity(0.1),
-                borderRadius: BorderRadius.circular(8),
+                color: _statusColor(status).withOpacity(0.1),
+                borderRadius: BorderRadius.circular(6),
               ),
-              child: Text(paymentStatus.toUpperCase(), style: TextStyle(
-                color: _paymentStatusColor(paymentStatus),
-                fontSize: 10,
+              child: Text(status.toUpperCase(), style: TextStyle(
+                color: _statusColor(status),
+                fontSize: 9,
                 fontWeight: FontWeight.bold,
               )),
             ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+            const SizedBox(width: 6),
+            // Payment method badge
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+              decoration: BoxDecoration(
+                color: _paymentMethodColor(paymentGateway).withOpacity(0.1),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(orderId, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
-                  Text(customerName, style: TextStyle(color: Colors.grey.shade600, fontSize: 11)),
+                  Icon(_paymentMethodIcon(paymentGateway), size: 10, color: _paymentMethodColor(paymentGateway)),
+                  const SizedBox(width: 3),
+                  Text(paymentGateway.toUpperCase(), style: TextStyle(
+                    color: _paymentMethodColor(paymentGateway),
+                    fontSize: 9,
+                    fontWeight: FontWeight.bold,
+                  )),
                 ],
               ),
             ),
+            const SizedBox(width: 6),
+            // Payment status
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+              decoration: BoxDecoration(
+                color: _paymentStatusColor(paymentStatus).withOpacity(0.1),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(paymentStatus.toUpperCase(), style: TextStyle(
+                color: _paymentStatusColor(paymentStatus),
+                fontSize: 9,
+                fontWeight: FontWeight.bold,
+              )),
+            ),
+            if (disputeStatus.isNotEmpty && disputeStatus != 'none') ...[
+              const SizedBox(width: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                decoration: BoxDecoration(
+                  color: Colors.red.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text('DISPUTED', style: TextStyle(color: Colors.red.shade700, fontSize: 9, fontWeight: FontWeight.bold)),
+              ),
+            ],
           ],
         ),
-        subtitle: Text('PKR ${amount.toStringAsFixed(0)} • $paymentMethod', style: TextStyle(color: Colors.grey.shade600, fontSize: 11)),
+        subtitle: Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text('PKR ${amount.toStringAsFixed(0)} • $orderId', style: TextStyle(color: Colors.grey.shade600, fontSize: 11)),
+        ),
         children: [
+          // Order & IDs
           _trackingRow('Order ID', orderId),
-          _trackingRow('Customer', customerName),
+          _trackingRow('Customer ID', customerId),
+          _trackingRow('Vendor ID', vendorId),
+          _trackingRow('Store ID', storeId),
+          _trackingRow('Rider ID', riderId),
+          const Divider(),
+          // Payment Details
+          const Text('Payment Details', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+          const SizedBox(height: 4),
           _trackingRow('Amount', 'PKR ${amount.toStringAsFixed(0)}'),
-          _trackingRow('Payment Method', paymentMethod),
+          _trackingRow('Payment Method', paymentGateway),
           _trackingRow('Payment Status', paymentStatus),
+          if (isCOD) ...[
+            _trackingRow('COD Order', 'Yes — Rider collects cash on delivery'),
+            _trackingRow('Delivery Escrow', 'PKR ${deliveryEscrow.toStringAsFixed(0)} (released to rider on delivery)'),
+          ],
+          const Divider(),
+          // Escrow & Finance
+          const Text('Escrow & Finance', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+          const SizedBox(height: 4),
+          _trackingRow('Escrow Released', escrowReleased ? 'Yes' : 'No'),
+          _trackingRow('Vendor Escrow', 'PKR ${vendorEscrow.toStringAsFixed(0)}'),
+          _trackingRow('Delivery Escrow', 'PKR ${deliveryEscrow.toStringAsFixed(0)}'),
+          _trackingRow('Admin Commission', 'PKR ${commission.toStringAsFixed(0)}'),
+          if (disputeStatus.isNotEmpty && disputeStatus != 'none')
+            _trackingRow('Dispute Status', disputeStatus),
+          const Divider(),
+          // Timeline
           _trackingRow('Created', createdAt),
+          if (deliveredAt.isNotEmpty && deliveredAt != '0001-01-01T00:00:00Z')
+            _trackingRow('Delivered', deliveredAt),
           const SizedBox(height: 8),
           SizedBox(
             width: double.infinity,
@@ -363,6 +436,46 @@ class _AdminAnalyticsScreenState extends State<AdminAnalyticsScreen> {
       case 'pending': return Colors.orange;
       case 'failed': return Colors.red;
       default: return Colors.grey;
+    }
+  }
+
+  Color _statusColor(String status) {
+    switch (status) {
+      case 'pending': return Colors.orange;
+      case 'paid': return Colors.blue;
+      case 'accepted': return Colors.indigo;
+      case 'shipped': return Colors.purple;
+      case 'in_transit': return Colors.teal;
+      case 'delivered': return Colors.green;
+      case 'completed': return Colors.green.shade800;
+      case 'cancelled': return Colors.red;
+      case 'refunded': return Colors.orange.shade800;
+      case 'failed': return Colors.red.shade800;
+      default: return Colors.grey;
+    }
+  }
+
+  Color _paymentMethodColor(String method) {
+    switch (method.toLowerCase()) {
+      case 'cod': return Colors.orange;
+      case 'payfast': return Colors.blue;
+      case 'jazzcash': return Colors.red;
+      case 'easypaisa': return Colors.green;
+      case 'stripe': return Colors.purple;
+      case 'wallet': return Colors.teal;
+      default: return Colors.grey;
+    }
+  }
+
+  IconData _paymentMethodIcon(String method) {
+    switch (method.toLowerCase()) {
+      case 'cod': return Icons.money;
+      case 'payfast': return Icons.credit_card;
+      case 'jazzcash': return Icons.phone_android;
+      case 'easypaisa': return Icons.phone_android;
+      case 'stripe': return Icons.credit_card;
+      case 'wallet': return Icons.account_balance_wallet;
+      default: return Icons.payment;
     }
   }
 
