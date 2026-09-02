@@ -245,19 +245,13 @@ class ApiClient {
       uri,
       headers: await _getHeaders(),
     ).timeout(_requestTimeout);
-    // Auto-refresh on 401 (skip for auth endpoints)
     if (response.statusCode == 401 && !endpoint.contains('/auth/') && await _refreshToken()) {
       response = await http.delete(
         uri,
         headers: await _getHeaders(),
       ).timeout(_requestTimeout);
     }
-    if (response.statusCode >= 200 && response.statusCode < 300) {
-      if (response.body.isEmpty) return {'status': 'ok'};
-      return jsonDecode(response.body);
-    } else {
-      throw Exception('API Error: ${response.statusCode} - ${response.body}');
-    }
+    return _processResponse(response);
   }
 
   dynamic _processResponse(http.Response response) {

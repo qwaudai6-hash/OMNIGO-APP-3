@@ -283,7 +283,7 @@ class VendorInventoryScreen extends StatefulWidget {
 
 class VendorInventoryScreenState extends State<VendorInventoryScreen> {
   final VendorInventoryController _controller = VendorInventoryController();
-  LatLng _storeLocation = const LatLng(31.5204, 74.3587); // Default: Lahore
+  LatLng? _storeLocation; // Set by API — no hardcoded default
   String? _storeTrackingId;
 
   List<ProductModel> _loadedProducts = [];
@@ -521,7 +521,9 @@ class VendorInventoryScreenState extends State<VendorInventoryScreen> {
           // A. OpenStreetMap embedded Map widget (Top Section)
           SizedBox(
             height: 220,
-            child: Stack(
+            child: _storeLocation == null
+                ? const Center(child: Text('Store location not set'))
+                : Stack(
               children: [
                 MapLibreMapWidget(
                   initialCenter: _storeLocation,
@@ -529,7 +531,7 @@ class VendorInventoryScreenState extends State<VendorInventoryScreen> {
                   myLocationEnabled: false,
                   markers: {
                     'store': MarkerData(
-                      position: _storeLocation,
+                      position: _storeLocation!,
                       iconSize: 1.0,
                     ),
                   },
@@ -551,7 +553,7 @@ class VendorInventoryScreenState extends State<VendorInventoryScreen> {
                             color: Color(0xFFCAFF33), size: 14,),
                         SizedBox(width: 6),
                         Text(
-                          'STOR-001 Coordinates (OSM)',
+                          _storeTrackingId != null ? '$_storeTrackingId Coordinates (OSM)' : 'Store Coordinates (OSM)',
                           style: TextStyle(
                               color: Colors.white,
                               fontSize: 10,

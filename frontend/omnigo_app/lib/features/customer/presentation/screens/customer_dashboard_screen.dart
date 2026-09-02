@@ -278,20 +278,11 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     setState(() => _isLoadingWishlist = true);
 
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
+      final api = sl<ApiClient>();
+      final response = await api.get(ApiEndpoints.wishlistList());
 
-      final response = await http.get(
-        Uri.parse(ApiEndpoints.wishlistList()),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-      ).timeout(const Duration(seconds: 8));
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
-        final List<dynamic> ids = (data['product_tracking_ids'] as List<dynamic>?) ?? <dynamic>[];
+      if (response is Map<String, dynamic>) {
+        final List<dynamic> ids = (response['product_tracking_ids'] as List<dynamic>?) ?? <dynamic>[];
         if (mounted) {
           setState(() {
             _favoriteProductIds = ids.map((e) => e.toString()).toSet();
@@ -319,18 +310,10 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     });
 
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
+      final api = sl<ApiClient>();
+      final response = await api.post(ApiEndpoints.wishlistToggle(productId), {});
 
-      final response = await http.post(
-        Uri.parse(ApiEndpoints.wishlistToggle(productId)),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-      ).timeout(const Duration(seconds: 5));
-
-      if (response.statusCode != 200) {
+      if (response is Map && response['statusCode'] != null && response['statusCode'] != 200) {
         // Rollback on failure
         if (!mounted) return;
         setState(() {
@@ -459,10 +442,8 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     setState(() => _isLoadingCatalog = true);
 
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-
-      final url = Uri.parse(ApiEndpoints.productsList(
+      final api = sl<ApiClient>();
+      final url = ApiEndpoints.productsList(
         limit: _limit,
         offset: _offset,
         search: _searchQuery,
@@ -470,27 +451,22 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         sort: _selectedSort,
         minPrice: _minPriceFilter,
         maxPrice: _maxPriceFilter,
-      ),);
-      final response = await http.get(url, headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer $token',
-      },);
+      );
+      final response = await api.get(url);
 
-      if (response.statusCode == 200) {
-        final List<dynamic> data = jsonDecode(response.body) as List<dynamic>;
+      if (response is List) {
         if (mounted) {
           setState(() {
-            if (data.isEmpty) {
+            if (response.isEmpty) {
               _hasMore = false;
             } else {
-              _allProducts.addAll(data.map((e) => Product.fromJson(e as Map<String, dynamic>)).toList());
+              _allProducts.addAll(response.map((e) => Product.fromJson(e as Map<String, dynamic>)).toList());
               _offset += _limit;
             }
             _isLoadingCatalog = false;
           });
         }
       } else {
-        throw Exception('Server error: ${response.statusCode}');
       }
     } catch (e) {
       if (mounted) {
@@ -534,22 +510,17 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
 
     try {
       // Geocoding via secure OMNIGO Backend Proxy
-      final url = Uri.parse(ApiEndpoints.geocodingSearch(q));
-      final response = await http.get(url, headers: {
-        'Accept': 'application/json',
-      },).timeout(const Duration(seconds: 8));
+      final api = sl<ApiClient>();
+      final response = await api.get(ApiEndpoints.geocodingSearch(q));
 
-      if (response.statusCode == 200) {
-        final List<dynamic> results = jsonDecode(response.body) as List<dynamic>;
-        if (results.isNotEmpty) {
-          final hit = results.first as Map<String, dynamic>;
-          final lat = double.tryParse(hit['lat']?.toString() ?? '') ?? 0.0;
-          final lon = double.tryParse(hit['lon']?.toString() ?? '') ?? 0.0;
-          if (lat != 0.0 || lon != 0.0) {
+      if (response is List && response.isNotEmpty) {
+        final hit = response.first as Map<String, dynamic>;
+        final lat = double.tryParse(hit['lat']?.toString() ?? '') ?? 0.0;
+        final lon = double.tryParse(hit['lon']?.toString() ?? '') ?? 0.0;
+        if (lat != 0.0 || lon != 0.0) {
             coords = LatLng(lat, lon);
             displayName = hit['display_name']?.toString();
           }
-        }
       }
     } catch (e) {
       debugPrint('Nominatim geocoding failed: $e');

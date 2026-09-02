@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_stripe/flutter_stripe.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -328,6 +329,25 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
       _isCheckoutProcessing = true;
     });
 
+    // Fetch GPS location for delivery
+    double dropoffLat = 31.5204;
+    double dropoffLng = 74.3587;
+    try {
+      if (await Geolocator.isLocationServiceEnabled()) {
+        var permission = await Geolocator.checkPermission();
+        if (permission == LocationPermission.denied) {
+          permission = await Geolocator.requestPermission();
+        }
+        if (permission == LocationPermission.whileInUse || permission == LocationPermission.always) {
+          final pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high, timeLimit: const Duration(seconds: 8));
+          dropoffLat = pos.latitude;
+          dropoffLng = pos.longitude;
+        }
+      }
+    } catch (_) {
+      // Use default Lahore coords if GPS fails
+    }
+
     final String nonce = '${widget.product.productTrackingId}_${DateTime.now().millisecondsSinceEpoch}';
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('pending_nonce', nonce);
@@ -369,8 +389,8 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
           'currency': 'PKR',
           'payment_gateway': paymentChoice == 'cash' ? 'cod' : paymentChoice,
           'device_session_nonce': nonce,
-          'dropoff_lat': 31.5204,
-          'dropoff_lng': 74.3587,
+          'dropoff_lat': dropoffLat,
+          'dropoff_lng': dropoffLng,
         }),
       ).timeout(const Duration(seconds: 8));
 

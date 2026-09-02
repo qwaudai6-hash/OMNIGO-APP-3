@@ -200,9 +200,10 @@ class VendorLiveMapScreenState extends State<VendorLiveMapScreen> {
 
   void _setInitialMarkers() {
     // Initialize the baseline Store Merchant node marker location
+    if (_storeLocation == null) return;
     _liveMarkersNotifier.value = {
       'store': MarkerData(
-        position: _storeLocation ?? const LatLng(31.5204, 74.3587),
+        position: _storeLocation!,
         iconSize: 1.0,
       ),
     };

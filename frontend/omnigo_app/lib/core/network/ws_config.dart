@@ -32,6 +32,10 @@ String resolveWsHost() {
   const override = String.fromEnvironment('WS_HOST');
   if (override.isNotEmpty) return override;
 
+  // Check API_HOST override (shared with ApiEndpoints)
+  const apiHost = String.fromEnvironment('API_HOST');
+  if (apiHost.isNotEmpty) return apiHost;
+
   // Production Railway Domain
   return 'omnigo-app-3-production.up.railway.app';
 }

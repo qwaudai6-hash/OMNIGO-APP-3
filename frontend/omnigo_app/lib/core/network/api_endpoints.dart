@@ -13,6 +13,7 @@ class ApiEndpoints {
   ApiEndpoints._();
 
   // ── Host Resolution (Railway Production) ────────────────────────
+  // Override via --dart-define=API_HOST=staging.example.com for staging/dev
   static const String _productionDomain = 'omnigo-app-3-production.up.railway.app';
   static final String _host = _resolveHost();
 
