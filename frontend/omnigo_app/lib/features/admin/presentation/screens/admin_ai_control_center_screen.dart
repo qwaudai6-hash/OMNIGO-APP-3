@@ -1,8 +1,7 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import '../../../../core/network/api_endpoints.dart';
+import '../../../../core/network/api_client.dart';
+import '../../../../core/di/service_locator.dart';
 import '../../../../core/theme/app_theme.dart';
 
 class AdminAiControlCenterScreen extends StatefulWidget {
@@ -25,26 +24,15 @@ class _AdminAiControlCenterScreenState extends State<AdminAiControlCenterScreen>
   }
 
   Future<void> _fetchAuditData() async {
+    if (!mounted) return;
     setState(() => _isLoading = true);
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-
-      final response = await http.get(
-        Uri.parse(ApiEndpoints.adminAiAuditOverview()),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-      ).timeout(const Duration(seconds: 6));
-
-      if (response.statusCode == 200 && mounted) {
+      final data = await sl<ApiClient>().get(ApiEndpoints.adminAiAuditOverview());
+      if (data is Map<String, dynamic> && mounted) {
         setState(() {
-          _auditData = jsonDecode(response.body) as Map<String, dynamic>;
+          _auditData = data;
           _isLoading = false;
         });
-      } else if (mounted) {
-        setState(() => _isLoading = false);
       }
     } catch (e) {
       if (mounted) setState(() => _isLoading = false);
@@ -52,30 +40,19 @@ class _AdminAiControlCenterScreenState extends State<AdminAiControlCenterScreen>
   }
 
   Future<void> _triggerAutoHeal(String component) async {
+    if (!mounted) return;
     setState(() => _isAutoHealing = true);
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-
-      final response = await http.post(
-        Uri.parse(ApiEndpoints.adminAiAutoHeal()),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-        body: jsonEncode({'target_component': component}),
-      ).timeout(const Duration(seconds: 8));
-
-      if (response.statusCode == 200 && mounted) {
-        final res = jsonDecode(response.body) as Map<String, dynamic>;
+      final res = await sl<ApiClient>().post(ApiEndpoints.adminAiAutoHeal(), {
+        'target_component': component,
+      });
+      if (res is Map<String, dynamic> && mounted) {
         setState(() {
           _executionLogs = (res['execution_logs'] as List<dynamic>?) ?? [];
           _isAutoHealing = false;
         });
         _showExecutionLogsSheet();
         await _fetchAuditData();
-      } else if (mounted) {
-        setState(() => _isAutoHealing = false);
       }
     } catch (e) {
       if (mounted) setState(() => _isAutoHealing = false);

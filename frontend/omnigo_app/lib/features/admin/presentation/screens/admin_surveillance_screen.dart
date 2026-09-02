@@ -1,11 +1,7 @@
 import 'dart:async';
-import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
-
-
-import '../../../../core/network/api_endpoints.dart';
+import '../../../../core/network/api_client.dart';
+import '../../../../core/di/service_locator.dart';
 import '../../../../core/theme/app_theme.dart';
 
 class AdminSurveillanceScreen extends StatefulWidget {
@@ -17,9 +13,6 @@ class AdminSurveillanceScreen extends StatefulWidget {
 }
 
 class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
-  // ignore: unused_field
-  int _currentTab = 0;
-
   // Lineage search
   final TextEditingController _orderIdController = TextEditingController();
   Map<String, dynamic>? _lineageReport;
@@ -37,7 +30,6 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
   List<dynamic> _verifications = [];
   bool _isLoadingVerifications = false;
 
-  static String get _adminBase => ApiEndpoints.adminBase;
 
   @override
   void initState() {
@@ -55,84 +47,25 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
 
     setState(() => _isLoadingLineage = true);
 
-    // RIDE- sessions live in the ride-hailing domain (no order chain), so
-    // they resolve against the dedicated ride lineage endpoint.
     final isRide = orderId.toUpperCase().startsWith('RIDE-');
-    final endpoint = isRide ? '$_adminBase/admin/lineage/ride/$orderId' : '$_adminBase/admin/lineage/$orderId/full';
+    final path = isRide ? '/admin/lineage/ride/$orderId' : '/admin/lineage/$orderId/full';
 
     try {
-      final response = await http.get(
-        Uri.parse(endpoint),
-        headers: await _getAuthHeaders(),
-      ).timeout(const Duration(seconds: 8));
-
-      if (response.statusCode == 200 && mounted) {
+      final data = await sl<ApiClient>().get(path);
+      if (data is Map<String, dynamic> && mounted) {
         setState(() {
-          _lineageReport = jsonDecode(response.body) as Map<String, dynamic>?;
+          _lineageReport = data;
           _isLoadingLineage = false;
         });
-      } else if (mounted) {
-        setState(() => _isLoadingLineage = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(isRide ? 'Ride not found (${response.statusCode})' : 'Order not found (${response.statusCode})')),
-        );
       }
     } catch (e) {
       if (mounted) {
         setState(() => _isLoadingLineage = false);
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Network error: $e')),
+          SnackBar(content: Text(isRide ? 'Ride not found: $e' : 'Order not found: $e')),
         );
       }
     }
-  }
-
-  Future<Map<String, String>> _getAuthHeaders() async {
-    final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('jwt_token') ?? '';
-    return {
-      'Authorization': 'Bearer $token',
-      'Content-Type': 'application/json',
-    };
-  }
-
-  Future<http.Response> _authedGet(String url) async {
-    var response = await http.get(
-      Uri.parse(url),
-      headers: await _getAuthHeaders(),
-    ).timeout(const Duration(seconds: 8));
-    if (response.statusCode == 401) {
-      final refreshed = await _refreshJwt();
-      if (refreshed) {
-        response = await http.get(
-          Uri.parse(url),
-          headers: await _getAuthHeaders(),
-        ).timeout(const Duration(seconds: 8));
-      }
-    }
-    return response;
-  }
-
-  Future<bool> _refreshJwt() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final refreshToken = prefs.getString('refresh_token') ?? '';
-      if (refreshToken.isEmpty) return false;
-      final res = await http.post(
-        Uri.parse('${ApiEndpoints.authBase}/auth/refresh'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'refresh_token': refreshToken}),
-      );
-      if (res.statusCode == 200) {
-        final data = jsonDecode(res.body) as Map<String, dynamic>;
-        final newToken = (data['access_token'] ?? data['token'] ?? '') as String;
-        final newRefresh = (data['refresh_token'] ?? '') as String;
-        if (newToken.isNotEmpty) await prefs.setString('jwt_token', newToken);
-        if (newRefresh.isNotEmpty) await prefs.setString('refresh_token', newRefresh);
-        return true;
-      }
-    } catch (_) {}
-    return false;
   }
 
   Future<void> _fetchPendingVerifications() async {
@@ -140,18 +73,12 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
     setState(() => _isLoadingPending = true);
 
     try {
-      final response = await http.get(
-        Uri.parse('$_adminBase/admin/users/pending'),
-        headers: await _getAuthHeaders(),
-      ).timeout(const Duration(seconds: 8));
-
-      if (response.statusCode == 200 && mounted) {
+      final data = await sl<ApiClient>().get('/admin/users/pending');
+      if (data is Map<String, dynamic> && mounted) {
         setState(() {
-          _pendingUsers = (jsonDecode(response.body) as Map<String, dynamic>)['pending_users'] as List<dynamic>? ?? [];
+          _pendingUsers = data['pending_users'] as List<dynamic>? ?? [];
           _isLoadingPending = false;
         });
-      } else if (mounted) {
-        setState(() => _isLoadingPending = false);
       }
     } catch (e) {
       if (mounted) setState(() => _isLoadingPending = false);
@@ -159,26 +86,19 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
   }
 
   Future<void> _approveUser(String trackingId) async {
+    if (trackingId.isEmpty) return;
     try {
-      final response = await http.patch(
-        Uri.parse('$_adminBase/admin/users/$trackingId/approve'),
-        headers: await _getAuthHeaders(),
-      ).timeout(const Duration(seconds: 5));
-
-      if (response.statusCode == 200 && mounted) {
+      await sl<ApiClient>().patch('/admin/users/$trackingId/approve', {});
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('User approved!'), backgroundColor: Colors.green),
         );
         unawaited(_fetchPendingVerifications());
-      } else if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Approval failed (${response.statusCode})'), backgroundColor: Colors.redAccent),
-        );
       }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Network error: $e'), backgroundColor: Colors.redAccent),
+          SnackBar(content: Text('Approval failed: $e'), backgroundColor: Colors.redAccent),
         );
       }
     }
@@ -191,18 +111,12 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
     setState(() => _isLoadingVerifications = true);
 
     try {
-      final response = await http.get(
-        Uri.parse('$_adminBase/admin/verifications/pending'),
-        headers: await _getAuthHeaders(),
-      ).timeout(const Duration(seconds: 8));
-
-      if (response.statusCode == 200 && mounted) {
+      final data = await sl<ApiClient>().get('/admin/verifications/pending');
+      if (data is Map<String, dynamic> && mounted) {
         setState(() {
-          _verifications = (jsonDecode(response.body) as Map<String, dynamic>)['pending_users'] as List<dynamic>? ?? [];
+          _verifications = data['pending_users'] as List<dynamic>? ?? [];
           _isLoadingVerifications = false;
         });
-      } else if (mounted) {
-        setState(() => _isLoadingVerifications = false);
       }
     } catch (e) {
       if (mounted) setState(() => _isLoadingVerifications = false);
@@ -210,14 +124,12 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
   }
 
   Future<void> _approveVerification(String trackingId) async {
+    if (trackingId.isEmpty) return;
     try {
-      final response = await http.post(
-        Uri.parse('$_adminBase/admin/verifications/$trackingId/approve'),
-        headers: await _getAuthHeaders(),
-        body: jsonEncode({'reason': 'Manual admin approval'}),
-      ).timeout(const Duration(seconds: 5));
-
-      if (response.statusCode == 200 && mounted) {
+      await sl<ApiClient>().post('/admin/verifications/$trackingId/approve', {
+        'reason': 'Manual admin approval',
+      });
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Verification approved!'), backgroundColor: Colors.green),
         );
@@ -226,13 +138,14 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Network error: $e'), backgroundColor: Colors.redAccent),
+          SnackBar(content: Text('Approval failed: $e'), backgroundColor: Colors.redAccent),
         );
       }
     }
   }
 
   Future<void> _rejectVerification(String trackingId) async {
+    if (trackingId.isEmpty) return;
     final reasonController = TextEditingController();
     final reason = await showDialog<String>(
       context: context,
@@ -252,16 +165,16 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
         ],
       ),
     );
-    if (reason == null || reason.isEmpty) return;
+    if (reason == null || reason.isEmpty) {
+      reasonController.dispose();
+      return;
+    }
 
     try {
-      final response = await http.post(
-        Uri.parse('$_adminBase/admin/verifications/$trackingId/reject'),
-        headers: await _getAuthHeaders(),
-        body: jsonEncode({'reason': reason}),
-      ).timeout(const Duration(seconds: 5));
-
-      if (response.statusCode == 200 && mounted) {
+      await sl<ApiClient>().post('/admin/verifications/$trackingId/reject', {
+        'reason': reason,
+      });
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Verification rejected'), backgroundColor: Colors.orange),
         );
@@ -270,9 +183,11 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Network error: $e'), backgroundColor: Colors.redAccent),
+          SnackBar(content: Text('Rejection failed: $e'), backgroundColor: Colors.redAccent),
         );
       }
+    } finally {
+      reasonController.dispose();
     }
   }
 
@@ -281,18 +196,12 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
     setState(() => _isLoadingUsers = true);
 
     try {
-      final response = await http.get(
-        Uri.parse('$_adminBase/admin/users'),
-        headers: await _getAuthHeaders(),
-      ).timeout(const Duration(seconds: 8));
-
-      if (response.statusCode == 200 && mounted) {
+      final data = await sl<ApiClient>().get('/admin/users');
+      if (data is Map<String, dynamic> && mounted) {
         setState(() {
-          _allUsers = (jsonDecode(response.body) as Map<String, dynamic>)['users'] as List<dynamic>? ?? [];
+          _allUsers = data['users'] as List<dynamic>? ?? [];
           _isLoadingUsers = false;
         });
-      } else if (mounted) {
-        setState(() => _isLoadingUsers = false);
       }
     } catch (e) {
       if (mounted) setState(() => _isLoadingUsers = false);
@@ -337,7 +246,7 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
             indicatorColor: AppTheme.limeAccent,
             labelColor: AppTheme.limeAccent,
             unselectedLabelColor: Colors.white54,
-            onTap: (i) => setState(() => _currentTab = i),
+            onTap: (i) {},
           ),
         ),
         body: TabBarView(

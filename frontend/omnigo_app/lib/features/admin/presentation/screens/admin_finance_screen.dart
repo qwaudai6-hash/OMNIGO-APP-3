@@ -1,7 +1,4 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:fl_chart/fl_chart.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/network/api_client.dart';
@@ -33,15 +30,6 @@ class _AdminFinanceScreenState extends State<AdminFinanceScreen> {
   void initState() {
     super.initState();
     _fetchFinanceData();
-  }
-
-  Future<Map<String, String>> _getAuthHeaders() async {
-    final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('jwt_token') ?? '';
-    return {
-      'Authorization': 'Bearer $token',
-      'Content-Type': 'application/json',
-    };
   }
 
   Future<void> _fetchFinanceData() async {
@@ -642,12 +630,8 @@ class _ApiKeysPanelState extends State<_ApiKeysPanel> {
   Future<void> _refreshExisting() async {
     setState(() => _loadingExisting = true);
     try {
-      final headers = await _getAuthHeaders();
-      final res = await http
-          .get(Uri.parse(ApiEndpoints.adminFinanceApiKeys()), headers: headers)
-          .timeout(const Duration(seconds: 8));
-      if (res.statusCode == 200) {
-        final data = jsonDecode(res.body) as Map<String, dynamic>;
+      final data = await sl<ApiClient>().get('/admin/finance/api-keys');
+      if (data is Map<String, dynamic>) {
         _existingKeys = (data['api_keys'] as List<dynamic>?) ?? [];
       }
     } catch (e) {
@@ -658,15 +642,6 @@ class _ApiKeysPanelState extends State<_ApiKeysPanel> {
     }
   }
 
-  Future<Map<String, String>> _getAuthHeaders() async {
-    final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('jwt_token') ?? '';
-    return {
-      'Authorization': 'Bearer $token',
-      'Content-Type': 'application/json',
-    };
-  }
-
   Future<void> _save() async {
     final value = _valueController.text.trim();
     if (value.isEmpty) {
@@ -675,26 +650,15 @@ class _ApiKeysPanelState extends State<_ApiKeysPanel> {
     }
     setState(() => _saving = true);
     try {
-      final headers = await _getAuthHeaders();
-      final res = await http
-          .post(
-            Uri.parse(ApiEndpoints.adminFinanceApiKeySet()),
-            headers: headers,
-            body: jsonEncode({
-              'provider': _selectedProvider,
-              'key_name': _selectedKeyName,
-              'value': value,
-            }),
-          )
-          .timeout(const Duration(seconds: 8));
+      final body = await sl<ApiClient>().post('/admin/finance/api-keys', {
+        'provider': _selectedProvider,
+        'key_name': _selectedKeyName,
+        'value': value,
+      });
 
-      if (res.statusCode == 200) {
-        final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body is Map<String, dynamic>) {
         final record = body['record'] as Map<String, dynamic>?;
         final fp = record?['fingerprint'] as String? ?? 'unknown';
-        // SECURITY: the backend returns the plaintext exactly once in
-        // reveal_once. We display it for one cycle so the admin can verify
-        // the right value was written, then wipe the field on next edit.
         final revealed = body['reveal_once'] as String? ?? '';
         _toast(
           'Saved. Fingerprint: $fp${revealed.isNotEmpty ? ' • copied: $revealed' : ''}',
@@ -704,7 +668,7 @@ class _ApiKeysPanelState extends State<_ApiKeysPanel> {
         widget.onSaved();
         await _refreshExisting();
       } else {
-        _toast('Save failed: ${res.statusCode} ${res.body}');
+        _toast('Save succeeded but returned unexpected data');
       }
     } catch (e) {
       _toast('Network error: $e');
@@ -739,19 +703,9 @@ class _ApiKeysPanelState extends State<_ApiKeysPanel> {
     if (confirm != true) return;
 
     try {
-      final headers = await _getAuthHeaders();
-      final res = await http
-          .delete(
-            Uri.parse(ApiEndpoints.adminFinanceApiKeyDelete(provider, keyName)),
-            headers: headers,
-          )
-          .timeout(const Duration(seconds: 8));
-      if (res.statusCode == 200) {
-        _toast('Deleted', background: Colors.orange);
-        await _refreshExisting();
-      } else {
-        _toast('Delete failed: ${res.statusCode} ${res.body}');
-      }
+      await sl<ApiClient>().delete('/admin/finance/api-keys/$provider/$keyName');
+      _toast('Deleted', background: Colors.orange);
+      await _refreshExisting();
     } catch (e) {
       _toast('Network error: $e');
     }
