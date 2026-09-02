@@ -332,6 +332,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
 
       if (response.statusCode != 200) {
         // Rollback on failure
+        if (!mounted) return;
         setState(() {
           if (wasFavorited) {
             _favoriteProductIds.add(productId);
@@ -342,6 +343,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       }
     } catch (e) {
       // Rollback on network error
+      if (!mounted) return;
       setState(() {
         if (wasFavorited) {
           _favoriteProductIds.add(productId);

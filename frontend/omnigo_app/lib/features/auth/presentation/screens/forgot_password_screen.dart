@@ -47,6 +47,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
         {'email': _emailController.text.trim()},
       );
       final token = resp is Map ? resp['reset_token']?.toString() : null;
+      if (!mounted) return;
       setState(() {
         _returnedToken = token;
         _stage = 'reset';
@@ -74,6 +75,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
           'new_password': _passwordController.text,
         },
       );
+      if (!mounted) return;
       setState(() => _stage = 'done');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -308,6 +310,7 @@ class _TwoFactorSetupScreenState extends State<TwoFactorSetupScreen> {
       final api = ApiClient();
       final resp = await api.post(ApiEndpoints.auth2FAEnroll(), {});
       final data = resp as Map<String, dynamic>;
+      if (!mounted) return;
       setState(() {
         _secret = data['secret']?.toString();
         _otpauthURL = data['otpauth_url']?.toString();

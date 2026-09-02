@@ -144,9 +144,12 @@ class ChatService {
     _wsSubscription = null;
   }
 
-  /// Dispose of resources and subscriptions.
+  /// Dispose of resources, subscriptions, and stream controllers.
   Future<void> dispose() async {
     await unbind();
+    await _conversationsController.close();
+    await _messageController.close();
+    await _unreadController.close();
   }
 
   /// Cache the JWT-derived user id so [isMine] works without hitting
