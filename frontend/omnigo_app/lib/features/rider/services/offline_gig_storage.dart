@@ -14,7 +14,7 @@ class OfflineGigStorage {
 
   static Box<String> _getBox() {
     if (!Hive.isBoxOpen(boxName)) {
-      return Hive.box<String>(boxName);
+      return Hive.openBox<String>(boxName);
     }
     return Hive.box<String>(boxName);
   }

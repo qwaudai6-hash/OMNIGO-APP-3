@@ -69,6 +69,8 @@ class DynamicSignupScreenState extends State<DynamicSignupScreen> {
           route = '/rider-map';
         } else if (SessionRegistry.instance.role == 'vendor') {
           route = '/vendor-dashboard';
+        } else if (SessionRegistry.instance.role == 'admin' || SessionRegistry.instance.role == 'super_admin') {
+          route = '/admin-surveillance';
         }
         Navigator.pushReplacementNamed(
           context,
@@ -389,7 +391,7 @@ class DynamicSignupScreenState extends State<DynamicSignupScreen> {
                   Container(
                     padding: const EdgeInsets.all(10),
                     decoration: BoxDecoration(
-                      color: isSuccess ? AppTheme.softGreen.withValues(alpha: 0.2) : Colors.red.shade50,
+                      color: isSuccess ? AppTheme.softGreen.withOpacity(0.2) : Colors.red.shade50,
                       shape: BoxShape.circle,
                     ),
                     child: Icon(
@@ -525,7 +527,7 @@ class DynamicSignupScreenState extends State<DynamicSignupScreen> {
                       Text(
                         _isLogin ? 'LOG IN TO SUPERPORTAL' : 'CREATE UNIFIED ID ACCOUNT',
                         style: TextStyle(
-                          color: AppTheme.blackAccent.withValues(alpha: 0.5),
+                          color: AppTheme.blackAccent.withOpacity(0.5),
                           fontSize: 11,
                           fontWeight: FontWeight.bold,
                           letterSpacing: 2.0,
@@ -664,7 +666,7 @@ class DynamicSignupScreenState extends State<DynamicSignupScreen> {
         borderRadius: BorderRadius.circular(38),
         boxShadow: [
           BoxShadow(
-            color: _getRoleColor().withValues(alpha: 0.3),
+            color: _getRoleColor().withOpacity(0.3),
             blurRadius: 25,
             offset: const Offset(0, 10),
           ),
@@ -915,7 +917,7 @@ class DynamicSignupScreenState extends State<DynamicSignupScreen> {
         borderRadius: BorderRadius.circular(18),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.015),
+            color: Colors.black.withOpacity(0.015),
             blurRadius: 8,
             offset: const Offset(0, 4),
           ),

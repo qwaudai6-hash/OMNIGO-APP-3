@@ -344,7 +344,7 @@ class VendorLiveMapScreenState extends State<VendorLiveMapScreen> {
                 child: Container(
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.85),
+                    color: Colors.black.withOpacity(0.85),
                     borderRadius: BorderRadius.circular(20),
                   ),
                   child: const Row(

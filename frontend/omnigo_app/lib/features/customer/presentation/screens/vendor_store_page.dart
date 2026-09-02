@@ -274,7 +274,7 @@ class _VendorStorePageState extends State<VendorStorePage>
         gradient: LinearGradient(
           colors: [
             AppTheme.blackAccent,
-            AppTheme.limeAccent.withValues(alpha: 0.7),
+            AppTheme.limeAccent.withOpacity(0.7),
           ],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
@@ -304,7 +304,7 @@ class _VendorStorePageState extends State<VendorStorePage>
                       border: Border.all(color: Colors.white, width: 3),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.12),
+                          color: Colors.black.withOpacity(0.12),
                           blurRadius: 12,
                         ),
                       ],
@@ -610,7 +610,7 @@ class _VendorStorePageState extends State<VendorStorePage>
           borderRadius: BorderRadius.circular(18),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withValues(alpha: 0.06),
+              color: Colors.black.withOpacity(0.06),
               blurRadius: 10,
               offset: const Offset(0, 4),
             ),
@@ -659,7 +659,7 @@ class _VendorStorePageState extends State<VendorStorePage>
                     ),
                   if (product.stock == 0)
                     Container(
-                      color: Colors.black.withValues(alpha: 0.45),
+                      color: Colors.black.withOpacity(0.45),
                       child: const Center(
                         child: Text('Out of Stock',
                             style: TextStyle(

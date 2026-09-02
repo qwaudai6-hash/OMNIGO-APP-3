@@ -51,7 +51,7 @@ class ApiEndpoints {
   static String get wsUrl {
     const customWs = String.fromEnvironment('WS_URL');
     if (customWs.isNotEmpty) return customWs;
-    return 'wss://$_productionDomain/ws';
+    return 'wss://$_host/ws';
   }
 
   // ── Auth Service ─────────────────────────────────────────────────

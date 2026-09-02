@@ -720,7 +720,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         backgroundColor: const Color(0xFF121212),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(24),
-          side: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
+          side: BorderSide(color: Colors.white.withOpacity(0.08)),
         ),
         title: const Row(
           children: [
@@ -940,7 +940,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                         borderRadius: BorderRadius.circular(20),
                         boxShadow: [
                           BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.02),
+                              color: Colors.black.withOpacity(0.02),
                               blurRadius: 10,
                               offset: const Offset(0, 5),),
                         ],
@@ -1102,7 +1102,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
               borderRadius: BorderRadius.circular(20),
               boxShadow: [
                 BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.02),
+                    color: Colors.black.withOpacity(0.02),
                     blurRadius: 10,
                     offset: const Offset(0, 5),),
               ],
@@ -1219,7 +1219,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
           borderRadius: BorderRadius.circular(24),
           boxShadow: [
             BoxShadow(
-                color: Colors.black.withValues(alpha: 0.02),
+                color: Colors.black.withOpacity(0.02),
                 blurRadius: 10,
                 offset: const Offset(0, 5),),
           ],
@@ -1257,7 +1257,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                       child: Container(
                         padding: const EdgeInsets.all(6),
                         decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.9),
+                          color: Colors.white.withOpacity(0.9),
                           shape: BoxShape.circle,
                         ),
                         child: Icon(
@@ -1426,7 +1426,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                   return Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.85),
+                      color: Colors.black.withOpacity(0.85),
                       borderRadius: BorderRadius.circular(16),
                     ),
                     child: Row(
@@ -1454,7 +1454,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         if (_isEstimatingRide)
           Positioned.fill(
             child: Container(
-              color: Colors.black.withValues(alpha: 0.5),
+              color: Colors.black.withOpacity(0.5),
               child: const Center(
                 child: CircularProgressIndicator(
                   color: Color(0xFFCAFF33),
@@ -1542,7 +1542,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         borderRadius: BorderRadius.circular(20),
         boxShadow: [
           BoxShadow(
-              color: Colors.black.withValues(alpha: 0.01),
+              color: Colors.black.withOpacity(0.01),
               blurRadius: 10,
               offset: const Offset(0, 5),),
         ],
@@ -1805,7 +1805,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
               ),
             ),
             Icon(onTap != null ? Icons.add_circle_outline : Icons.lock_outline,
-                color: AppTheme.blackAccent.withValues(alpha: 0.5),),
+                color: AppTheme.blackAccent.withOpacity(0.5),),
           ],
         ),
       ),
@@ -1824,7 +1824,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       margin: const EdgeInsets.symmetric(horizontal: 30, vertical: 16),
       padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 20),
       decoration: BoxDecoration(
-        color: AppTheme.blackAccent.withValues(alpha: 0.95),
+        color: AppTheme.blackAccent.withOpacity(0.95),
         borderRadius: BorderRadius.circular(40),
         boxShadow: const [
           BoxShadow(color: Colors.black26, blurRadius: 10, offset: Offset(0, 5)),
@@ -1850,7 +1850,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       onTap: () => setState(() => _currentIndex = index),
       child: Icon(
         icon,
-        color: isSelected ? AppTheme.limeAccent : Colors.white.withValues(alpha: 0.5),
+        color: isSelected ? AppTheme.limeAccent : Colors.white.withOpacity(0.5),
         size: 28,
       ),
     );

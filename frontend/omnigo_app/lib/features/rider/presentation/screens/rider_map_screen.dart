@@ -1577,7 +1577,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
     try {
       final request = http.MultipartRequest(
         'PUT',
-        Uri.parse('${ApiEndpoints.authBase}/kyc'),
+        Uri.parse('${ApiEndpoints.authBase}/auth/kyc'),
       );
       final token = SessionRegistry.instance.token ?? widget.trackingId;
       request.headers['Authorization'] = 'Bearer $token';
@@ -1665,7 +1665,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
-          color: selectedFile != null ? AppTheme.limeAccent.withValues(alpha: 0.1) : Colors.grey.shade100,
+          color: selectedFile != null ? AppTheme.limeAccent.withOpacity(0.1) : Colors.grey.shade100,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(color: selectedFile != null ? AppTheme.limeAccent : Colors.grey.shade300),
         ),
@@ -1718,7 +1718,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                 children: [
                   CircleAvatar(
                     radius: 30,
-                    backgroundColor: AppTheme.limeAccent.withValues(alpha: 0.1),
+                    backgroundColor: AppTheme.limeAccent.withOpacity(0.1),
                     child: const Icon(Icons.delivery_dining_rounded, color: AppTheme.limeAccent, size: 30),
                   ),
                   const SizedBox(width: 16),
@@ -1736,7 +1736,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                             Container(
                               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                               decoration: BoxDecoration(
-                                color: AppTheme.limeAccent.withValues(alpha: 0.1),
+                                color: AppTheme.limeAccent.withOpacity(0.1),
                                 borderRadius: BorderRadius.circular(6),
                               ),
                               child: Text(
@@ -1834,7 +1834,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
               children: [
                 CircleAvatar(
                   radius: 36,
-                  backgroundColor: AppTheme.limeAccent.withValues(alpha: 0.2),
+                  backgroundColor: AppTheme.limeAccent.withOpacity(0.2),
                   child: const Icon(Icons.two_wheeler_rounded, color: AppTheme.limeAccent, size: 40),
                 ),
                 const SizedBox(height: 12),
@@ -1846,9 +1846,9 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                   decoration: BoxDecoration(
-                    color: AppTheme.limeAccent.withValues(alpha: 0.15),
+                    color: AppTheme.limeAccent.withOpacity(0.15),
                     borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: AppTheme.limeAccent.withValues(alpha: 0.3)),
+                    border: Border.all(color: AppTheme.limeAccent.withOpacity(0.3)),
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
@@ -1941,7 +1941,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                     Container(
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.3),
+                        color: Colors.white.withOpacity(0.3),
                         shape: BoxShape.circle,
                       ),
                       child: const Icon(Icons.my_location_rounded, color: AppTheme.blackAccent, size: 28),
@@ -1958,7 +1958,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                           const SizedBox(height: 4),
                           Text(
                             'View real-time progress of your ongoing delivery or ride.',
-                            style: TextStyle(color: AppTheme.blackAccent.withValues(alpha: 0.8), fontSize: 13),
+                            style: TextStyle(color: AppTheme.blackAccent.withOpacity(0.8), fontSize: 13),
                           ),
                         ],
                       ),
@@ -2090,7 +2090,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                     children: [
                       const Text('Pending COD Debts', style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
                       Text(
-                        'PKR ${_codDebts.fold<double>(0.0, (sum, item) => sum + ((item['amount'] as num?) ?? 0.0)).toStringAsFixed(2)}',
+                        'PKR ${_codDebts.fold<double>(0.0, (sum, item) => sum + ((item['amount_owed'] as num?) ?? 0.0)).toStringAsFixed(2)}',
                         style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 16),
                       ),
                     ],
@@ -2241,7 +2241,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                         child: Container(
                           padding: const EdgeInsets.symmetric(vertical: 12),
                           decoration: BoxDecoration(
-                            color: selectedGateway == 'jazzcash' ? AppTheme.limeAccent.withValues(alpha: 0.2) : Colors.grey.shade100,
+                            color: selectedGateway == 'jazzcash' ? AppTheme.limeAccent.withOpacity(0.2) : Colors.grey.shade100,
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(color: selectedGateway == 'jazzcash' ? AppTheme.blackAccent : Colors.grey.shade300, width: 2),
                           ),
@@ -2262,7 +2262,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                         child: Container(
                           padding: const EdgeInsets.symmetric(vertical: 12),
                           decoration: BoxDecoration(
-                            color: selectedGateway == 'easypaisa' ? AppTheme.limeAccent.withValues(alpha: 0.2) : Colors.grey.shade100,
+                            color: selectedGateway == 'easypaisa' ? AppTheme.limeAccent.withOpacity(0.2) : Colors.grey.shade100,
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(color: selectedGateway == 'easypaisa' ? AppTheme.blackAccent : Colors.grey.shade300, width: 2),
                           ),

@@ -146,6 +146,10 @@ class SessionRegistry {
       await prefs.remove('address');
       await prefs.remove('is_verified');
       await prefs.remove('entity_type');
+      await prefs.remove('customer_cart');
+      await prefs.remove('telemetry_offline_queue');
+      await prefs.remove('active_customer_id');
+      await prefs.remove('active_order_id');
     } catch (e) {
       // Fail-silent
     }

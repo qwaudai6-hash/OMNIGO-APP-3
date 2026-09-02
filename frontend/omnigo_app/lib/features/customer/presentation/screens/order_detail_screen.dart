@@ -556,9 +556,9 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                 width: double.infinity,
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
-                  color: Colors.redAccent.withValues(alpha: 0.1),
+                  color: Colors.redAccent.withOpacity(0.1),
                   borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.redAccent.withValues(alpha: 0.3)),
+                  border: Border.all(color: Colors.redAccent.withOpacity(0.3)),
                 ),
                 child: Row(
                   children: [
@@ -600,10 +600,10 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(24),
-                  border: Border.all(color: AppTheme.limeAccent.withValues(alpha: 0.3)),
+                  border: Border.all(color: AppTheme.limeAccent.withOpacity(0.3)),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.02),
+                      color: Colors.black.withOpacity(0.02),
                       blurRadius: 10,
                       offset: const Offset(0, 4),
                     ),
@@ -757,9 +757,9 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
               Container(
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
-                  color: AppTheme.limeAccent.withValues(alpha: 0.2),
+                  color: AppTheme.limeAccent.withOpacity(0.2),
                   borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: AppTheme.limeAccent.withValues(alpha: 0.5)),
+                  border: Border.all(color: AppTheme.limeAccent.withOpacity(0.5)),
                 ),
                 child: Row(
                   children: [
@@ -822,7 +822,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                   width: 40,
                   height: 40,
                   decoration: BoxDecoration(
-                    color: isCompleted ? AppTheme.blackAccent : (isCancelled ? Colors.redAccent.withValues(alpha: 0.1) : Colors.grey.shade200),
+                    color: isCompleted ? AppTheme.blackAccent : (isCancelled ? Colors.redAccent.withOpacity(0.1) : Colors.grey.shade200),
                     shape: BoxShape.circle,
                     border: isCurrent ? Border.all(color: AppTheme.limeAccent, width: 3) : null,
                   ),

@@ -227,7 +227,7 @@ class WishlistScreenState extends State<WishlistScreen> {
                                           color: Colors.white,
                                           borderRadius: BorderRadius.circular(24),
                                           boxShadow: [
-                                            BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 10, offset: const Offset(0, 5)),
+                                            BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 10, offset: const Offset(0, 5)),
                                           ],
                                         ),
                                         child: Column(
@@ -255,7 +255,7 @@ class WishlistScreenState extends State<WishlistScreen> {
                                                       child: Container(
                                                         padding: const EdgeInsets.all(6),
                                                         decoration: BoxDecoration(
-                                                          color: Colors.white.withValues(alpha: 0.9),
+                                                          color: Colors.white.withOpacity(0.9),
                                                           shape: BoxShape.circle,
                                                         ),
                                                         child: const Icon(Icons.favorite, color: Colors.redAccent, size: 18),

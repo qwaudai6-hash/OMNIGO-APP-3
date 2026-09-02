@@ -258,14 +258,15 @@ class _VendorWalletScreenState extends State<VendorWalletScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final double balance = ((_wallet?['balance'] ?? 0) as num).toDouble();
-    final double lifetime = ((_wallet?['lifetime_earnings'] ?? 0) as num).toDouble();
-    final double totalPayouts = ((_wallet?['total_payouts'] ?? 0) as num).toDouble();
+    final double balance = (num.tryParse(_wallet?['balance']?.toString() ?? '') ?? 0).toDouble();
+    final double lifetime = (num.tryParse(_wallet?['lifetime_earnings']?.toString() ?? '') ?? 0).toDouble();
+    final double totalPayouts = (num.tryParse(_wallet?['total_payouts']?.toString() ?? '') ?? 0).toDouble();
 
     // Prefer API's central transaction-checked pending escrow balance, fallback to holds sum.
-    final double pendingEscrow = ((_wallet?['pending_balance'] ?? _escrowHolds
-        .where((h) => h['status'] == 'held')
-        .fold<double>(0.0, (sum, h) => sum + ((h['amount'] as num?)?.toDouble() ?? 0.0))) as num).toDouble();
+    final double pendingEscrow = (num.tryParse(_wallet?['pending_balance']?.toString() ?? '') ??
+        _escrowHolds
+            .where((h) => h['status'] == 'held')
+            .fold<double>(0.0, (sum, h) => sum + ((h['amount'] as num?)?.toDouble() ?? 0.0))).toDouble();
 
     final double releasableAmount = _escrowHolds
         .where((h) => h['status'] == 'released')
@@ -467,8 +468,8 @@ class _VendorWalletScreenState extends State<VendorWalletScreen> {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.black.withValues(alpha: 0.05)),
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10, offset: const Offset(0, 4))],
+        border: Border.all(color: Colors.black.withOpacity(0.05)),
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 10, offset: const Offset(0, 4))],
       ),
       child: Row(
         children: [
@@ -488,7 +489,7 @@ class _VendorWalletScreenState extends State<VendorWalletScreen> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
             decoration: BoxDecoration(
-              color: statusColor.withValues(alpha: 0.1),
+              color: statusColor.withOpacity(0.1),
               borderRadius: BorderRadius.circular(8),
             ),
             child: Text(status, style: TextStyle(color: statusColor, fontSize: 11, fontWeight: FontWeight.bold)),

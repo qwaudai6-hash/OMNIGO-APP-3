@@ -56,7 +56,7 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
     // RIDE- sessions live in the ride-hailing domain (no order chain), so
     // they resolve against the dedicated ride lineage endpoint.
     final isRide = orderId.toUpperCase().startsWith('RIDE-');
-    final endpoint = isRide ? '$_adminBase/lineage/ride/$orderId' : '$_adminBase/lineage/$orderId/full';
+    final endpoint = isRide ? '$_adminBase/admin/lineage/ride/$orderId' : '$_adminBase/admin/lineage/$orderId/full';
 
     try {
       final response = await http.get(
@@ -100,7 +100,7 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
 
     try {
       final response = await http.get(
-        Uri.parse('$_adminBase/users/pending'),
+        Uri.parse('$_adminBase/admin/users/pending'),
         headers: await _getAuthHeaders(),
       ).timeout(const Duration(seconds: 8));
 
@@ -120,7 +120,7 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
   Future<void> _approveUser(String trackingId) async {
     try {
       final response = await http.patch(
-        Uri.parse('$_adminBase/users/$trackingId/approve'),
+        Uri.parse('$_adminBase/admin/users/$trackingId/approve'),
         headers: await _getAuthHeaders(),
       ).timeout(const Duration(seconds: 5));
 
@@ -151,7 +151,7 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
 
     try {
       final response = await http.get(
-        Uri.parse('$_adminBase/verifications/pending'),
+        Uri.parse('$_adminBase/admin/verifications/pending'),
         headers: await _getAuthHeaders(),
       ).timeout(const Duration(seconds: 8));
 
@@ -171,7 +171,7 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
   Future<void> _approveVerification(String trackingId) async {
     try {
       final response = await http.post(
-        Uri.parse('$_adminBase/verifications/$trackingId/approve'),
+        Uri.parse('$_adminBase/admin/verifications/$trackingId/approve'),
         headers: await _getAuthHeaders(),
         body: jsonEncode({'reason': 'Manual admin approval'}),
       ).timeout(const Duration(seconds: 5));
@@ -215,7 +215,7 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
 
     try {
       final response = await http.post(
-        Uri.parse('$_adminBase/verifications/$trackingId/reject'),
+        Uri.parse('$_adminBase/admin/verifications/$trackingId/reject'),
         headers: await _getAuthHeaders(),
         body: jsonEncode({'reason': reason}),
       ).timeout(const Duration(seconds: 5));
@@ -241,7 +241,7 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
 
     try {
       final response = await http.get(
-        Uri.parse('$_adminBase/users'),
+        Uri.parse('$_adminBase/admin/users'),
         headers: await _getAuthHeaders(),
       ).timeout(const Duration(seconds: 8));
 
@@ -378,8 +378,8 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.black.withValues(alpha: 0.05)),
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10, offset: const Offset(0, 4))],
+        border: Border.all(color: Colors.black.withOpacity(0.05)),
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 10, offset: const Offset(0, 4))],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -388,7 +388,7 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text('RIDE: $rideId', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-              Chip(label: Text(rideStatus, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)), backgroundColor: Colors.blue.withValues(alpha: 0.1)),
+              Chip(label: Text(rideStatus, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)), backgroundColor: Colors.blue.withOpacity(0.1)),
             ],
           ),
           const Divider(height: 30),
@@ -448,8 +448,8 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.black.withValues(alpha: 0.05)),
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10, offset: const Offset(0, 4))],
+        border: Border.all(color: Colors.black.withOpacity(0.05)),
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 10, offset: const Offset(0, 4))],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -458,7 +458,7 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text('ORDER: $orderId', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-              Chip(label: Text(orderStatus, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)), backgroundColor: Colors.blue.withValues(alpha: 0.1)),
+              Chip(label: Text(orderStatus, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)), backgroundColor: Colors.blue.withOpacity(0.1)),
             ],
           ),
           const Divider(height: 30),
@@ -587,7 +587,7 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
                     decoration: BoxDecoration(
                       color: Colors.white,
                       borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: Colors.orange.withValues(alpha: 0.3)),
+                      border: Border.all(color: Colors.orange.withOpacity(0.3)),
                     ),
                     child: Row(
                       children: [

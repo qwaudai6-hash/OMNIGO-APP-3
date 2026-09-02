@@ -475,7 +475,7 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
                             color: Colors.white,
                             borderRadius: BorderRadius.circular(24),
                             boxShadow: [
-                              BoxShadow(color: Colors.black.withValues(alpha: 0.01), blurRadius: 10, offset: const Offset(0, 5)),
+                              BoxShadow(color: Colors.black.withOpacity(0.01), blurRadius: 10, offset: const Offset(0, 5)),
                             ],
                           ),
                           child: Column(
@@ -974,7 +974,7 @@ class _VendorProfileTabState extends State<VendorProfileTab> {
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                           decoration: BoxDecoration(
-                            color: isVerified ? Colors.green.withValues(alpha: 0.2) : Colors.orange.withValues(alpha: 0.2),
+                            color: isVerified ? Colors.green.withOpacity(0.2) : Colors.orange.withOpacity(0.2),
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(color: isVerified ? Colors.green : Colors.orange),
                           ),

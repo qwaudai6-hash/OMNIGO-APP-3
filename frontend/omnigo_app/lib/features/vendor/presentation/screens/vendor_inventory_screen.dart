@@ -203,10 +203,10 @@ class InventoryErrorDialog extends StatelessWidget {
         decoration: BoxDecoration(
           color: Colors.grey.shade900,
           borderRadius: BorderRadius.circular(32),
-          border: Border.all(color: Colors.red.withValues(alpha: 0.3), width: 1.5),
+          border: Border.all(color: Colors.red.withOpacity(0.3), width: 1.5),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withValues(alpha: 0.5),
+              color: Colors.black.withOpacity(0.5),
               blurRadius: 20,
               offset: const Offset(0, 10),
             ),
@@ -218,7 +218,7 @@ class InventoryErrorDialog extends StatelessWidget {
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
-                color: Colors.red.withValues(alpha: 0.1),
+                color: Colors.red.withOpacity(0.1),
                 shape: BoxShape.circle,
               ),
               child: const Icon(
@@ -542,7 +542,7 @@ class VendorInventoryScreenState extends State<VendorInventoryScreen> {
                     padding:
                         const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                     decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.85),
+                      color: Colors.black.withOpacity(0.85),
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: const Row(
@@ -669,7 +669,7 @@ class VendorInventoryScreenState extends State<VendorInventoryScreen> {
                                     borderRadius: BorderRadius.circular(24),
                                     side: BorderSide(
                                       color: isOutOfStock
-                                          ? Colors.red.withValues(alpha: 0.2)
+                                          ? Colors.red.withOpacity(0.2)
                                           : Colors.grey.shade200,
                                       width: 1.5,
                                     ),
@@ -773,7 +773,7 @@ class VendorInventoryScreenState extends State<VendorInventoryScreen> {
                                           child: Container(
                                             decoration: BoxDecoration(
                                               color: Colors.black
-                                                  .withValues(alpha: 0.38),
+                                                  .withOpacity(0.38),
                                               borderRadius:
                                                   BorderRadius.circular(24),
                                             ),

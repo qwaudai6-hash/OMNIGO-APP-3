@@ -737,13 +737,13 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                     width: 220,
                                     height: 220,
                                     errorBuilder: (context, error, stackTrace) =>
-                                        Icon(Icons.shopping_bag, size: 120, color: Colors.white.withValues(alpha: 0.8)),
+                                        Icon(Icons.shopping_bag, size: 120, color: Colors.white.withOpacity(0.8)),
                                   ),
                                 ),
                               );
                             },
                           )
-                        : Icon(Icons.shopping_bag, size: 120, color: Colors.white.withValues(alpha: 0.8)),
+                        : Icon(Icons.shopping_bag, size: 120, color: Colors.white.withOpacity(0.8)),
                   ),
                 ),
                 if (prod.allImages.length > 1)
@@ -758,7 +758,7 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
                           width: _activeImageIndex == index ? 20 : 8,
                           height: 8,
                           decoration: BoxDecoration(
-                            color: _activeImageIndex == index ? AppTheme.blackAccent : Colors.white.withValues(alpha: 0.7),
+                            color: _activeImageIndex == index ? AppTheme.blackAccent : Colors.white.withOpacity(0.7),
                             borderRadius: BorderRadius.circular(4),
                           ),
                         ),
@@ -1113,9 +1113,9 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
-        color: bgColor.withValues(alpha: 0.2),
+        color: bgColor.withOpacity(0.2),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: bgColor.withValues(alpha: 0.5)),
+        border: Border.all(color: bgColor.withOpacity(0.5)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,

@@ -137,8 +137,8 @@ class _AdminFinanceScreenState extends State<AdminFinanceScreen> {
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: color.withValues(alpha: 0.3)),
-          boxShadow: [BoxShadow(color: color.withValues(alpha: 0.08), blurRadius: 8, offset: const Offset(0, 3))],
+          border: Border.all(color: color.withOpacity(0.3)),
+          boxShadow: [BoxShadow(color: color.withOpacity(0.08), blurRadius: 8, offset: const Offset(0, 3))],
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -186,7 +186,7 @@ class _AdminFinanceScreenState extends State<AdminFinanceScreen> {
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: Colors.grey.shade300),
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 10, offset: const Offset(0, 4))],
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 10, offset: const Offset(0, 4))],
       ),
       child: LineChart(
         LineChartData(
@@ -202,7 +202,7 @@ class _AdminFinanceScreenState extends State<AdminFinanceScreen> {
               barWidth: 4,
               isStrokeCapRound: true,
               dotData: const FlDotData(show: true),
-              belowBarData: BarAreaData(show: true, color: Colors.deepPurpleAccent.withValues(alpha: 0.2)),
+              belowBarData: BarAreaData(show: true, color: Colors.deepPurpleAccent.withOpacity(0.2)),
             ),
           ],
           titlesData: FlTitlesData(
@@ -521,9 +521,9 @@ class _AdminFinanceScreenState extends State<AdminFinanceScreen> {
                                   decoration: BoxDecoration(
                                     color: Colors.white,
                                     borderRadius: BorderRadius.circular(12),
-                                    border: Border.all(color: statusColor.withValues(alpha: 0.3)),
+                                    border: Border.all(color: statusColor.withOpacity(0.3)),
                                     boxShadow: [
-                                      BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 4, offset: const Offset(0, 2)),
+                                      BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 4, offset: const Offset(0, 2)),
                                     ],
                                   ),
                                   child: Column(
@@ -539,7 +539,7 @@ class _AdminFinanceScreenState extends State<AdminFinanceScreen> {
                                               Container(
                                                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                                                 decoration: BoxDecoration(
-                                                  color: statusColor.withValues(alpha: 0.15),
+                                                  color: statusColor.withOpacity(0.15),
                                                   borderRadius: BorderRadius.circular(6),
                                                 ),
                                                 child: Text(
