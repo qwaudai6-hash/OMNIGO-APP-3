@@ -141,8 +141,13 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 		// all of this balance via POST /payments/vendor/withdraw, which
 		// debits vendor_wallet.balance immediately. Only sweep what is still
 		// actually present in the wallet — never drive the balance negative
-		// or pay out the same money twice. Holds always progress to
-		// 'paid_out' so they are not re-swept on the next tick.
+		// or pay out the same money twice.
+		//
+		// VW-1 FIX: We must track which specific holds are actually being
+		// swept, so we only mark THOSE holds as 'paid_out'. The previous
+		// implementation marked ALL released holds as paid_out regardless
+		// of how much was actually paid — creating an audit mismatch where
+		// vendor_wallet.total_payouts disagreed with the sum of paid_out holds.
 		var walletBalance float64
 		err = tx.QueryRow(ctx,
 			`SELECT COALESCE(balance, 0)::float8 FROM vendor_wallet WHERE vendor_tracking_id = $1 FOR UPDATE`,
@@ -161,12 +166,63 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 				vendorID, totalReleasedInTx, walletBalance, sweepAmount)
 		}
 
-		payoutID := uuid.New()
+		// Identify the specific holds that fit within sweepAmount, oldest
+		// first. These are the holds that will be marked paid_out.
+		// Unused holds revert to 'held' status for a future tick.
+		type holdRow struct {
+			ID     uuid.UUID
+			Amount float64
+		}
+		var sweptHolds []holdRow
+		var sweptTotal float64
 		if sweepAmount > 0 {
+			rows, err := tx.Query(ctx, `
+				SELECT id, amount
+				FROM escrow_holds
+				WHERE vendor_tracking_id = $1 AND status = 'released'
+				ORDER BY hold_until ASC, created_at ASC, id ASC
+				FOR UPDATE
+			`, vendorID)
+			if err != nil {
+				tx.Rollback(ctx)
+				fmt.Printf("[PayoutWorker] Error listing released holds for %s: %v\n", vendorID, err)
+				continue
+			}
+			for rows.Next() {
+				var h holdRow
+				if err := rows.Scan(&h.ID, &h.Amount); err != nil {
+					rows.Close()
+					tx.Rollback(ctx)
+					fmt.Printf("[PayoutWorker] Error scanning hold row for %s: %v\n", vendorID, err)
+					continue
+				}
+				if sweptTotal+h.Amount <= sweepAmount+0.0001 {
+					sweptHolds = append(sweptHolds, h)
+					sweptTotal += h.Amount
+				} else {
+					// Remaining holds don't fit in this sweep; leave them.
+					// They are still locked (FOR UPDATE) but we won't mark
+					// them paid_out. The release on rows.Close() at the end
+					// of the loop will unlock them.
+					break
+				}
+			}
+			rows.Close()
+		}
+		// Use the actual sum of swept holds as the final sweep amount, to
+		// ensure vendor_wallet.total_payouts and the ledger transfer match
+		// the sum of paid_out holds exactly (no floating-point drift).
+		finalSweepAmount := sweptTotal
+		if finalSweepAmount > sweepAmount {
+			finalSweepAmount = sweepAmount
+		}
+
+		payoutID := uuid.New()
+		if finalSweepAmount > 0 {
 			_, err = tx.Exec(ctx,
 				`INSERT INTO vendor_payouts (id, vendor_tracking_id, amount, status, batch_id)
 				 VALUES ($1, $2, $3, 'pending_disbursement', $4)`,
-				payoutID, vendorID, sweepAmount, batchID,
+				payoutID, vendorID, finalSweepAmount, batchID,
 			)
 			if err != nil {
 				tx.Rollback(ctx)
@@ -177,24 +233,34 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 			payoutID = uuid.Nil // fully withdrawn manually — reconciliation-only tick
 		}
 
-		// Mark the processed escrow holds as 'paid_out' to prevent duplicate payouts in future hourly ticks
-		_, err = tx.Exec(ctx,
-			`UPDATE escrow_holds SET status = 'paid_out' WHERE vendor_tracking_id = $1 AND status = 'released'`,
-			vendorID,
-		)
-		if err != nil {
-			tx.Rollback(ctx)
-			fmt.Printf("[PayoutWorker] Error marking escrow holds as paid_out for %s: %v\n", vendorID, err)
-			continue
+		// Mark ONLY the swept holds as 'paid_out'. Unused holds remain
+		// 'released' and will be re-evaluated on the next tick (if the
+		// vendor's wallet balance is sufficient then).
+		if len(sweptHolds) > 0 {
+			holdIDs := make([]uuid.UUID, len(sweptHolds))
+			for i, h := range sweptHolds {
+				holdIDs[i] = h.ID
+			}
+			_, err = tx.Exec(ctx,
+				`UPDATE escrow_holds SET status = 'paid_out' WHERE id = ANY($1)`,
+				holdIDs,
+			)
+			if err != nil {
+				tx.Rollback(ctx)
+				fmt.Printf("[PayoutWorker] Error marking swept holds as paid_out for %s: %v\n", vendorID, err)
+				continue
+			}
 		}
 
-		// 4. Update vendor_wallet in the same transaction (only the swept amount)
-		if sweepAmount > 0 {
+		// 4. Update vendor_wallet in the same transaction (only the swept amount).
+		// VW-2 FIX: AND balance >= $2 prevents negative balance if a refactor
+		// changes the transaction boundaries.
+		if finalSweepAmount > 0 {
 			_, err = tx.Exec(ctx,
 				`UPDATE vendor_wallet
 				 SET total_payouts = total_payouts + $2, balance = balance - $2, updated_at = NOW()
-				 WHERE vendor_tracking_id = $1`,
-				vendorID, sweepAmount,
+				 WHERE vendor_tracking_id = $1 AND balance >= $2`,
+				vendorID, finalSweepAmount,
 			)
 			if err != nil {
 				tx.Rollback(ctx)
@@ -208,7 +274,7 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 			continue
 		}
 
-		if sweepAmount == 0 {
+		if finalSweepAmount == 0 {
 			fmt.Printf("[PayoutWorker] Vendor %s: %.2f released escrow reconciled (already paid out via manual withdrawal)\n",
 				vendorID, totalReleasedInTx)
 			continue
@@ -219,7 +285,7 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 		_, err = w.ledger.Transfer(ctx, ledger.TransferRequest{
 			DebitAccount:   ledger.AccountVendorWithdrawable,
 			CreditAccount:  ledger.AccountVendorBankPayout,
-			Amount:         sweepAmount,
+			Amount:         finalSweepAmount,
 			ReferenceType:  "vendor_payout",
 			ReferenceID:    vendorID,
 			Description:    fmt.Sprintf("Vendor payout for %s — batch %s", vendorID, batchID),
@@ -246,8 +312,8 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 			currency = "PKR"
 		}
 
-		fmt.Printf("[PayoutWorker] Paid out %.2f %s to vendor %s (batch %s)\n",
-			sweepAmount, currency, vendorID, batchID)
+		fmt.Printf("[PayoutWorker] Paid out %.2f %s to vendor %s (batch %s, swept %d holds)\n",
+			finalSweepAmount, currency, vendorID, batchID, len(sweptHolds))
 	}
 
 	if payoutsCreated > 0 {

@@ -96,6 +96,11 @@ func (s *VendorService) ListStores(ctx context.Context, limit, offset int) ([]mo
 	return s.repo.ListStores(ctx, limit, offset)
 }
 
+// UpdateMyStore updates the vendor's own store.
+func (s *VendorService) UpdateMyStore(ctx context.Context, vendorTrackingID string, req *models.UpdateStoreRequest) (*models.VendorStore, error) {
+	return s.repo.UpdateStore(ctx, vendorTrackingID, req)
+}
+
 // GetVendorMetrics pulls caching-first analytics and handles division-by-zero math guards
 func (s *VendorService) GetVendorMetrics(ctx context.Context, vendorTrackingID string) (*models.VendorMetricsResponse, error) {
 	cacheKey := fmt.Sprintf("vendor:metrics:%s", vendorTrackingID)

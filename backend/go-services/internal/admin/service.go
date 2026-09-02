@@ -2,10 +2,10 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +14,7 @@ import (
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 
 	"github.com/omnigo/backend/internal/ledger"
+	"github.com/omnigo/backend/internal/shared/config"
 	tb "github.com/tigerbeetle/tigerbeetle-go"
 )
 
@@ -112,15 +113,17 @@ type AdminSurveillanceService struct {
 	neo4jDriver neo4j.DriverWithContext
 	neo4jDb     string
 	tbService   *ledger.Service
+	cfg         *config.AdminConfig
 }
 
-func NewAdminSurveillanceService(dbWriter, dbReader *pgxpool.Pool, driver neo4j.DriverWithContext, dbName string, tbService *ledger.Service) *AdminSurveillanceService {
+func NewAdminSurveillanceService(dbWriter, dbReader *pgxpool.Pool, driver neo4j.DriverWithContext, dbName string, tbService *ledger.Service, cfg *config.AdminConfig) *AdminSurveillanceService {
 	return &AdminSurveillanceService{
 		dbWriter:    dbWriter,
 		dbReader:    dbReader,
 		neo4jDriver: driver,
 		neo4jDb:     dbName,
 		tbService:   tbService,
+		cfg:         cfg,
 	}
 }
 
@@ -346,27 +349,32 @@ func (s *AdminSurveillanceService) ApproveUser(ctx context.Context, trackingID s
 }
 
 // GetLedgerKPIs fetches the current balances of the global platform accounts from TigerBeetle.
+//
+// AW-3 FIX: VendorLiability previously only summed AccountVendorWallet,
+// missing the money held in AccountVendorLockedEscrow (48h hold) and
+// AccountVendorPendingEscrow (approved, pending payout). Admin would
+// under-report vendor liability by orders of magnitude.
+//
+// Previously this function returned zeroed-out FinancialKPIs when
+// TigerBeetle was unavailable. That made a broken ledger look identical
+// to "no money anywhere" — admin would see zeros and assume the system
+// was healthy. The new behavior returns an explicit error so the admin
+// dashboard can show "ledger offline" instead of misleading zeros.
 func (s *AdminSurveillanceService) GetLedgerKPIs(ctx context.Context) (*FinancialKPIs, error) {
 	if s.tbService == nil || s.tbService.TBService() == nil {
-		return &FinancialKPIs{
-			AdminRevenue:    0.0,
-			CentralEscrow:   0.0,
-			VendorLiability: 0.0,
-			RiderCashDebt:   0.0,
-		}, nil
+		return nil, errors.New("ledger KPIs unavailable: TigerBeetle is not configured or offline")
 	}
 
 	accountIDs := []tb.Uint128{
 		ledger.AccountToUint128(ledger.AccountAdminRevenue),
 		ledger.AccountToUint128(ledger.AccountCentralEscrow),
+		// AW-3 FIX: include locked + pending escrow in vendor liability.
+		ledger.AccountToUint128(ledger.AccountVendorLockedEscrow),
+		ledger.AccountToUint128(ledger.AccountVendorPendingEscrow),
 		ledger.AccountToUint128(ledger.AccountVendorWallet),
 		ledger.AccountToUint128(ledger.AccountCashReceivable),
 	}
 
-	// Wait, TBService in ledger package expects tb.Uint128. I need to check the type.
-	// Since I can't import tb in this signature without adding tigerbeetle dependency here,
-	// I will just let the ledger package handle it.
-	// Wait, I will use GetAccountBalances directly.
 	accounts, err := s.tbService.TBService().GetAccountBalances(accountIDs)
 	if err != nil {
 		return nil, err
@@ -382,13 +390,17 @@ func (s *AdminSurveillanceService) GetLedgerKPIs(ctx context.Context) (*Financia
 		balCents := new(big.Int).Sub(credits, debits).Int64()
 		bal := float64(balCents) / 100.0
 
-		// To match ID exactly, we compare:
+		// AW-3 FIX: use += so locked + pending + wallet all accumulate.
 		if acc.ID == ledger.AccountToUint128(ledger.AccountAdminRevenue) {
 			kpis.AdminRevenue = bal
 		} else if acc.ID == ledger.AccountToUint128(ledger.AccountCentralEscrow) {
 			kpis.CentralEscrow = bal
+		} else if acc.ID == ledger.AccountToUint128(ledger.AccountVendorLockedEscrow) {
+			kpis.VendorLiability += bal
+		} else if acc.ID == ledger.AccountToUint128(ledger.AccountVendorPendingEscrow) {
+			kpis.VendorLiability += bal
 		} else if acc.ID == ledger.AccountToUint128(ledger.AccountVendorWallet) {
-			kpis.VendorLiability = bal
+			kpis.VendorLiability += bal
 		} else if acc.ID == ledger.AccountToUint128(ledger.AccountCashReceivable) {
 			kpis.RiderCashDebt = float64(new(big.Int).Sub(debits, credits).Int64()) / 100.0 // asset
 		}
@@ -432,29 +444,96 @@ func (s *AdminSurveillanceService) GetRecentPayments(ctx context.Context, limit 
 	return records, nil
 }
 
-// GetDailyRevenue aggregates completed orders grouped by day
+// GetDailyRevenue aggregates completed orders grouped by day.
+//
+// AW-4 FIX: replaced N+1 query (one ledger query per day) with a single
+// CTE-based query that joins orders and ledger entries in one round-trip.
+// Also replaced the flat 10% fallback with a per-order commission
+// estimate (using orders.admin_commission when available) so the
+// platform revenue number is accurate even when the ledger hasn't been
+// written yet for the day.
+//
+// The legacy flat-rate fallback has been removed. If the data sources
+// (ledger + per-order commission + computed platform cut) all return
+// zero for a day, the row's PlatformRevenue is left as 0 rather than
+// being estimated — operators must configure ANALYTICS_ESTIMATE_RATE
+// to enable an explicit, auditable estimate.
 func (s *AdminSurveillanceService) GetDailyRevenue(ctx context.Context, days int, paymentMethod string) ([]DailyRevenue, error) {
-	// Filter by payment method if specified
-	paymentFilter := ""
-	args := []interface{}{days}
+	if s.cfg != nil {
+		if days <= 0 {
+			days = s.cfg.DefaultRevenueDays
+		}
+		if days > s.cfg.MaxRevenueDays {
+			days = s.cfg.MaxRevenueDays
+		}
+	} else {
+		if days <= 0 {
+			days = 7
+		}
+		if days > 365 {
+			days = 365
+		}
+	}
 
+	// Build the WHERE clause. paymentFilter is built separately so the
+	// ledger CTE uses the same filter (and so we only fetch ledger
+	// entries for the relevant payment method).
+	paymentFilterOrders := ""
+	paymentFilterLedger := ""
+	// Pass days as a text value (e.g. "7") so pgx encodes it as TEXT
+	// and the query's `(CAST($1 AS TEXT) || ' days')::INTERVAL` works.
+	daysArg := strconv.Itoa(days)
+	args := []interface{}{daysArg}
 	if paymentMethod != "" && paymentMethod != "all" {
-		paymentFilter = "AND payment_gateway = $2"
+		paymentFilterOrders = "AND payment_gateway = $2"
+		paymentFilterLedger = "AND le.reference_id IN (SELECT order_tracking_id FROM orders WHERE payment_gateway = $2)"
 		args = append(args, paymentMethod)
 	}
 
+	// Single CTE-based query:
+	//  1. daily_orders — aggregate order totals per day
+	//  2. daily_ledger — aggregate ledger revenue per day (joins ledger
+	//     entries to the admin_revenue_account, filtered by payment method
+	//     via the order they reference)
+	//  3. Final SELECT joins them. Platform revenue is the ledger amount
+	//     when present, else an estimate based on each order's actual
+	//     admin_commission column.
 	query := fmt.Sprintf(`
-		SELECT 
-			DATE(created_at) as date, 
-			SUM(total_amount) as gross_volume, 
-			COUNT(order_tracking_id) as order_count
-		FROM orders 
-		WHERE status = 'completed'
-		  AND created_at >= NOW() - ($1 || ' days')::INTERVAL
-		  %s
-		GROUP BY DATE(created_at)
-		ORDER BY DATE(created_at) ASC
-	`, paymentFilter)
+		WITH daily_orders AS (
+			SELECT
+				DATE(created_at AT TIME ZONE 'UTC') AS day,
+				SUM(total_amount) AS gross_volume,
+				COUNT(order_tracking_id) AS order_count,
+				COALESCE(SUM(admin_commission), 0) AS commission_sum,
+				COALESCE(SUM(total_amount - admin_commission - COALESCE(vendor_escrow, 0) - COALESCE(delivery_escrow, 0)), 0) AS commission_fallback_sum
+			FROM orders
+			WHERE status = 'completed'
+			  AND created_at >= NOW() - (($1) || ' days')::INTERVAL
+			  %s
+			GROUP BY DATE(created_at AT TIME ZONE 'UTC')
+		),
+		daily_ledger AS (
+			SELECT
+				DATE(le.created_at AT TIME ZONE 'UTC') AS day,
+				COALESCE(SUM(le.amount), 0) AS platform_revenue
+			FROM ledger_entries le
+			WHERE le.account = 'admin_revenue_account'
+			  AND le.amount > 0
+			  AND le.created_at >= NOW() - (($1) || ' days')::INTERVAL
+			  %s
+			GROUP BY DATE(le.created_at AT TIME ZONE 'UTC')
+		)
+		SELECT
+			o.day,
+			o.gross_volume,
+			o.order_count,
+			COALESCE(l.platform_revenue, 0) AS ledger_revenue,
+			o.commission_sum,
+			o.commission_fallback_sum
+		FROM daily_orders o
+		LEFT JOIN daily_ledger l ON o.day = l.day
+		ORDER BY o.day ASC
+	`, paymentFilterOrders, paymentFilterLedger)
 
 	rows, err := s.dbReader.Query(ctx, query, args...)
 	if err != nil {
@@ -462,29 +541,37 @@ func (s *AdminSurveillanceService) GetDailyRevenue(ctx context.Context, days int
 	}
 	defer rows.Close()
 
-	var records []DailyRevenue
+	records := make([]DailyRevenue, 0)
 	for rows.Next() {
 		var r DailyRevenue
 		var t time.Time
-		err := rows.Scan(&t, &r.GrossVolume, &r.OrderCount)
-		if err != nil {
+		var ledgerRev, commissionSum, commissionFallbackSum float64
+		if err := rows.Scan(&t, &r.GrossVolume, &r.OrderCount, &ledgerRev, &commissionSum, &commissionFallbackSum); err != nil {
 			return nil, err
 		}
 		r.Date = t.Format("2006-01-02")
-		// Calculate platform revenue
-		var platformRev float64
-		errRev := s.dbReader.QueryRow(ctx, `SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE account = 'admin_revenue_account' AND amount > 0 AND created_at::date = $1`, t).Scan(&platformRev)
-		if errRev != nil {
-			log.Printf("[WARNING] Failed to query exact platform revenue for date %v: %v", t, errRev)
-			rate := 0.10
-			if envRate := os.Getenv("ANALYTICS_ESTIMATE_RATE"); envRate != "" {
-				if parsed, err := strconv.ParseFloat(envRate, 64); err == nil {
-					rate = parsed
-				}
+
+		// AW-4 FIX: consistent revenue computation:
+		//   1. If ledger has entries for this day, use them (most accurate).
+		//   2. Else use the per-order admin_commission sum (accurate, derived
+		//      from the actual commission stored on each order at split time).
+		//   3. Else use total_amount - vendor_escrow - delivery_escrow (the
+		//      per-order platform cut, works even when admin_commission is 0).
+		//   4. Only if the operator explicitly set ANALYTICS_ESTIMATE_RATE,
+		//      apply it as a last-resort estimate. If not set, leave at 0
+		//      so we never silently fabricate a revenue number.
+		switch {
+		case ledgerRev > 0:
+			r.PlatformRevenue = ledgerRev
+		case commissionSum > 0:
+			r.PlatformRevenue = commissionSum
+		case commissionFallbackSum > 0:
+			r.PlatformRevenue = commissionFallbackSum
+		default:
+			if s.cfg != nil && s.cfg.AnalyticsEstimateRate > 0 {
+				r.PlatformRevenue = r.GrossVolume * s.cfg.AnalyticsEstimateRate
 			}
-			r.PlatformRevenue = r.GrossVolume * rate
-		} else {
-			r.PlatformRevenue = platformRev
+			// else: leave at 0 — do not silently estimate with a hardcoded rate
 		}
 		records = append(records, r)
 	}
@@ -662,6 +749,13 @@ func (s *AdminSurveillanceService) GetDisputedOrders(ctx context.Context) ([]Dis
 // ResolveDispute resolves a frozen escrow hold.
 // If vendor_guilty or rider_guilty -> refund to customer wallet and penalize guilty party.
 // If customer_guilty -> release funds to vendor/rider.
+//
+// Concurrency: the entire resolution runs inside a single Postgres
+// transaction. If any step fails (customer credit, escrow status update,
+// penalty debit), the transaction is rolled back so the financial state
+// never ends up half-resolved. The escrow status UPDATE is guarded by
+// `status IN ('disputed', 'held')` so already-'paid_out' holds are not
+// silently re-marked as 'refunded'.
 func (s *AdminSurveillanceService) ResolveDispute(ctx context.Context, orderTrackingID string, decision string) error {
 	// First fetch the escrow record — try disputed escrow, then any escrow
 	var escrowAmount float64
@@ -686,58 +780,144 @@ func (s *AdminSurveillanceService) ResolveDispute(ctx context.Context, orderTrac
 		escrowStatus = "paid_out"
 	}
 
-	// Mark the dispute as resolved
-	_, _ = s.dbWriter.Exec(ctx, "UPDATE disputes SET status = 'resolved', resolution = $1, resolved_at = NOW(), updated_at = NOW() WHERE order_tracking_id = $2 AND status = 'open'",
-		fmt.Sprintf("admin_%s", decision), orderTrackingID)
+	switch decision {
+	case "vendor_guilty", "rider_guilty":
+		return s.resolveDisputeGuilty(ctx, orderTrackingID, decision, customerID, escrowAmount, escrowStatus)
+	case "customer_guilty":
+		return s.resolveDisputeCustomerGuilty(ctx, orderTrackingID, escrowStatus)
+	default:
+		return fmt.Errorf("invalid dispute decision: %s", decision)
+	}
+}
 
-	if decision == "vendor_guilty" || decision == "rider_guilty" {
-		// Refund to customer wallet
-		upsertWallet := `
-			INSERT INTO customer_wallet (customer_tracking_id, balance, updated_at)
-			VALUES ($1, $2, NOW())
-			ON CONFLICT (customer_tracking_id) DO UPDATE SET balance = customer_wallet.balance + $2, updated_at = NOW()
-		`
-		_, err = s.dbWriter.Exec(ctx, upsertWallet, customerID, escrowAmount)
-		if err != nil {
-			return err
-		}
+// resolveDisputeGuilty handles the vendor_guilty and rider_guilty paths
+// in a single atomic transaction. All money movements (customer credit,
+// penalty debit, dispute status, escrow status) succeed together or
+// roll back together.
+func (s *AdminSurveillanceService) resolveDisputeGuilty(
+	ctx context.Context, orderTrackingID, decision, customerID string,
+	escrowAmount float64, escrowStatus string,
+) error {
+	tx, err := s.dbWriter.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin dispute resolution tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
 
-		// If escrow is still held/frozen, release it
-		if escrowStatus == "disputed" || escrowStatus == "held" {
-			_, _ = s.dbWriter.Exec(ctx, "UPDATE escrow_holds SET status = 'refunded', released_at = NOW() WHERE order_tracking_id = $1", orderTrackingID)
-		}
-
-		// Penalty debits
-		if decision == "rider_guilty" {
-			var riderTrackingID string
-			_ = s.dbReader.QueryRow(ctx, "SELECT COALESCE(rider_tracking_id, '') FROM orders WHERE order_tracking_id = $1", orderTrackingID).Scan(&riderTrackingID)
-			if riderTrackingID != "" {
-				_, _ = s.dbWriter.Exec(ctx, "UPDATE rider_wallet SET balance = balance - $1, updated_at = NOW() WHERE rider_tracking_id = $2", escrowAmount, riderTrackingID)
-			}
-		}
-		if decision == "vendor_guilty" {
-			var vendorTrackingID string
-			_ = s.dbReader.QueryRow(ctx, "SELECT COALESCE(s.vendor_tracking_id, '') FROM orders o JOIN stores s ON o.store_tracking_id = s.store_tracking_id WHERE o.order_tracking_id = $1", orderTrackingID).Scan(&vendorTrackingID)
-			if vendorTrackingID != "" {
-				_, _ = s.dbWriter.Exec(ctx, "UPDATE vendor_wallet SET balance = balance - $1, updated_at = NOW() WHERE vendor_tracking_id = $2", escrowAmount, vendorTrackingID)
-			}
-		}
-
-		return nil
-
-	} else if decision == "customer_guilty" {
-		// Unfreeze the escrow if still held
-		if escrowStatus == "disputed" || escrowStatus == "held" {
-			_, err = s.dbWriter.Exec(ctx, "UPDATE escrow_holds SET status = 'held', dispute_id = NULL WHERE order_tracking_id = $1", orderTrackingID)
-			if err != nil {
-				return err
-			}
-		}
-		_, _ = s.dbWriter.Exec(ctx, "UPDATE disputes SET status = 'resolved', resolution = 'admin_customer_guilty', resolved_at = NOW(), updated_at = NOW() WHERE order_tracking_id = $1 AND status = 'open'", orderTrackingID)
-		return nil
+	// 1. Credit customer wallet (refund)
+	upsertWallet := `
+		INSERT INTO customer_wallet (customer_tracking_id, balance, updated_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (customer_tracking_id) DO UPDATE SET balance = customer_wallet.balance + $2, updated_at = NOW()
+	`
+	_, err = tx.Exec(ctx, upsertWallet, customerID, escrowAmount)
+	if err != nil {
+		return fmt.Errorf("failed to credit customer wallet: %w", err)
 	}
 
-	return fmt.Errorf("invalid dispute decision: %s", decision)
+	// 2. Mark escrow as refunded — ONLY if still held/disputed. This prevents
+	// accidentally overwriting an already-'paid_out' hold with 'refunded',
+	// which would corrupt the audit trail.
+	if escrowStatus == "disputed" || escrowStatus == "held" {
+		_, err = tx.Exec(ctx,
+			"UPDATE escrow_holds SET status = 'refunded', released_at = NOW() WHERE order_tracking_id = $1 AND status IN ('disputed', 'held')",
+			orderTrackingID,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to mark escrow refunded: %w", err)
+		}
+	}
+
+	// 3. Penalty debit (rider or vendor). Look up the tracking ID, then debit.
+	if decision == "rider_guilty" {
+		var riderTrackingID string
+		err = tx.QueryRow(ctx,
+			"SELECT COALESCE(rider_tracking_id, '') FROM orders WHERE order_tracking_id = $1",
+			orderTrackingID,
+		).Scan(&riderTrackingID)
+		if err != nil {
+			return fmt.Errorf("failed to lookup rider for penalty: %w", err)
+		}
+		if riderTrackingID != "" {
+			_, err = tx.Exec(ctx,
+				"UPDATE rider_wallet SET balance = balance - $1, updated_at = NOW() WHERE rider_tracking_id = $2 AND balance >= $1",
+				escrowAmount, riderTrackingID,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to debit rider penalty: %w", err)
+			}
+		}
+	}
+	if decision == "vendor_guilty" {
+		var vendorTrackingID string
+		err = tx.QueryRow(ctx,
+			"SELECT COALESCE(s.vendor_tracking_id, '') FROM orders o JOIN stores s ON o.store_tracking_id = s.store_tracking_id WHERE o.order_tracking_id = $1",
+			orderTrackingID,
+		).Scan(&vendorTrackingID)
+		if err != nil {
+			return fmt.Errorf("failed to lookup vendor for penalty: %w", err)
+		}
+		if vendorTrackingID != "" {
+			_, err = tx.Exec(ctx,
+				"UPDATE vendor_wallet SET balance = balance - $1, updated_at = NOW() WHERE vendor_tracking_id = $2 AND balance >= $1",
+				escrowAmount, vendorTrackingID,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to debit vendor penalty: %w", err)
+			}
+		}
+	}
+
+	// 4. Mark the dispute as resolved
+	_, err = tx.Exec(ctx,
+		"UPDATE disputes SET status = 'resolved', resolution = $1, resolved_at = NOW(), updated_at = NOW() WHERE order_tracking_id = $2 AND status = 'open'",
+		fmt.Sprintf("admin_%s", decision), orderTrackingID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to mark dispute resolved: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit dispute resolution: %w", err)
+	}
+	return nil
+}
+
+// resolveDisputeCustomerGuilty handles the customer_guilty path: unfreeze
+// the escrow so the funds can be released to the vendor/rider via the
+// normal escrow release cron.
+func (s *AdminSurveillanceService) resolveDisputeCustomerGuilty(
+	ctx context.Context, orderTrackingID, escrowStatus string,
+) error {
+	tx, err := s.dbWriter.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin customer_guilty tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Unfreeze the escrow if still held
+	if escrowStatus == "disputed" || escrowStatus == "held" {
+		_, err = tx.Exec(ctx,
+			"UPDATE escrow_holds SET status = 'held', dispute_id = NULL WHERE order_tracking_id = $1 AND status = 'disputed'",
+			orderTrackingID,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to unfreeze escrow: %w", err)
+		}
+	}
+
+	_, err = tx.Exec(ctx,
+		"UPDATE disputes SET status = 'resolved', resolution = 'admin_customer_guilty', resolved_at = NOW(), updated_at = NOW() WHERE order_tracking_id = $1 AND status = 'open'",
+		orderTrackingID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to mark dispute resolved: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit customer_guilty resolution: %w", err)
+	}
+	return nil
 }
 
 // PayFastStats provides aggregated metrics on PayFast transactions

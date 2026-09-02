@@ -208,3 +208,64 @@ func (r *VendorRepository) GetVendorProductStats(ctx context.Context, vendorTrac
 	}
 	return total, active, nil
 }
+
+// UpdateStore updates the vendor's store fields (partial update — only non-nil fields are written).
+func (r *VendorRepository) UpdateStore(ctx context.Context, vendorTrackingID string, req *models.UpdateStoreRequest) (*models.VendorStore, error) {
+	// Fetch current store first
+	store, err := r.GetStoreByVendorID(ctx, vendorTrackingID)
+	if err != nil {
+		return nil, fmt.Errorf("store not found for vendor %s", vendorTrackingID)
+	}
+
+	if req.StoreName != nil {
+		store.StoreName = *req.StoreName
+	}
+	if req.StoreDescription != nil {
+		// store_description is a DB column but not in the Go model; store it via raw SQL
+	}
+	if req.LogoURL != nil {
+		store.LogoURL = *req.LogoURL
+	}
+	if req.BannerURL != nil {
+		store.BannerURL = *req.BannerURL
+	}
+	if req.Latitude != nil {
+		store.Latitude = *req.Latitude
+	}
+	if req.Longitude != nil {
+		store.Longitude = *req.Longitude
+	}
+
+	query := `
+		UPDATE stores
+		SET store_name = $2,
+			logo_url = $3,
+			banner_url = $4,
+			latitude = $5,
+			longitude = $6,
+			updated_at = NOW()
+		WHERE store_tracking_id = $1
+		RETURNING id, store_tracking_id, store_name, COALESCE(logo_url, ''), COALESCE(banner_url, ''),
+			COALESCE(latitude, 0.0), COALESCE(longitude, 0.0), COALESCE(commission_rate, 2.0),
+			COALESCE(is_active, true), created_at, updated_at
+	`
+	err = r.writer.QueryRow(ctx, query,
+		store.StoreTrackingID,
+		store.StoreName,
+		store.LogoURL,
+		store.BannerURL,
+		store.Latitude,
+		store.Longitude,
+	).Scan(&store.ID, &store.StoreTrackingID, &store.StoreName, &store.LogoURL, &store.BannerURL,
+		&store.Latitude, &store.Longitude, &store.CommissionRate, &store.IsActive, &store.CreatedAt, &store.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("store update failed: %w", err)
+	}
+
+	// Also update store_description if provided
+	if req.StoreDescription != nil {
+		_, _ = r.writer.Exec(ctx, `UPDATE stores SET store_description = $2, updated_at = NOW() WHERE store_tracking_id = $1`, store.StoreTrackingID, *req.StoreDescription)
+	}
+
+	return store, nil
+}

@@ -146,14 +146,25 @@ func (h *VendorHandler) RequestWithdraw(c *gin.Context) {
 		return
 	}
 
-	_, err = tx.Exec(ctx,
+	// VW-2 FIX: AND balance >= $1 prevents negative balance if a refactor
+	// removes the FOR UPDATE lock or changes the transaction boundaries.
+	tag, err := tx.Exec(ctx,
 		`UPDATE vendor_wallet
 		 SET balance = balance - $1, total_payouts = total_payouts + $1
-		 WHERE vendor_tracking_id = $2`,
+		 WHERE vendor_tracking_id = $2 AND balance >= $1`,
 		req.Amount, req.VendorTrackingID,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update wallet balance: %v", err)})
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		// The SELECT FOR UPDATE saw sufficient balance but the WHERE guard
+		// didn't match — this can only happen if the row was concurrently
+		// debited by another transaction that committed between the SELECT
+		// and UPDATE (impossible under FOR UPDATE) OR if the wallet row
+		// was deleted. Surface it as 409 to alert the client to retry.
+		c.JSON(http.StatusConflict, gin.H{"error": "wallet balance changed concurrently — please retry"})
 		return
 	}
 

@@ -31,8 +31,15 @@ import (
 func parsePagination(c *gin.Context) (limit, offset int) {
 	limit, _ = strconv.Atoi(c.Query("limit"))
 	offset, _ = strconv.Atoi(c.Query("offset"))
-	if limit <= 0 || limit > 100 {
-		limit = 20
+	if adminCfg == nil {
+		// Defensive: if parsePagination is called before main() initializes
+		// adminCfg, fall back to the historic defaults so the page still
+		// renders rather than panicking.
+		if limit <= 0 || limit > 100 {
+			limit = 20
+		}
+	} else if limit <= 0 || limit > adminCfg.MaxPageSize {
+		limit = adminCfg.DefaultPageSize
 	}
 	if offset < 0 {
 		offset = 0
@@ -40,8 +47,21 @@ func parsePagination(c *gin.Context) (limit, offset int) {
 	return limit, offset
 }
 
+// adminCfg is the package-level admin configuration loaded once at startup.
+// It is read by parsePagination and several endpoint handlers that need
+// default page sizes, time windows, and threshold values.
+var adminCfg *config.AdminConfig
+
 func main() {
 	ctx := context.Background()
+
+	// Load admin config first — every endpoint depends on it for sane
+	// defaults. Fail fast if the env is misconfigured.
+	var err error
+	adminCfg, err = config.LoadAdminConfig()
+	if err != nil {
+		log.Fatalf("FATAL: failed to load admin config: %v", err)
+	}
 
 	// Initialize PostgreSQL
 	pgURL := os.Getenv("DATABASE_URL")
@@ -99,7 +119,7 @@ func main() {
 	// Single read-write pool today: the same pool is wired as both writer and
 	// reader. When a master-replica split lands, pass the replica pool as the
 	// second argument — all reads go through dbReader, writes through dbWriter.
-	adminService := admin.NewAdminSurveillanceService(dbPool, dbPool, driver, "neo4j", ledgerSvc)
+	adminService := admin.NewAdminSurveillanceService(dbPool, dbPool, driver, "neo4j", ledgerSvc, adminCfg)
 	verificationService := admin.NewVerificationService(dbPool)
 
 	// Initialize Kafka client for emitting payment.keys.updated events so
@@ -240,8 +260,8 @@ func main() {
 
 		adminRoutes.GET("/finance/payments", func(c *gin.Context) {
 			limit, _ := strconv.Atoi(c.Query("limit"))
-			if limit <= 0 || limit > 100 {
-				limit = 50 // default to recent 50
+			if limit <= 0 || limit > adminCfg.MaxPageSize {
+				limit = adminCfg.RecentPaymentsLimit
 			}
 			payments, err := adminService.GetRecentPayments(c.Request.Context(), limit)
 			if err != nil {
@@ -700,9 +720,9 @@ func main() {
 		// ── Rider GPS Trail (ride safety audit) ─────────────────
 		adminRoutes.GET("/riders/:rider_id/gps-trail", func(c *gin.Context) {
 			riderID := c.Param("rider_id")
-			hoursAgo, _ := strconv.Atoi(c.DefaultQuery("hours", "24"))
-			if hoursAgo <= 0 || hoursAgo > 168 {
-				hoursAgo = 24
+			hoursAgo, _ := strconv.Atoi(c.DefaultQuery("hours", strconv.Itoa(adminCfg.DefaultGPSTrailHours)))
+			if hoursAgo <= 0 || hoursAgo > adminCfg.MaxGPSTrailHours {
+				hoursAgo = adminCfg.DefaultGPSTrailHours
 			}
 
 			rows, err := dbPool.Query(c.Request.Context(), `
@@ -736,19 +756,61 @@ func main() {
 		})
 
 		// ── Wallet Overview (all wallets summary) ─────────────────
+		// AW-2 FIX: separate liabilities and assets, fetch all rider
+		// columns, and surface DB errors instead of swallowing them.
 		adminRoutes.GET("/wallet/overview", func(c *gin.Context) {
 			ctx := c.Request.Context()
-			var customerTotal, vendorTotal, riderTotal float64
-			_ = dbPool.QueryRow(ctx, `SELECT COALESCE(SUM(balance),0) FROM customer_wallet`).Scan(&customerTotal)
-			_ = dbPool.QueryRow(ctx, `SELECT COALESCE(SUM(balance),0) FROM vendor_wallet`).Scan(&vendorTotal)
-			_ = dbPool.QueryRow(ctx, `SELECT COALESCE(SUM(cash_in_hand),0) FROM rider_wallet`).Scan(&riderTotal)
+			var customerBalance, vendorBalance, riderBalance, riderCashInHand float64
+
+			// Customer wallet = liability (refunds owed to customers)
+			if err := dbPool.QueryRow(ctx,
+				`SELECT COALESCE(SUM(balance), 0) FROM customer_wallet`,
+			).Scan(&customerBalance); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "customer_wallet query failed: " + err.Error()})
+				return
+			}
+			// Vendor wallet = liability (pending payouts to vendors)
+			if err := dbPool.QueryRow(ctx,
+				`SELECT COALESCE(SUM(balance), 0) FROM vendor_wallet`,
+			).Scan(&vendorBalance); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "vendor_wallet query failed: " + err.Error()})
+				return
+			}
+			// Rider digital balance = liability (rider earnings, not yet withdrawn)
+			if err := dbPool.QueryRow(ctx,
+				`SELECT COALESCE(SUM(balance), 0) FROM rider_wallet`,
+			).Scan(&riderBalance); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "rider_wallet.balance query failed: " + err.Error()})
+				return
+			}
+			// Rider cash-in-hand = asset (riders have collected platform's cash, not yet deposited)
+			if err := dbPool.QueryRow(ctx,
+				`SELECT COALESCE(SUM(cash_in_hand), 0) FROM rider_wallet`,
+			).Scan(&riderCashInHand); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "rider_wallet.cash_in_hand query failed: " + err.Error()})
+				return
+			}
+
+			totalLiabilities := customerBalance + vendorBalance + riderBalance
+
 			c.JSON(http.StatusOK, gin.H{
 				"wallet": gin.H{
-					"customer_total": customerTotal,
-					"vendor_total":   vendorTotal,
-					"rider_total":    riderTotal,
-					"grand_total":    customerTotal + vendorTotal + riderTotal,
+					"liabilities": gin.H{
+						"customer_refunds_owed": customerBalance,
+						"vendor_payouts_owed":    vendorBalance,
+						"rider_payouts_owed":     riderBalance,
+						"total_liabilities":      totalLiabilities,
+					},
+					"assets": gin.H{
+						"rider_cash_in_hand": riderCashInHand,
+						"total_assets":       riderCashInHand,
+					},
+					// Net platform exposure: positive means platform owes
+					// more than it has collected; negative means cash in
+					// transit is greater than owed.
+					"net_exposure": totalLiabilities - riderCashInHand,
 				},
+				"as_of": time.Now().UTC().Format(time.RFC3339),
 			})
 		})
 
@@ -787,9 +849,9 @@ func main() {
 		// ── Analytics Overview ─────────────────────────────────
 		adminRoutes.GET("/analytics/overview", func(c *gin.Context) {
 			ctx := c.Request.Context()
-			days, _ := strconv.Atoi(c.DefaultQuery("days", "7"))
-			if days <= 0 || days > 365 {
-				days = 7
+			days, _ := strconv.Atoi(c.DefaultQuery("days", strconv.Itoa(adminCfg.DefaultAnalyticsDays)))
+			if days <= 0 || days > adminCfg.MaxAnalyticsDays {
+				days = adminCfg.DefaultAnalyticsDays
 			}
 			var totalOrders, totalRevenue, totalUsers, activeRiders int
 			_ = dbPool.QueryRow(ctx, `SELECT COUNT(*) FROM orders WHERE created_at > NOW() - INTERVAL '1 day' * $1`, days).Scan(&totalOrders)
@@ -808,9 +870,9 @@ func main() {
 		// ── Delivery Heatmap (delivery dropoff points) ─────────
 		adminRoutes.GET("/analytics/heatmap/deliveries", func(c *gin.Context) {
 			ctx := c.Request.Context()
-			days, _ := strconv.Atoi(c.DefaultQuery("days", "7"))
-			if days <= 0 || days > 365 {
-				days = 7
+			days, _ := strconv.Atoi(c.DefaultQuery("days", strconv.Itoa(adminCfg.DefaultAnalyticsDays)))
+			if days <= 0 || days > adminCfg.MaxAnalyticsDays {
+				days = adminCfg.DefaultAnalyticsDays
 			}
 			rows, err := dbPool.Query(ctx, `
 				SELECT ROUND(o.customer_lat::numeric, 4) as lat, ROUND(o.customer_lng::numeric, 4) as lng, COUNT(*) as count
@@ -842,9 +904,9 @@ func main() {
 		// ── Vendor Heatmap (orders per vendor area) ────────────
 		adminRoutes.GET("/analytics/heatmap/vendors", func(c *gin.Context) {
 			ctx := c.Request.Context()
-			days, _ := strconv.Atoi(c.DefaultQuery("days", "7"))
-			if days <= 0 || days > 365 {
-				days = 7
+			days, _ := strconv.Atoi(c.DefaultQuery("days", strconv.Itoa(adminCfg.DefaultAnalyticsDays)))
+			if days <= 0 || days > adminCfg.MaxAnalyticsDays {
+				days = adminCfg.DefaultAnalyticsDays
 			}
 			rows, err := dbPool.Query(ctx, `
 				SELECT o.vendor_tracking_id, COALESCE(s.store_name, 'Unknown') as store_name,

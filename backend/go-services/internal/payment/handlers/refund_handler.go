@@ -226,7 +226,14 @@ func (h *RefundHandler) ProcessCancellation(c *gin.Context) {
 
 	case "stripe", "payfast", "jazzcash", "easypaisa", "wallet":
 		// If paid, issue refund. If still pending, record a reversal instead.
-		paymentTxn, _ := h.txnRepo.GetByOrderID(c.Request.Context(), req.OrderID, paymentRepo.KindPayment)
+		// A transient DB error here must NOT be swallowed: if we treat
+		// "lookup failed" as "no payment", we skip the gateway refund and
+		// the customer stays charged while the order shows as cancelled.
+		paymentTxn, err := h.txnRepo.GetByOrderID(c.Request.Context(), req.OrderID, paymentRepo.KindPayment)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to lookup payment transaction: " + err.Error()})
+			return
+		}
 		if paymentTxn != nil && paymentTxn.Status == paymentRepo.TxnCaptured {
 			// Delegate directly to executeRefund without re-binding the HTTP request body.
 			refundReq := RefundRequest{
@@ -273,7 +280,23 @@ func (h *RefundHandler) ProcessCancellation(c *gin.Context) {
 		}
 	}
 
-	_ = h.orderRepo.UpdateOrderStatus(c.Request.Context(), req.OrderID, "cancelled")
+	if err := h.orderRepo.UpdateOrderStatus(c.Request.Context(), req.OrderID, "cancelled"); err != nil {
+		// If the status update fails, surface it: the cancellation transaction
+		// and stock release already happened, so silently ignoring this would
+		// leave the order active while reporting success to the admin. The
+		// order service's UpdateOrderStatus also handles escrow cancellation
+		// for cancelled/failed/returned — use that instead of the repo method
+		// so escrow and COD-debt cleanup run together.
+		if h.orderSvc != nil {
+			if svcErr := h.orderSvc.UpdateOrderStatus(c.Request.Context(), req.OrderID, "cancelled"); svcErr != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "cancellation recorded but order status update failed: " + svcErr.Error()})
+				return
+			}
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "cancellation recorded but order status update failed: " + err.Error()})
+			return
+		}
+	}
 
 	// Notify dependent services of the cancellation.
 	if h.orderSvc != nil {

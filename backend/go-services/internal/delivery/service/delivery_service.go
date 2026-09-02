@@ -960,14 +960,14 @@ func (s *DeliveryService) CancelGig(ctx context.Context, req *models.CancelGigRe
 }
 
 // DisputeGig processes a customer complaint, compares photos, and suspends the rider if guilty
-func (s *DeliveryService) DisputeGig(ctx context.Context, req *models.DisputeOrderRequest) error {
+func (s *DeliveryService) DisputeGig(ctx context.Context, req *models.DisputeOrderRequest, callerID string) error {
 	// 1. Try to fetch gig — first by order_tracking_id, then by gig tracking_id
 	gig, err := s.repo.GetGigByOrderTrackingID(ctx, req.TrackingID)
 	if err != nil {
 		gig, err = s.repo.GetGigByTrackingID(ctx, req.TrackingID)
 		if err != nil {
 			// No gig found — create a dispute record directly for the order
-			if err := s.repo.CreateOrderDispute(ctx, req.TrackingID, req.Reason, req.PhotoURL); err != nil {
+			if err := s.repo.CreateOrderDispute(ctx, req.TrackingID, req.Reason, req.PhotoURL, callerID); err != nil {
 				return err
 			}
 			// Also mark the order's dispute_status so admin can see it
@@ -987,7 +987,7 @@ func (s *DeliveryService) DisputeGig(ctx context.Context, req *models.DisputeOrd
 	}
 
 	// 2c. Insert into disputes table for admin visibility
-	if err := s.repo.CreateOrderDispute(ctx, gig.OrderTrackingID, req.Reason, req.PhotoURL); err != nil {
+	if err := s.repo.CreateOrderDispute(ctx, gig.OrderTrackingID, req.Reason, req.PhotoURL, callerID); err != nil {
 		log.Printf("Warning: failed to insert dispute record for %s: %v", gig.OrderTrackingID, err)
 	}
 

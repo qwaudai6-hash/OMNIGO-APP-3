@@ -80,6 +80,29 @@ func (h *VendorHandler) GetMyStore(c *gin.Context) {
 	c.JSON(http.StatusOK, store)
 }
 
+// UpdateMyStore updates the authenticated vendor's store (partial update).
+func (h *VendorHandler) UpdateMyStore(c *gin.Context) {
+	trackingID := middleware.GetTrackingID(c)
+	if trackingID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req models.UpdateStoreRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	store, err := h.svc.UpdateMyStore(c.Request.Context(), trackingID, &req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, store)
+}
+
 // ListStores HTTP handler for GET /stores
 func (h *VendorHandler) ListStores(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
@@ -135,6 +158,7 @@ func (h *VendorHandler) RegisterRoutes(router *gin.Engine) {
 	vendor := router.Group("/api/v1/vendor", middleware.JWTAuth(), middleware.RoleRequired("vendor", "admin"))
 	{
 		vendor.GET("/stores/me", h.GetMyStore)
+		vendor.PATCH("/stores/me", h.UpdateMyStore)
 		vendor.GET("/dashboard", h.GetDashboard)
 	}
 

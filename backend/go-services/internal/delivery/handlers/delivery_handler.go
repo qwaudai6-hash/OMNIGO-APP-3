@@ -272,7 +272,12 @@ func (h *DeliveryHandler) DisputeGig(c *gin.Context) {
 		return
 	}
 
-	err := h.svc.DisputeGig(c.Request.Context(), &req)
+	callerID := middleware.GetTrackingID(c)
+	if callerID == "" {
+		callerID = c.GetHeader("X-User-Tracking-ID")
+	}
+
+	err := h.svc.DisputeGig(c.Request.Context(), &req, callerID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

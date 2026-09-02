@@ -34,7 +34,18 @@ func NewDeliveryRepository(writer, reader *pgxpool.Pool, redisClient redis.Unive
 	}
 }
 
-// CreateGig inserts a new delivery gig into PostgreSQL
+// CreateGig inserts a new delivery gig into PostgreSQL.
+//
+// Concurrency: the check-and-insert for duplicate prevention is wrapped in a
+// transaction that first acquires a row-level lock on the parent order
+// (SELECT ... FOR UPDATE on orders). This serializes concurrent CreateGig
+// calls for the same order — two concurrent Kafka handlers will queue at
+// the order row, and the second one will see the first one's already-active
+// gig and abort cleanly. This replaces the previous TOCTOU pattern
+// (check-then-act with no lock) that allowed up to 30 duplicate delivery
+// rows per order in production.
+//
+// The orders row is released as soon as the transaction commits or rolls back.
 func (r *DeliveryRepository) CreateGig(ctx context.Context, gig *models.DeliveryGig) error {
 	checks := []struct {
 		id    string
@@ -58,13 +69,38 @@ func (r *DeliveryRepository) CreateGig(ctx context.Context, gig *models.Delivery
 		}
 	}
 
-	// BUG-03 FIX: Check for existing active gig before inserting to prevent duplicates.
+	// Begin transaction to serialize concurrent CreateGig calls per order.
+	tx, err := r.writer.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin tx for gig creation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Lock the parent order row. Any concurrent CreateGig for the same order
+	// will block here until our transaction completes.
+	var orderExists bool
+	err = tx.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM orders WHERE order_tracking_id = $1 FOR UPDATE)`,
+		gig.OrderTrackingID,
+	).Scan(&orderExists)
+	if err != nil {
+		return fmt.Errorf("failed to lock parent order: %w", err)
+	}
+	if !orderExists {
+		return fmt.Errorf("order %s does not exist", gig.OrderTrackingID)
+	}
+
+	// Now safely check for an existing active gig — the order row lock
+	// guarantees no concurrent CreateGig can be at this point.
 	var existingCount int
-	err := r.writer.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`SELECT COUNT(*) FROM deliveries WHERE order_tracking_id = $1 AND status NOT IN ('cancelled','completed')`,
 		gig.OrderTrackingID,
 	).Scan(&existingCount)
-	if err == nil && existingCount > 0 {
+	if err != nil {
+		return fmt.Errorf("failed to check existing gigs: %w", err)
+	}
+	if existingCount > 0 {
 		return fmt.Errorf("active delivery gig already exists for order %s", gig.OrderTrackingID)
 	}
 
@@ -73,7 +109,7 @@ func (r *DeliveryRepository) CreateGig(ctx context.Context, gig *models.Delivery
 		VALUES ($1, $2, $3, $4, 'broadcasting', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 		RETURNING id, created_at, updated_at
 	`
-	err = r.writer.QueryRow(ctx, query,
+	err = tx.QueryRow(ctx, query,
 		gig.TrackingID,
 		gig.OrderTrackingID,
 		gig.VendorStoreTrackID,
@@ -93,15 +129,22 @@ func (r *DeliveryRepository) CreateGig(ctx context.Context, gig *models.Delivery
 		gig.CustomerPhone,
 	).Scan(&gig.ID, &gig.CreatedAt, &gig.UpdatedAt)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to insert delivery gig: %w", err)
 	}
 
-	// Mirror OTP code into orders table so customer app can display it to customer
+	// Mirror OTP code into orders table so customer app can display it
 	if gig.OrderTrackingID != "" && gig.OTPCode != "" {
-		_, _ = r.writer.Exec(ctx,
+		_, err = tx.Exec(ctx,
 			`UPDATE orders SET otp_code = $1, updated_at = NOW() WHERE order_tracking_id = $2`,
 			gig.OTPCode, gig.OrderTrackingID,
 		)
+		if err != nil {
+			return fmt.Errorf("failed to mirror OTP to order: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit gig creation: %w", err)
 	}
 
 	return nil
@@ -282,7 +325,12 @@ func (r *DeliveryRepository) AcceptGigWithEligibility(ctx context.Context, track
 	}
 
 	// Mirror the rider assignment onto the parent order for admin lineage.
-	_, _ = tx.Exec(ctx, `UPDATE orders SET rider_tracking_id = $1 WHERE order_tracking_id = $2`, riderID, orderTrackingID)
+	// Error must be checked: if the order update fails the transaction must
+	// roll back, otherwise the gig and the order diverge in rider assignment.
+	_, err = tx.Exec(ctx, `UPDATE orders SET rider_tracking_id = $1, updated_at = NOW() WHERE order_tracking_id = $2`, riderID, orderTrackingID)
+	if err != nil {
+		return fmt.Errorf("failed to mirror rider assignment to order: %w", err)
+	}
 
 	return tx.Commit(ctx)
 }
@@ -319,7 +367,12 @@ func (r *DeliveryRepository) AcceptGig(ctx context.Context, trackingID string, r
 	}
 
 	// Mirror the rider assignment onto the parent order for admin lineage.
-	_, _ = tx.Exec(ctx, `UPDATE orders SET rider_tracking_id = $1 WHERE order_tracking_id = $2`, riderID, orderTrackingID)
+	// Error must be checked: if the order update fails the transaction must
+	// roll back, otherwise the gig and the order diverge in rider assignment.
+	_, err = tx.Exec(ctx, `UPDATE orders SET rider_tracking_id = $1, updated_at = NOW() WHERE order_tracking_id = $2`, riderID, orderTrackingID)
+	if err != nil {
+		return fmt.Errorf("failed to mirror rider assignment to order: %w", err)
+	}
 
 	return tx.Commit(ctx)
 }
@@ -491,17 +544,18 @@ func (r *DeliveryRepository) GetGigByOrderTrackingID(ctx context.Context, orderT
 }
 
 // CreateOrderDispute creates a dispute record directly when no gig exists for the order.
-func (r *DeliveryRepository) CreateOrderDispute(ctx context.Context, orderTrackingID, reason, photoURL string) error {
-	var customerID string
-	_ = r.writer.QueryRow(ctx, `SELECT customer_tracking_id FROM orders WHERE order_tracking_id = $1`, orderTrackingID).Scan(&customerID)
-	if customerID == "" {
-		customerID = "system"
+func (r *DeliveryRepository) CreateOrderDispute(ctx context.Context, orderTrackingID, reason, photoURL, filedBy string) error {
+	if filedBy == "" {
+		_ = r.writer.QueryRow(ctx, `SELECT customer_tracking_id FROM orders WHERE order_tracking_id = $1`, orderTrackingID).Scan(&filedBy)
+	}
+	if filedBy == "" {
+		filedBy = "system"
 	}
 	query := `
 		INSERT INTO disputes (id, order_tracking_id, filed_by, reason, status, created_at, updated_at)
 		VALUES (gen_random_uuid(), $1, $2, $3, 'open', NOW(), NOW())
 	`
-	_, err := r.writer.Exec(ctx, query, orderTrackingID, customerID, reason)
+	_, err := r.writer.Exec(ctx, query, orderTrackingID, filedBy, reason)
 	return err
 }
 
@@ -723,6 +777,25 @@ func (r *DeliveryRepository) SettleCODVendorAndDebt(ctx context.Context, orderTr
 	}
 
 	if vendorAmount > 0 {
+		// VW-3 FIX: Idempotency check. The function may be retried if the
+		// outer transaction in delivery_service.go fails after the gig
+		// status update but before/after this function runs. Without this
+		// check, the vendor_wallet would be double-credited. We use the
+		// escrow_holds audit row (inserted below) as the idempotency
+		// marker: if a 'paid_out' hold already exists for this order, the
+		// settlement has already happened and we should skip.
+		var alreadySettled bool
+		err = tx.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM escrow_holds WHERE order_tracking_id = $1 AND status = 'paid_out')`,
+			orderTrackingID,
+		).Scan(&alreadySettled)
+		if err != nil {
+			return fmt.Errorf("settle idempotency check failed: %w", err)
+		}
+		if alreadySettled {
+			return nil // already settled in a previous call — no-op
+		}
+
 		// CLAIM-2: credit the vendor's withdrawable wallet.
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO vendor_wallet (vendor_tracking_id, balance, lifetime_earnings, updated_at)

@@ -235,7 +235,11 @@ func main() {
 	}
 
 	// Financial Reconciliation Endpoint (admin only)
-	reconWorker := workers.NewReconciliationWorker(db.Writer, ledgerSvc, rdb)
+	reconCfg, err := config.LoadReconciliationConfig()
+	if err != nil {
+		log.Fatalf("FATAL: failed to load reconciliation config: %v", err)
+	}
+	reconWorker := workers.NewReconciliationWorker(db.Writer, ledgerSvc, rdb, reconCfg)
 	router.POST("/api/v1/finance/reconcile", middleware.AdminRequired(), func(c *gin.Context) {
 		res, err := reconWorker.RunReconciliation(c.Request.Context())
 		if err != nil {

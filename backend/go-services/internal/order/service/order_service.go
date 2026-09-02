@@ -357,8 +357,19 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, trackingID string,
 	// create an escrow hold so the funds are locked for 48 hours before vendor payout.
 	// This covers both the modern Option C flow AND the deprecated hosted checkout path.
 	if status == "paid" && s.escrowService != nil {
-		if err := s.escrowService.CreateHold(ctx, trackingID, order.VendorTrackID, order.TotalAmount); err != nil {
-			log.Printf("[ORDER-%s] Warning: failed to create escrow hold on payment: %v", trackingID, err)
+		holdAmount := order.VendorEscrow
+		if holdAmount <= 0 {
+			// Fallback for legacy flows that didn't populate vendor_escrow
+			holdAmount = order.TotalAmount - order.AdminCommission - order.DeliveryEscrow
+			if holdAmount < 0 {
+				holdAmount = 0
+			}
+		}
+		
+		if holdAmount > 0 {
+			if err := s.escrowService.CreateHold(ctx, trackingID, order.VendorTrackID, holdAmount); err != nil {
+				log.Printf("[ORDER-%s] Warning: failed to create escrow hold on payment: %v", trackingID, err)
+			}
 		}
 	}
 

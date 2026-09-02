@@ -30,6 +30,16 @@ type CreateStoreRequest struct {
 	Longitude        float64 `json:"longitude"`
 }
 
+// UpdateStoreRequest is the payload for updating a vendor's own store.
+type UpdateStoreRequest struct {
+	StoreName        *string  `json:"store_name"`
+	StoreDescription *string  `json:"store_description"`
+	LogoURL          *string  `json:"logo_url"`
+	BannerURL        *string  `json:"banner_url"`
+	Latitude         *float64 `json:"latitude"`
+	Longitude        *float64 `json:"longitude"`
+}
+
 type DailyTrend struct {
 	Date    string  `json:"date"`
 	Revenue float64 `json:"revenue"`
