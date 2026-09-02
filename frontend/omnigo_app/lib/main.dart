@@ -26,6 +26,10 @@ import 'features/rider/presentation/screens/rider_wallet_screen.dart';
 import 'features/admin/presentation/screens/admin_surveillance_screen.dart';
 import 'features/admin/presentation/screens/admin_finance_screen.dart';
 import 'features/admin/presentation/screens/admin_ai_control_center_screen.dart';
+import 'features/admin/presentation/screens/admin_orders_screen.dart';
+import 'features/admin/presentation/screens/admin_disputes_screen.dart';
+import 'features/admin/presentation/screens/admin_wallet_overview_screen.dart';
+import 'features/admin/presentation/screens/admin_analytics_screen.dart';
 
 import 'package:sentry_flutter/sentry_flutter.dart';
 
@@ -210,7 +214,7 @@ class _OmnigoAppState extends State<OmnigoApp> with WidgetsBindingObserver {
         }
 
         // Admin Route Guard
-        if (name == '/admin-surveillance' || name == '/admin-finance' || name == '/admin-ai-control') {
+        if (name == '/admin-surveillance' || name == '/admin-finance' || name == '/admin-ai-control' || name == '/admin-orders' || name == '/admin-disputes' || name == '/admin-wallet-overview' || name == '/admin-analytics') {
           if (!isLoggedIn) {
             return MaterialPageRoute(
               builder: (context) => const DynamicSignupScreen(startInLoginMode: true),
@@ -291,6 +295,26 @@ class _OmnigoAppState extends State<OmnigoApp> with WidgetsBindingObserver {
         if (settings.name == '/admin-ai-control') {
           return MaterialPageRoute(
             builder: (context) => const AdminAiControlCenterScreen(),
+          );
+        }
+        if (settings.name == '/admin-orders') {
+          return MaterialPageRoute(
+            builder: (context) => const AdminOrdersScreen(),
+          );
+        }
+        if (settings.name == '/admin-disputes') {
+          return MaterialPageRoute(
+            builder: (context) => const AdminDisputesScreen(),
+          );
+        }
+        if (settings.name == '/admin-wallet-overview') {
+          return MaterialPageRoute(
+            builder: (context) => const AdminWalletOverviewScreen(),
+          );
+        }
+        if (settings.name == '/admin-analytics') {
+          return MaterialPageRoute(
+            builder: (context) => const AdminAnalyticsScreen(),
           );
         }
         // #57: Return a proper 404 page instead of null

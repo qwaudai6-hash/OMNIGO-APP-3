@@ -381,6 +381,43 @@ class ApiEndpoints {
   static String adminAiAuditOverview() => '$adminBase/admin/ai/audit-overview';
   static String adminAiAutoHeal() => '$adminBase/admin/ai/auto-heal';
 
+  // ── Admin: Disputes ─────────────────────────────────────────────
+  static String adminDisputes() => '$adminBase/admin/disputes';
+
+  // ── Admin: Wallet Overview ──────────────────────────────────────
+  static String adminWalletOverview() => '$adminBase/admin/wallet/overview';
+
+  // ── Admin: Rider COD Collection ─────────────────────────────────
+  static String adminRiderCodCollection() => '$adminBase/admin/rider/cod-collection';
+
+  // ── Admin: Rider GPS Trail ──────────────────────────────────────
+  static String adminRiderGpsTrail(String riderId, {int hours = 24}) =>
+      '$adminBase/admin/riders/$riderId/gps-trail?hours=$hours';
+
+  // ── Admin: Analytics ────────────────────────────────────────────
+  static String adminAnalyticsOverview({int days = 7}) =>
+      '$adminBase/admin/analytics/overview?days=$days';
+  static String adminAnalyticsDeliveryHeatmap({int days = 7}) =>
+      '$adminBase/admin/analytics/heatmap/deliveries?days=$days';
+  static String adminAnalyticsVendorHeatmap({int days = 7}) =>
+      '$adminBase/admin/analytics/heatmap/vendors?days=$days';
+
+  // ── Admin: Vendor Payouts ───────────────────────────────────────
+  static String adminVendorPayouts({String status = 'all', int limit = 50, int offset = 0}) =>
+      '$adminBase/admin/finance/vendor-payouts?status=$status&limit=$limit&offset=$offset';
+  static String adminVendorPayoutApprove(String id) =>
+      '$adminBase/admin/finance/vendor-payouts/$id/approve';
+  static String adminVendorPayoutReject(String id) =>
+      '$adminBase/admin/finance/vendor-payouts/$id/reject';
+
+  // ── Payment Disputes (via payment-orchestrator) ─────────────────
+  static String paymentDisputeList({String? status}) {
+    final params = <String>[];
+    if (status != null && status.isNotEmpty) params.add('status=$status');
+    final qs = params.isEmpty ? '' : '?${params.join('&')}';
+    return '$paymentBase/payments/disputes$qs';
+  }
+
   // Geocoding — uses the dedicated geoBase (unified with vendor/admin)
   static String geocodingSearch(String q) =>
       '$geoBase/geocoding/search?q=${Uri.encodeComponent(q)}';

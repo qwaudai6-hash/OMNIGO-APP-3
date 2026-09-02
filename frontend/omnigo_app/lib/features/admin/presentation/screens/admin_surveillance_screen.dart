@@ -191,6 +191,64 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
     }
   }
 
+  void _showDocumentViewer(String url, String title) {
+    final fullUrl = url.startsWith('http') ? url : 'https://omnigo-app-3-production.up.railway.app$url';
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: MediaQuery.of(context).size.width * 0.9,
+            maxHeight: MediaQuery.of(context).size.height * 0.8,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AppBar(
+                title: Text(title, style: const TextStyle(color: Colors.white)),
+                backgroundColor: Colors.black87,
+                leading: IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white),
+                  onPressed: () => Navigator.pop(ctx),
+                ),
+              ),
+              Expanded(
+                child: InteractiveViewer(
+                  minScale: 0.5,
+                  maxScale: 4.0,
+                  child: Image.network(
+                    fullUrl,
+                    fit: BoxFit.contain,
+                    loadingBuilder: (context, child, loadingProgress) {
+                      if (loadingProgress == null) return child;
+                      return Center(
+                        child: CircularProgressIndicator(
+                          value: loadingProgress.expectedTotalBytes != null
+                              ? loadingProgress.cumulativeBytesLoaded / loadingProgress.expectedTotalBytes!
+                              : null,
+                        ),
+                      );
+                    },
+                    errorBuilder: (context, error, stackTrace) => Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.broken_image, size: 48, color: Colors.grey),
+                          const SizedBox(height: 8),
+                          Text('Failed to load image', style: TextStyle(color: Colors.grey.shade600)),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _fetchAllUsers() async {
     if (_isLoadingUsers) return;
     setState(() => _isLoadingUsers = true);
@@ -225,15 +283,17 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
           backgroundColor: Colors.black87,
           elevation: 0,
           actions: [
-            TextButton.icon(
-              onPressed: () => Navigator.pushNamed(context, '/admin-ai-control'),
-              icon: const Icon(Icons.auto_fix_high, color: Colors.cyanAccent),
-              label: const Text('AI Self-Healing', style: TextStyle(color: Colors.cyanAccent, fontWeight: FontWeight.bold)),
-            ),
-            TextButton.icon(
-              onPressed: () => Navigator.pushNamed(context, '/admin-finance'),
-              icon: const Icon(Icons.account_balance, color: AppTheme.limeAccent),
-              label: const Text('Finance', style: TextStyle(color: AppTheme.limeAccent, fontWeight: FontWeight.bold)),
+            PopupMenuButton<String>(
+              icon: const Icon(Icons.dashboard, color: AppTheme.limeAccent),
+              onSelected: (v) => Navigator.pushNamed(context, v),
+              itemBuilder: (ctx) => [
+                const PopupMenuItem(value: '/admin-orders', child: Text('Orders Management')),
+                const PopupMenuItem(value: '/admin-disputes', child: Text('Dispute Resolution')),
+                const PopupMenuItem(value: '/admin-wallet-overview', child: Text('Wallet Overview')),
+                const PopupMenuItem(value: '/admin-analytics', child: Text('Analytics Dashboard')),
+                const PopupMenuItem(value: '/admin-finance', child: Text('Finance')),
+                const PopupMenuItem(value: '/admin-ai-control', child: Text('AI Self-Healing')),
+              ],
             ),
           ],
           bottom: TabBar(
@@ -665,13 +725,13 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
                                 ActionChip(
                                   avatar: const Icon(Icons.image, size: 16),
                                   label: const Text('CNIC'),
-                                  onPressed: () {},
+                                  onPressed: () => _showDocumentViewer(cnicUrl, 'CNIC'),
                                 ),
                               if (licenseUrl.isNotEmpty)
                                 ActionChip(
                                   avatar: const Icon(Icons.image, size: 16),
                                   label: const Text('License'),
-                                  onPressed: () {},
+                                  onPressed: () => _showDocumentViewer(licenseUrl, 'License'),
                                 ),
                             ],
                           ),
