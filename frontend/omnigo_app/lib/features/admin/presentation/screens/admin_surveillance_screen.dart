@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import '../../../../core/di/service_locator.dart';
+import '../../../../core/network/api_client.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/theme/app_theme.dart';
 
@@ -92,6 +94,24 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
       'Authorization': 'Bearer $token',
       'Content-Type': 'application/json',
     };
+  }
+
+  Future<http.Response> _authedGet(String url) async {
+    var response = await http.get(
+      Uri.parse(url),
+      headers: await _getAuthHeaders(),
+    ).timeout(const Duration(seconds: 8));
+    if (response.statusCode == 401) {
+      final api = sl<ApiClient>();
+      final refreshed = await api.refreshToken();
+      if (refreshed) {
+        response = await http.get(
+          Uri.parse(url),
+          headers: await _getAuthHeaders(),
+        ).timeout(const Duration(seconds: 8));
+      }
+    }
+    return response;
   }
 
   Future<void> _fetchPendingVerifications() async {
