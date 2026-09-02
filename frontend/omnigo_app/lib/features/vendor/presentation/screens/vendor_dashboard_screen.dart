@@ -86,13 +86,18 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
     setState(() => _isLoadingMetrics = true);
 
     try {
-      final data = await sl<ApiClient>().get('/vendor/metrics?vendor_id=${widget.trackingId}') as Map<String, dynamic>;
-      if (mounted) {
-        setState(() {
-          _totalRevenue = (data['total_revenue'] as num?)?.toDouble() ?? 0.0;
-          _isLoadingMetrics = false;
-        });
-        _recalculateActiveGigs();
+      final data = await sl<ApiClient>().get('/vendor/metrics?vendor_id=${widget.trackingId}');
+      // #54: Verify response is Map before casting
+      if (data is Map<String, dynamic>) {
+        if (mounted) {
+          setState(() {
+            _totalRevenue = (data['total_revenue'] as num?)?.toDouble() ?? 0.0;
+            _isLoadingMetrics = false;
+          });
+          _recalculateActiveGigs();
+        }
+      } else {
+        if (mounted) setState(() => _isLoadingMetrics = false);
       }
     } catch (e) {
       if (mounted) setState(() => _isLoadingMetrics = false);
@@ -102,8 +107,12 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
 
   /// BUG-19 FIX: Count all active gig states, not just 'shipped'.
   void _recalculateActiveGigs() {
+    // #37: Check both 'status' and 'order_status' fields for API compatibility
     const activeStatuses = {'accepted', 'shipped', 'in_transit', 'picked_up'};
-    final count = _orders.where((o) => activeStatuses.contains(o['status'])).length;
+    final count = _orders.where((o) {
+      final status = o['status']?.toString() ?? o['order_status']?.toString() ?? '';
+      return activeStatuses.contains(status);
+    }).length;
     if (mounted) setState(() => _activeGigs = count);
   }
 

@@ -3,8 +3,8 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
-import '../../../../core/di/service_locator.dart';
-import '../../../../core/network/api_client.dart';
+
+
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/theme/app_theme.dart';
 
@@ -102,8 +102,7 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
       headers: await _getAuthHeaders(),
     ).timeout(const Duration(seconds: 8));
     if (response.statusCode == 401) {
-      final api = sl<ApiClient>();
-      final refreshed = await api.refreshToken();
+      final refreshed = await _refreshJwt();
       if (refreshed) {
         response = await http.get(
           Uri.parse(url),
@@ -112,6 +111,28 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
       }
     }
     return response;
+  }
+
+  Future<bool> _refreshJwt() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final refreshToken = prefs.getString('refresh_token') ?? '';
+      if (refreshToken.isEmpty) return false;
+      final res = await http.post(
+        Uri.parse('${ApiEndpoints.authBase}/auth/refresh'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'refresh_token': refreshToken}),
+      );
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as Map<String, dynamic>;
+        final newToken = (data['access_token'] ?? data['token'] ?? '') as String;
+        final newRefresh = (data['refresh_token'] ?? '') as String;
+        if (newToken.isNotEmpty) await prefs.setString('jwt_token', newToken);
+        if (newRefresh.isNotEmpty) await prefs.setString('refresh_token', newRefresh);
+        return true;
+      }
+    } catch (_) {}
+    return false;
   }
 
   Future<void> _fetchPendingVerifications() async {

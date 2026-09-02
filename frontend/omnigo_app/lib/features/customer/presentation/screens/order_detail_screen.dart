@@ -123,7 +123,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
       });
 
       if (mounted) {
-        Navigator.pop(context); // Close the dispute dialog
+        Navigator.pop(context); // Close the dispute dialog (using parent context, not dialog context)
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Dispute reported successfully. Admin will review the photos.'),
@@ -488,8 +488,8 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     final status = (_currentOrder['status'] ?? 'pending').toString().toLowerCase();
     final total = (_currentOrder['total_amount'] ?? 0.0).toString();
     final currency = _currentOrder['currency'] ?? 'PKR';
-    final storeId = (_currentOrder['store_tracking_id'] ?? 'STOR-N/A').toString();
-    final vendorId = (_currentOrder['vendor_tracking_id'] ?? 'N/A').toString();
+    final storeId = (_currentOrder['store_tracking_id'] ?? _currentOrder['vendor_tracking_id'] ?? 'STOR-N/A').toString();
+    final vendorId = (_currentOrder['vendor_tracking_id'] ?? _currentOrder['store_tracking_id'] ?? 'N/A').toString();
     final riderId = _currentOrder['rider_tracking_id']?.toString();
     final items = (_currentOrder['items'] as List<dynamic>?) ?? <dynamic>[];
     final productIds = items.map((item) => (item['product_tracking_id'] ?? '').toString()).where((s) => s.isNotEmpty).toList();

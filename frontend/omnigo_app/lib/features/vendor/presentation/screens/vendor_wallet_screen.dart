@@ -1,8 +1,7 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import '../../../../core/network/api_endpoints.dart';
+import '../../../../core/network/api_client.dart';
+import '../../../../core/di/service_locator.dart';
 import '../../../../core/theme/app_theme.dart';
 
 class VendorWalletScreen extends StatefulWidget {
@@ -29,39 +28,26 @@ class _VendorWalletScreenState extends State<VendorWalletScreen> {
   Future<void> _fetchAll() async {
     setState(() => _isLoading = true);
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-      final headers = {'Authorization': 'Bearer $token'};
+      final api = sl<ApiClient>();
 
       // Fetch wallet, escrow holds, and payouts in parallel.
-      // All vendor money endpoints live under /payments on the gateway
-      // (payment-orchestrator) — see ApiEndpoints registry constants.
       final paymentBase = ApiEndpoints.paymentBase;
       final results = await Future.wait([
-        http.get(
-          Uri.parse('$paymentBase/payments/vendor/wallet/${widget.vendorTrackingId}'),
-          headers: headers,
-        ).timeout(const Duration(seconds: 8)),
-        http.get(
-          Uri.parse('$paymentBase/payments/escrow/holds/${widget.vendorTrackingId}'),
-          headers: headers,
-        ).timeout(const Duration(seconds: 8)),
-        http.get(
-          Uri.parse('$paymentBase/payments/vendor/payouts/${widget.vendorTrackingId}'),
-          headers: headers,
-        ).timeout(const Duration(seconds: 8)),
+        api.get('$paymentBase/payments/vendor/wallet/${widget.vendorTrackingId}'),
+        api.get('$paymentBase/payments/escrow/holds/${widget.vendorTrackingId}'),
+        api.get('$paymentBase/payments/vendor/payouts/${widget.vendorTrackingId}'),
       ]);
 
       if (mounted) {
-        if (results[0].statusCode == 200) {
-          _wallet = jsonDecode(results[0].body) as Map<String, dynamic>;
+        if (results[0] is Map<String, dynamic>) {
+          _wallet = results[0] as Map<String, dynamic>;
         }
-        if (results[1].statusCode == 200) {
-          final escrowData = jsonDecode(results[1].body) as Map<String, dynamic>;
+        if (results[1] is Map<String, dynamic>) {
+          final escrowData = results[1] as Map<String, dynamic>;
           _escrowHolds = (escrowData['holds'] as List<dynamic>?) ?? [];
         }
-        if (results[2].statusCode == 200) {
-          final payoutData = jsonDecode(results[2].body) as Map<String, dynamic>;
+        if (results[2] is Map<String, dynamic>) {
+          final payoutData = results[2] as Map<String, dynamic>;
           _payouts = (payoutData['payouts'] as List<dynamic>?) ?? [];
         }
         setState(() => _isLoading = false);
@@ -79,49 +65,31 @@ class _VendorWalletScreenState extends State<VendorWalletScreen> {
   Future<void> _requestWithdraw(double amount, String method) async {
     setState(() => _isWithdrawing = true);
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-
-      final response = await http.post(
-        Uri.parse('${ApiEndpoints.paymentBase}/payments/vendor/withdraw'),
-        headers: {
-          'Authorization': 'Bearer $token',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
+      final api = sl<ApiClient>();
+      await api.post(
+        '${ApiEndpoints.paymentBase}/payments/vendor/withdraw',
+        {
           'vendor_tracking_id': widget.vendorTrackingId,
           'amount': amount,
           'method': method.toLowerCase(),
-        }),
-      ).timeout(const Duration(seconds: 8));
+        },
+      );
 
       if (mounted) {
         setState(() => _isWithdrawing = false);
-        if (response.statusCode == 200) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Withdrawal request submitted successfully!')),
-          );
-          await _fetchAll();
-        } else {
-          String errorMsg = 'Withdrawal failed';
-          try {
-            final errorBody = jsonDecode(response.body);
-            if (errorBody is Map && errorBody['error'] != null) {
-              errorMsg = errorBody['error'].toString();
-            }
-          } catch (_) {
-            errorMsg = 'Withdrawal failed (${response.statusCode})';
-          }
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(errorMsg)),
-          );
-        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Withdrawal request submitted successfully!')),
+        );
+        await _fetchAll();
       }
     } catch (e) {
       if (mounted) {
         setState(() => _isWithdrawing = false);
+        final errorMsg = e.toString().contains('error')
+            ? e.toString().replaceAll('Exception: ', '')
+            : 'Network error: $e';
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Network error: $e')),
+          SnackBar(content: Text(errorMsg)),
         );
       }
     }

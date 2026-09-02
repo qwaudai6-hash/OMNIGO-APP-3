@@ -8,6 +8,8 @@ import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/network/api_endpoints.dart';
+import '../../../../core/network/api_client.dart';
+import '../../../../core/di/service_locator.dart';
 import 'vendor_inventory_screen.dart' show ProductModel;
 
 /// VendorAddProductScreen is a dual-mode form used for both:
@@ -294,15 +296,13 @@ class VendorAddProductScreenState extends State<VendorAddProductScreen>
         if (newCategory != widget.existing!.category) body['category'] = newCategory;
         if (_isFeatured != widget.existing!.isFeatured) body['is_featured'] = _isFeatured;
 
-        final response = await http
-            .put(
-              Uri.parse(ApiEndpoints.vendorProductUpdate(widget.existing!.productTrackingId)),
-              headers: headers,
-              body: jsonEncode(body),
-            )
-            .timeout(const Duration(seconds: 10));
+        final api = sl<ApiClient>();
+        final response = await api.put(
+          ApiEndpoints.vendorProductUpdate(widget.existing!.productTrackingId),
+          body,
+        );
 
-        _handleResponse(response, 'Product updated successfully!');
+        _handleApiResponse(response, 'Product updated successfully!');
       } else {
         // ── ADD MODE: create via POST ──────────────────────────────
         final body = {
@@ -316,15 +316,13 @@ class VendorAddProductScreenState extends State<VendorAddProductScreen>
           'category': _categoryController.text.trim(),
         };
 
-        final response = await http
-            .post(
-              Uri.parse(ApiEndpoints.vendorProductCreate()),
-              headers: headers,
-              body: jsonEncode(body),
-            )
-            .timeout(const Duration(seconds: 10));
+        final api = sl<ApiClient>();
+        final response = await api.post(
+          ApiEndpoints.vendorProductCreate(),
+          body,
+        );
 
-        _handleResponse(response, 'Product added to catalog!');
+        _handleApiResponse(response, 'Product added to catalog!');
       }
     } catch (e) {
       if (mounted) {
@@ -351,6 +349,21 @@ class VendorAddProductScreenState extends State<VendorAddProductScreen>
     } else {
       _showError('Server rejected request (${response.statusCode}): ${response.body}');
     }
+  }
+
+  void _handleApiResponse(dynamic response, String successMessage) {
+    if (!mounted) return;
+    setState(() => _isSaving = false);
+    // ApiClient._processResponse throws on non-2xx, so reaching here means success
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(successMessage),
+        backgroundColor: Colors.green,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      ),
+    );
+    Navigator.pop(context, true); // pop + signal refresh
   }
 
   void _showError(String msg) {

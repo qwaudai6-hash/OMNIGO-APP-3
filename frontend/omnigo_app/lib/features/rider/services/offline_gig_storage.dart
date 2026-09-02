@@ -12,23 +12,23 @@ class OfflineGigStorage {
     }
   }
 
-  static Box<String> _getBox() {
+  static Future<Box<String>> _getBox() async {
     if (!Hive.isBoxOpen(boxName)) {
-      return Hive.openBox<String>(boxName);
+      await Hive.openBox<String>(boxName);
     }
     return Hive.box<String>(boxName);
   }
 
   // Save the currently active gig data
   static Future<void> saveActiveGig(Map<String, dynamic> gigData) async {
-    final box = _getBox();
+    final box = await _getBox();
     await box.put(gigKey, jsonEncode(gigData));
   }
 
   // Get the active gig data if it exists
   static Map<String, dynamic>? getActiveGig() {
     if (!Hive.isBoxOpen(boxName)) return null;
-    final box = _getBox();
+    final box = Hive.box<String>(boxName);
     final data = box.get(gigKey);
     if (data != null) {
       return jsonDecode(data) as Map<String, dynamic>;
@@ -48,14 +48,14 @@ class OfflineGigStorage {
   // Clear when gig is completed or cancelled
   static Future<void> clearActiveGig() async {
     if (!Hive.isBoxOpen(boxName)) return;
-    final box = _getBox();
+    final box = await _getBox();
     await box.delete(gigKey);
     await box.delete(pendingSyncKey);
   }
 
   // Save a pending status sync request to retry when online
   static Future<void> queuePendingStatusSync(Map<String, dynamic> payload) async {
-    final box = _getBox();
+    final box = await _getBox();
     List<dynamic> queue = [];
     final raw = box.get(pendingSyncKey);
     if (raw != null) {
@@ -72,7 +72,7 @@ class OfflineGigStorage {
   // Get and clear pending sync request
   static Future<Map<String, dynamic>?> consumePendingStatusSync() async {
     if (!Hive.isBoxOpen(boxName)) return null;
-    final box = _getBox();
+    final box = await _getBox();
     final data = box.get(pendingSyncKey);
     if (data != null) {
       try {

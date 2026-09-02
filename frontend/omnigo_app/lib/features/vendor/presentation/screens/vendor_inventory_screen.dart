@@ -1,12 +1,10 @@
 import 'dart:async';
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
-import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/network/api_endpoints.dart';
-import '../../../../core/services/session_registry.dart';
+import '../../../../core/network/api_client.dart';
+import '../../../../core/di/service_locator.dart';
 import '../../../shared/presentation/widgets/map_libre_map_widget.dart';
 import 'vendor_add_product_screen.dart';
 
@@ -141,25 +139,14 @@ class VendorInventoryController {
 
     // B. Asynchronous background network sync
     try {
-      // Dynamic Host Loopback detection depending on platforms:
-      // Linux Host/Desktop: http://127.0.0.1:8082
-      // Android emulator: http://10.0.2.2:8082
-      final url = Uri.parse(ApiEndpoints.productStockToggle(productId));
+      final api = sl<ApiClient>();
+      final response = await api.patch(
+        ApiEndpoints.productStockToggle(productId),
+        {'stock': targetStock},
+      );
 
-      final response = await http
-          .patch(
-            url,
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': 'Bearer $token',
-            },
-            body: jsonEncode({'stock': targetStock}),
-          )
-          .timeout(const Duration(seconds: 4));
-
-      if (response.statusCode != 200) {
-        throw Exception(
-            'Server rejected request with status code ${response.statusCode}',);
+      if (response == null || (response is Map && response['statusCode'] != null && response['statusCode'] != 200)) {
+        throw Exception('Server rejected stock toggle request');
       }
     } catch (e) {
       // C. Safe Rollback: catch block instantly restores values from original state snapshot on exception
@@ -302,17 +289,10 @@ class VendorInventoryScreenState extends State<VendorInventoryScreen> {
 
   Future<void> _initStoreLocation() async {
     try {
-      final token = SessionRegistry.instance.token ?? '';
-      final response = await http.get(
-        Uri.parse(ApiEndpoints.vendorStoreMe()),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-      ).timeout(const Duration(seconds: 8));
+      final api = sl<ApiClient>();
+      final data = await api.get(ApiEndpoints.vendorStoreMe());
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
+      if (data is Map<String, dynamic>) {
         final lat = (data['latitude'] as num?)?.toDouble();
         final lng = (data['longitude'] as num?)?.toDouble();
         final storeId = data['store_tracking_id'] as String?;
@@ -344,42 +324,31 @@ class VendorInventoryScreenState extends State<VendorInventoryScreen> {
     _controller.errorMessage.value = null;
 
     try {
-      final prefs = await SharedPreferences.getInstance();
-      _jwtToken = prefs.getString('jwt_token') ?? '';
-
-      final url = Uri.parse(ApiEndpoints.vendorProducts(
+      final api = sl<ApiClient>();
+      final url = ApiEndpoints.vendorProducts(
         limit: _limit,
         offset: _offset,
-      ),);
+      );
 
-      final response = await http.get(url, headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer $_jwtToken',
-      },);
+      final decoded = await api.get(url);
 
-      if (response.statusCode == 200) {
-        final dynamic decoded = jsonDecode(response.body);
-        final List<dynamic> listData = decoded is Map<String, dynamic>
-            ? (decoded['products'] as List<dynamic>? ?? <dynamic>[])
-            : (decoded is List<dynamic> ? decoded : <dynamic>[]);
-        final list = listData
-            .map((item) => ProductModel.fromJson(item as Map<String, dynamic>))
-            .toList();
+      final List<dynamic> listData = decoded is Map<String, dynamic>
+          ? (decoded['products'] as List<dynamic>? ?? <dynamic>[])
+          : (decoded is List<dynamic> ? decoded : <dynamic>[]);
+      final list = listData
+          .map((item) => ProductModel.fromJson(item as Map<String, dynamic>))
+          .toList();
 
-        setState(() {
-          if (refresh) {
-            _loadedProducts = list;
-          } else {
-            _loadedProducts.addAll(list);
-          }
-          _hasMore = list.length == _limit;
-          _offset += list.length;
-        });
-        _controller.populate(_loadedProducts);
-      } else {
-        _controller.errorMessage.value =
-            'Failed to fetch catalog. Status code: ${response.statusCode}';
-      }
+      setState(() {
+        if (refresh) {
+          _loadedProducts = list;
+        } else {
+          _loadedProducts.addAll(list);
+        }
+        _hasMore = list.length == _limit;
+        _offset += list.length;
+      });
+      _controller.populate(_loadedProducts);
     } catch (e) {
       _controller.errorMessage.value = 'Failed to connect: ${e.toString()}';
     } finally {
@@ -444,15 +413,10 @@ class VendorInventoryScreenState extends State<VendorInventoryScreen> {
     if (confirmed != true) return;
 
     try {
-      final response = await http.delete(
-        Uri.parse(ApiEndpoints.vendorProductDelete(product.productTrackingId)),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $_jwtToken',
-        },
-      ).timeout(const Duration(seconds: 8));
+      final api = sl<ApiClient>();
+      await api.delete(ApiEndpoints.vendorProductDelete(product.productTrackingId));
 
-      if (response.statusCode == 200 && mounted) {
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Product deleted'),
@@ -461,14 +425,6 @@ class VendorInventoryScreenState extends State<VendorInventoryScreen> {
           ),
         );
         unawaited(_fetchProducts(refresh: true));
-      } else if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Delete failed (${response.statusCode})'),
-            backgroundColor: Colors.redAccent,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
       }
     } catch (e) {
       if (mounted) {
@@ -547,7 +503,7 @@ class VendorInventoryScreenState extends State<VendorInventoryScreen> {
                       color: Colors.black.withOpacity(0.85),
                       borderRadius: BorderRadius.circular(12),
                     ),
-                    child: const Row(
+                    child: Row(
                       children: [
                         Icon(Icons.map_rounded,
                             color: Color(0xFFCAFF33), size: 14,),

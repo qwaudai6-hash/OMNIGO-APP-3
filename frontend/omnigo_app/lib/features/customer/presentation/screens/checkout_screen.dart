@@ -520,7 +520,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           Text('Delivery Fee', style: TextStyle(color: Colors.grey)),
-                          Text('PKR 0'),
+                          Text('Free Delivery', style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold)),
                         ],
                       ),
                       const Divider(),

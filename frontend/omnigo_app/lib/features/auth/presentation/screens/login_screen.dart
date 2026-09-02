@@ -72,7 +72,8 @@ class LoginScreenState extends State<LoginScreen> {
   /// branch and the direct-login branch share the same code path.
   Future<void> _completeLogin(dynamic response) async {
     final trackingId = response['tracking_id'];
-    final returnedRole = response['role'].toString();
+    // #52: Null check before toString()
+    final returnedRole = response['role']?.toString() ?? 'customer';
     final token = response['token'];
     final refreshToken = response['refresh_token']?.toString();
     final fullName = response['full_name']?.toString();

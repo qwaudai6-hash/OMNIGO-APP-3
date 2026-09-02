@@ -80,12 +80,15 @@ class ApiClient {
           return true;
         }
       }
+      // #32: If refresh fails, reset the completer so next caller can retry
       completer.complete(false);
       return false;
     } catch (_) {
+      // #32: Reset on exception too
       completer.complete(false);
       return false;
     } finally {
+      // #32: Always reset after completing so subsequent callers can create a new refresh
       _refreshCompleter = null;
     }
   }

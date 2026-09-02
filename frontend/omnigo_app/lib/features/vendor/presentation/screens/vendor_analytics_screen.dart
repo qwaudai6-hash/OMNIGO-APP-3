@@ -1,10 +1,9 @@
 import 'dart:async';
-import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/network/api_endpoints.dart';
+import '../../../../core/di/service_locator.dart';
+import '../../../../core/network/api_client.dart';
 
 class VendorAnalyticsScreen extends StatefulWidget {
 
@@ -40,19 +39,13 @@ class VendorAnalyticsScreenState extends State<VendorAnalyticsScreen> with Singl
 
   Future<void> _fetchOrders() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final jwtToken = prefs.getString('jwt_token') ?? '';
+      final api = sl<ApiClient>();
+      final response = await api.get(ApiEndpoints.vendorOrders(widget.vendorTrackingId));
 
-      final url = Uri.parse(ApiEndpoints.vendorOrders(widget.vendorTrackingId));
-      final response = await http.get(url, headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer $jwtToken',
-      },).timeout(const Duration(seconds: 10));
-
-      if (response.statusCode == 200) {
+      if (response is List<dynamic>) {
         if (mounted) {
           setState(() {
-            _orders = jsonDecode(response.body) as List<dynamic>;
+            _orders = response;
             _isLoadingOrders = false;
           });
         }
@@ -74,6 +67,7 @@ class VendorAnalyticsScreenState extends State<VendorAnalyticsScreen> with Singl
   }
 
   Future<void> _fetchMetrics() async {
+    if (!mounted) return;
     setState(() {
       _isLoading = true;
       _isLoadingOrders = true;
@@ -83,29 +77,33 @@ class VendorAnalyticsScreenState extends State<VendorAnalyticsScreen> with Singl
     await _fetchOrders();
 
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final jwtToken = prefs.getString('jwt_token') ?? '';
+      final api = sl<ApiClient>();
+      final response = await api.get(ApiEndpoints.vendorMetrics(widget.vendorTrackingId));
 
-      final url = Uri.parse(ApiEndpoints.vendorMetrics(widget.vendorTrackingId));
+      // #39: Handle both wrapped {data: [...]} and plain response formats
+      Map<String, dynamic>? metrics;
+      if (response is Map<String, dynamic>) {
+        metrics = response['data'] is Map<String, dynamic> ? response['data'] as Map<String, dynamic> : response;
+      } else if (response is List<dynamic> && response.isNotEmpty) {
+        metrics = response.first as Map<String, dynamic>;
+      }
 
-      final response = await http.get(url, headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer $jwtToken',
-      },).timeout(const Duration(seconds: 10));
-
-      if (response.statusCode == 200) {
+      if (metrics != null) {
+        if (!mounted) return;
         setState(() {
-          _metricsData = jsonDecode(response.body) as Map<String, dynamic>;
+          _metricsData = metrics;
           _isLoading = false;
         });
         unawaited(_animationController.forward());
       } else {
+        if (!mounted) return;
         setState(() {
-          _errorMessage = 'Failed to load telemetry. Code: ${response.statusCode}';
+          _errorMessage = 'Failed to load telemetry.';
           _isLoading = false;
         });
       }
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _errorMessage = 'Connection Error: ${e.toString()}';
         _isLoading = false;
@@ -116,7 +114,7 @@ class VendorAnalyticsScreenState extends State<VendorAnalyticsScreen> with Singl
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0D0D12), // Deep Space Dark Mode
+      backgroundColor: AppTheme.blackAccent, // Deep Space Dark Mode
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,

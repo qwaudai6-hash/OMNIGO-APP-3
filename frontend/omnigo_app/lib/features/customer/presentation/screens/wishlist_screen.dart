@@ -1,9 +1,8 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/network/api_endpoints.dart';
+import '../../../../core/di/service_locator.dart';
+import '../../../../core/network/api_client.dart';
 import '../../data/models/product.dart';
 import 'product_details_screen.dart';
 
@@ -42,24 +41,16 @@ class WishlistScreenState extends State<WishlistScreen> {
     });
 
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
+      final api = sl<ApiClient>();
 
       // Step 1: Get favorited product IDs
-      final favResponse = await http.get(
-        Uri.parse(ApiEndpoints.wishlistList()),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-      ).timeout(const Duration(seconds: 8));
+      final favResponse = await api.get(ApiEndpoints.wishlistList());
 
-      if (favResponse.statusCode != 200) {
-        throw Exception('Failed to load wishlist (${favResponse.statusCode})');
+      if (favResponse is! Map<String, dynamic>) {
+        throw Exception('Failed to load wishlist');
       }
 
-      final favData = jsonDecode(favResponse.body) as Map<String, dynamic>;
-      final List<dynamic> productIds = (favData['product_tracking_ids'] as List<dynamic>?) ?? [];
+      final List<dynamic> productIds = (favResponse['product_tracking_ids'] as List<dynamic>?) ?? [];
 
       if (productIds.isEmpty) {
         if (mounted) setState(() { _favoriteProducts = []; _isLoading = false; });
@@ -67,19 +58,8 @@ class WishlistScreenState extends State<WishlistScreen> {
       }
 
       // Step 2: Fetch product details for each favorited ID.
-      // The product-service doesn't have a batch-by-IDs endpoint yet, so
-      // we fetch the full catalog and filter. At scale, a dedicated
-      // GET /products?ids=PROD-1,PROD-2 endpoint would be more efficient.
-      final prodResponse = await http.get(
-        Uri.parse(ApiEndpoints.productsList(limit: 100, offset: 0)),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-      ).timeout(const Duration(seconds: 10));
-
-      if (prodResponse.statusCode == 200) {
-        final allProducts = jsonDecode(prodResponse.body) as List<dynamic>;
+      final allProducts = await api.get(ApiEndpoints.productsList(limit: 100, offset: 0));
+      if (allProducts is List<dynamic>) {
         final favSet = productIds.map((e) => e.toString()).toSet();
         final favorited = allProducts.where((p) {
           final pid = p['product_tracking_id']?.toString() ?? '';
@@ -107,16 +87,8 @@ class WishlistScreenState extends State<WishlistScreen> {
 
   Future<void> _removeFromWishlist(String productId) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-
-      await http.delete(
-        Uri.parse(ApiEndpoints.wishlistRemove(productId)),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-      ).timeout(const Duration(seconds: 5));
+      final api = sl<ApiClient>();
+      await api.delete(ApiEndpoints.wishlistRemove(productId));
 
       // Remove from local list
       setState(() {

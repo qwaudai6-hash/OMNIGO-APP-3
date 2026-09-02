@@ -5,6 +5,7 @@ import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import '../../../../core/network/api_endpoints.dart';
+import '../../../../core/network/api_client.dart';
 import '../../../../core/network/websocket_client.dart';
 import '../../../../core/di/service_locator.dart';
 import '../../../../core/services/session_registry.dart';
@@ -51,7 +52,6 @@ class VendorLiveMapScreen extends StatefulWidget {
 class VendorLiveMapScreenState extends State<VendorLiveMapScreen> {
   MapLibreMapController? _mapController;
   LatLng? _storeLocation; // Set by API/GPS only — no hardcoded default
-  // ignore: unused_field
   bool _isLocationLoaded = false;
   List<LatLng> _routePolyline = [];
 
@@ -65,7 +65,6 @@ class VendorLiveMapScreenState extends State<VendorLiveMapScreen> {
   // Creating a separate instance caused vendor dashboard + live map to have
   // 2 WebSocket connections, breaking message routing for the live map.
   late final WebSocketClient _wsClient = sl<WebSocketClient>();
-  StreamSubscription<dynamic>? _streamSubscription;
   StreamSubscription<dynamic>? _telemetryTopicSub;
   StreamSubscription<WSConnectionState>? _stateSub;
   Timer? _stalePruneTimer;
@@ -111,17 +110,10 @@ class VendorLiveMapScreenState extends State<VendorLiveMapScreen> {
 
   Future<void> _initStoreLocation() async {
     try {
-      final token = SessionRegistry.instance.token ?? '';
-      final response = await http.get(
-        Uri.parse(ApiEndpoints.vendorStoreMe()),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-      ).timeout(const Duration(seconds: 8));
+      final api = sl<ApiClient>();
+      final data = await api.get(ApiEndpoints.vendorStoreMe());
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
+      if (data is Map<String, dynamic>) {
         final lat = (data['latitude'] as num?)?.toDouble();
         final lng = (data['longitude'] as num?)?.toDouble();
         if (lat != null && lng != null && lat != 0.0 && lng != 0.0) {
@@ -137,8 +129,6 @@ class VendorLiveMapScreenState extends State<VendorLiveMapScreen> {
           _setInitialMarkers();
           return;
         }
-      } else {
-        debugPrint('Store lookup failed: ${response.statusCode} ${response.body}');
       }
     } catch (e) {
       debugPrint('Error fetching store location: $e');
@@ -299,7 +289,6 @@ class VendorLiveMapScreenState extends State<VendorLiveMapScreen> {
   @override
   void dispose() {
     _stalePruneTimer?.cancel();
-    _streamSubscription?.cancel();
     _telemetryTopicSub?.cancel();
     _stateSub?.cancel();
     // Do NOT call _wsClient.disconnect() — singleton persists across screens.

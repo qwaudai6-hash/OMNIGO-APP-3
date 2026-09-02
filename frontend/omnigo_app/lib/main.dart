@@ -293,7 +293,24 @@ class _OmnigoAppState extends State<OmnigoApp> with WidgetsBindingObserver {
             builder: (context) => const AdminAiControlCenterScreen(),
           );
         }
-        return null;
+        // #57: Return a proper 404 page instead of null
+        return MaterialPageRoute(
+          builder: (context) => Scaffold(
+            appBar: AppBar(title: const Text('Page Not Found')),
+            body: const Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.error_outline, size: 64, color: Colors.grey),
+                  SizedBox(height: 16),
+                  Text('404 - Page Not Found', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                  SizedBox(height: 8),
+                  Text('The page you are looking for does not exist.'),
+                ],
+              ),
+            ),
+          ),
+        );
       },
       routes: {
         '/': (context) => const DynamicSignupScreen(),

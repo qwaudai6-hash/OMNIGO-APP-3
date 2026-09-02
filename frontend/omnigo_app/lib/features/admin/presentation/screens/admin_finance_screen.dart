@@ -4,6 +4,8 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:fl_chart/fl_chart.dart';
 import '../../../../core/network/api_endpoints.dart';
+import '../../../../core/network/api_client.dart';
+import '../../../../core/di/service_locator.dart';
 
 class AdminFinanceScreen extends StatefulWidget {
   const AdminFinanceScreen({super.key});
@@ -46,59 +48,58 @@ class _AdminFinanceScreenState extends State<AdminFinanceScreen> {
     setState(() => _isLoading = true);
     
     try {
-      final headers = await _getAuthHeaders();
+      final api = sl<ApiClient>();
       
+      // #15-16: Wrap each call in individual try/catch with mounted checks
       // Fetch KPIs
-      final kpiRes = await http.get(
-        Uri.parse('$_adminBase/admin/finance/ledger-kpis'),
-        headers: headers,
-      ).timeout(const Duration(seconds: 8));
-      
-      if (kpiRes.statusCode == 200) {
-        _kpis = jsonDecode(kpiRes.body) as Map<String, dynamic>?;
+      try {
+        final kpiRes = await api.get('$_adminBase/admin/finance/ledger-kpis');
+        if (kpiRes is Map<String, dynamic>) {
+          _kpis = kpiRes;
+        }
+      } catch (e) {
+        debugPrint('Failed to fetch KPIs: $e');
       }
 
       // Fetch Daily Revenue for Chart
-      final revenueRes = await http.get(
-        Uri.parse('$_adminBase/admin/finance/daily-revenue?days=$_daysFilter&payment_method=$_paymentFilter'),
-        headers: headers,
-      ).timeout(const Duration(seconds: 8));
-
-      if (revenueRes.statusCode == 200) {
-        _dailyRevenue = (jsonDecode(revenueRes.body) as Map<String, dynamic>)['daily_revenue'] as List<dynamic>? ?? [];
+      try {
+        final revenueRes = await api.get('$_adminBase/admin/finance/daily-revenue?days=$_daysFilter&payment_method=$_paymentFilter');
+        if (revenueRes is Map<String, dynamic>) {
+          _dailyRevenue = (revenueRes['daily_revenue'] as List<dynamic>?) ?? [];
+        }
+      } catch (e) {
+        debugPrint('Failed to fetch daily revenue: $e');
       }
 
       // Fetch Payments
-      final payRes = await http.get(
-        Uri.parse('$_adminBase/admin/finance/payments?limit=50'),
-        headers: headers,
-      ).timeout(const Duration(seconds: 8));
-
-      if (payRes.statusCode == 200) {
-        _payments = (jsonDecode(payRes.body) as Map<String, dynamic>)['payments'] as List<dynamic>? ?? [];
+      try {
+        final payRes = await api.get('$_adminBase/admin/finance/payments?limit=50');
+        if (payRes is Map<String, dynamic>) {
+          _payments = (payRes['payments'] as List<dynamic>?) ?? [];
+        }
+      } catch (e) {
+        debugPrint('Failed to fetch payments: $e');
       }
 
       // Fetch PayFast Summary
       try {
-        final pfSummaryRes = await http.get(
-          Uri.parse(ApiEndpoints.adminPayFastSummary()),
-          headers: headers,
-        ).timeout(const Duration(seconds: 8));
-        if (pfSummaryRes.statusCode == 200) {
-          _payfastSummary = jsonDecode(pfSummaryRes.body) as Map<String, dynamic>?;
+        final pfSummaryRes = await api.get(ApiEndpoints.adminPayFastSummary());
+        if (pfSummaryRes is Map<String, dynamic>) {
+          _payfastSummary = pfSummaryRes;
         }
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('Failed to fetch PayFast summary: $e');
+      }
 
       // Fetch PayFast Transactions
       try {
-        final pfTxnRes = await http.get(
-          Uri.parse(ApiEndpoints.adminPayFastTransactions(status: _payfastFilter, limit: 50)),
-          headers: headers,
-        ).timeout(const Duration(seconds: 8));
-        if (pfTxnRes.statusCode == 200) {
-          _payfastTransactions = (jsonDecode(pfTxnRes.body) as Map<String, dynamic>)['transactions'] as List<dynamic>? ?? [];
+        final pfTxnRes = await api.get(ApiEndpoints.adminPayFastTransactions(status: _payfastFilter, limit: 50));
+        if (pfTxnRes is Map<String, dynamic>) {
+          _payfastTransactions = (pfTxnRes['transactions'] as List<dynamic>?) ?? [];
         }
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('Failed to fetch PayFast transactions: $e');
+      }
       
     } catch (e) {
       if (mounted) {

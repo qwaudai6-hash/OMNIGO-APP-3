@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
+
 import 'package:maplibre_gl/maplibre_gl.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+
 import 'package:geolocator/geolocator.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/services/session_registry.dart';
@@ -85,6 +85,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   LatLng? _ridePickupLatLng;
   LatLng? _rideDropoffLatLng;
   bool _isEstimatingRide = false;
+  Timer? _estimateSafetyTimer;
 
   @override
   void initState() {
@@ -260,10 +261,16 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   @override
   void dispose() {
     _searchDebounce?.cancel();
+    _estimateSafetyTimer?.cancel();
     _wsSub?.cancel();
     _wsOrderTopicSub?.cancel();
     _wsStateSub?.cancel();
-    _wsClient?.disconnect();
+    // #29: Guard disconnect for singleton — only disconnect if this screen created the client
+    if (_wsClient != null) {
+      try {
+        _wsClient!.disconnect();
+      } catch (_) {}
+    }
     _riderMarkers.dispose();
     _scrollController.dispose();
     _mapSearchController.dispose();
@@ -560,11 +567,14 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
 
   Future<void> _estimateAndSelectVehicle() async {
     if (_rideDropoffLatLng == null) return;
+    // #33: Race condition guard
+    if (_isEstimatingRide) return;
 
     setState(() => _isEstimatingRide = true);
 
-    // Safety timeout: auto-dismiss overlay after 20s if API hangs
-    Future.delayed(const Duration(seconds: 20), () {
+    // #31: Safety timeout — store timer and cancel in dispose
+    _estimateSafetyTimer?.cancel();
+    _estimateSafetyTimer = Timer(const Duration(seconds: 20), () {
       if (mounted && _isEstimatingRide) {
         setState(() => _isEstimatingRide = false);
       }
@@ -755,8 +765,10 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       final response =
           await ApiClient().get('/orders/customer/${widget.trackingId}');
       if (mounted) {
+        // #53: Verify response is List before casting
+        final List<dynamic> orders = response is List<dynamic> ? response : <dynamic>[];
         setState(() {
-          _customerOrders = response as List<dynamic>;
+          _customerOrders = orders;
           _isLoadingOrders = false;
         });
 

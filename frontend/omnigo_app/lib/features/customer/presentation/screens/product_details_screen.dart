@@ -887,7 +887,8 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                   final rec = _recommendations[idx];
                                   return GestureDetector(
                                     onTap: () {
-                                      Navigator.pushReplacement(
+                                      // #58: Use push instead of pushReplacement so user can go back
+                                      Navigator.push(
                                         context,
                                         MaterialPageRoute<void>(
                                           builder: (context) => ProductDetailsScreen(

@@ -43,7 +43,8 @@ Future<String?> _refreshAccessToken(String refreshToken) async {
     );
     if (response.statusCode == 200) {
       final data = jsonDecode(response.body);
-      final newToken = data['token']?.toString();
+      // #36: Handle both 'access_token' and 'token' field names
+      final newToken = (data['access_token'] ?? data['token'])?.toString();
       final newRefreshToken = data['refresh_token']?.toString();
       if (newToken != null && newRefreshToken != null) {
         final prefs = await SharedPreferences.getInstance();

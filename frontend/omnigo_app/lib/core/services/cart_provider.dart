@@ -6,6 +6,9 @@ import '../../features/customer/data/models/product.dart';
 
 class CartProvider extends ChangeNotifier {
   final Map<String, CartItem> _items = {};
+  // #35: Simple mutex pattern for _saveToStorage to prevent concurrent writes
+  bool _isSaving = false;
+  bool _pendingSave = false;
 
   Map<String, CartItem> get items => {..._items};
 
@@ -96,12 +99,23 @@ class CartProvider extends ChangeNotifier {
   }
 
   Future<void> _saveToStorage() async {
+    if (_isSaving) {
+      _pendingSave = true;
+      return;
+    }
+    _isSaving = true;
     try {
       final prefs = await SharedPreferences.getInstance();
       final list = _items.values.map((item) => item.toJson()).toList();
       await prefs.setString('customer_cart', jsonEncode(list));
     } catch (e) {
       debugPrint('Error saving cart: $e');
+    } finally {
+      _isSaving = false;
+      if (_pendingSave) {
+        _pendingSave = false;
+        _saveToStorage();
+      }
     }
   }
 }
