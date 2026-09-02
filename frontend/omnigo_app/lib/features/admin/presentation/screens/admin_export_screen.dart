@@ -20,8 +20,15 @@ class _AdminExportScreenState extends State<AdminExportScreen> {
     setState(() => _isExporting = true);
     try {
       final response = await sl<ApiClient>().get(ApiEndpoints.adminExport1ibft());
-      if (response is Map<String, dynamic> && mounted) {
-        final csv = response['csv']?.toString() ?? '';
+      if (mounted) {
+        // Backend returns raw CSV data, not JSON
+        // ApiClient.get() may return the raw response
+        String csv = '';
+        if (response is String) {
+          csv = response;
+        } else if (response is Map<String, dynamic>) {
+          csv = response['csv']?.toString() ?? response['data']?.toString() ?? '';
+        }
         if (csv.isNotEmpty) {
           final directory = await getApplicationDocumentsDirectory();
           final timestamp = DateTime.now().millisecondsSinceEpoch;
@@ -39,6 +46,8 @@ class _AdminExportScreenState extends State<AdminExportScreen> {
               ),
             );
           }
+        } else {
+          setState(() => _isExporting = false);
         }
       }
     } catch (e) {

@@ -115,12 +115,12 @@ class _AdminSavedCardsScreenState extends State<AdminSavedCardsScreen> {
 
   Widget _buildCardTile(Map<String, dynamic> card) {
     final cardId = card['card_id']?.toString() ?? '';
-    final brand = card['brand']?.toString() ?? '';
-    final last4 = card['last4']?.toString() ?? '';
-    final expMonth = card['exp_month']?.toString() ?? '';
-    final expYear = card['exp_year']?.toString() ?? '';
+    final brand = card['card_brand']?.toString() ?? '';
+    final last4 = card['last_four']?.toString() ?? '';
+    final expMonth = card['expiry_month']?.toString() ?? '';
+    final expYear = card['expiry_year']?.toString() ?? '';
     final isDefault = card['is_default'] as bool? ?? false;
-    final fingerprint = card['fingerprint']?.toString() ?? '';
+    final gateway = card['gateway']?.toString() ?? '';
 
     final brandColor = brand.toLowerCase() == 'visa' ? Colors.blue
         : brand.toLowerCase() == 'mastercard' ? Colors.orange
@@ -176,11 +176,11 @@ class _AdminSavedCardsScreenState extends State<AdminSavedCardsScreen> {
             Column(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Text('ID', style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
-                Text(cardId.substring(0, cardId.length > 8 ? 8 : cardId.length), style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
+                Text('Gateway', style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
+                Text(gateway, style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
                 const SizedBox(height: 4),
-                Text('Fingerprint', style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
-                Text(fingerprint.substring(0, fingerprint.length > 8 ? 8 : fingerprint.length), style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
+                Text('ID', style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
+                Text(cardId.length > 8 ? cardId.substring(0, 8) : cardId, style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
               ],
             ),
           ],

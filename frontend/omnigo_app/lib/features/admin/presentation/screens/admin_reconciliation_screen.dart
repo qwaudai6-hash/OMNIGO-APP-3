@@ -87,16 +87,24 @@ class _AdminReconciliationScreenState extends State<AdminReconciliationScreen> {
   }
 
   Widget _buildResultCard() {
-    final status = _result!['status']?.toString() ?? 'unknown';
-    final mismatches = _result!['mismatches'] as List<dynamic>? ?? [];
-    final reconciled = _result!['reconciled_count'] as int? ?? 0;
+    final isReconciled = _result!['is_reconciled'] as bool? ?? false;
+    final maxDiscrepancy = (_result!['max_discrepancy'] as num?)?.toDouble() ?? 0;
+    final threshold = (_result!['threshold'] as num?)?.toDouble() ?? 0;
     final timestamp = _result!['timestamp']?.toString() ?? '';
+    final totalOrders = _result!['total_orders_count'] as int? ?? 0;
+    final totalVolume = (_result!['total_orders_volume'] as num?)?.toDouble() ?? 0;
 
-    final isOk = status == 'ok' || status == 'reconciled';
+    final vendorEscrowDisc = (_result!['vendor_escrow_discrepancy'] as num?)?.toDouble() ?? 0;
+    final vendorWalletDisc = (_result!['vendor_wallet_discrepancy'] as num?)?.toDouble() ?? 0;
+    final adminRevenueDisc = (_result!['admin_revenue_discrepancy'] as num?)?.toDouble() ?? 0;
+    final codDebtDisc = (_result!['cod_debt_discrepancy'] as num?)?.toDouble() ?? 0;
+    final centralEscrowDisc = (_result!['central_escrow_discrepancy'] as num?)?.toDouble() ?? 0;
+
+    final hasMismatches = vendorEscrowDisc != 0 || vendorWalletDisc != 0 || adminRevenueDisc != 0 || codDebtDisc != 0 || centralEscrowDisc != 0;
 
     return Card(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      color: isOk ? Colors.green.shade50 : Colors.orange.shade50,
+      color: isReconciled ? Colors.green.shade50 : Colors.orange.shade50,
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -105,31 +113,37 @@ class _AdminReconciliationScreenState extends State<AdminReconciliationScreen> {
             Row(
               children: [
                 Icon(
-                  isOk ? Icons.check_circle : Icons.warning,
-                  color: isOk ? Colors.green : Colors.orange,
+                  isReconciled ? Icons.check_circle : Icons.warning,
+                  color: isReconciled ? Colors.green : Colors.orange,
                   size: 24,
                 ),
                 const SizedBox(width: 8),
                 Text(
-                  isOk ? 'Reconciled' : 'Mismatches Found',
+                  isReconciled ? 'Reconciled' : 'Mismatches Found',
                   style: TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.bold,
-                    color: isOk ? Colors.green : Colors.orange,
+                    color: isReconciled ? Colors.green : Colors.orange,
                   ),
                 ),
               ],
             ),
             const SizedBox(height: 12),
-            _detailRow('Status', status.toUpperCase()),
-            _detailRow('Reconciled Entries', '$reconciled'),
-            _detailRow('Mismatches', '${mismatches.length}'),
+            _detailRow('Status', isReconciled ? 'RECONCILED' : 'DISCREPANCY'),
+            _detailRow('Total Orders', '$totalOrders'),
+            _detailRow('Total Volume', 'PKR ${totalVolume.toStringAsFixed(2)}'),
+            _detailRow('Max Discrepancy', 'PKR ${maxDiscrepancy.toStringAsFixed(2)}'),
+            _detailRow('Threshold', 'PKR ${threshold.toStringAsFixed(2)}'),
             if (timestamp.isNotEmpty) _detailRow('Timestamp', timestamp),
-            if (mismatches.isNotEmpty) ...[
+            if (hasMismatches) ...[
               const Divider(),
-              const Text('Mismatches:', style: TextStyle(fontWeight: FontWeight.bold)),
+              const Text('Discrepancies:', style: TextStyle(fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
-              ...mismatches.map((m) => _buildMismatchItem(m as Map<String, dynamic>)),
+              if (vendorEscrowDisc != 0) _buildDiscrepancyItem('Vendor Escrow', vendorEscrowDisc),
+              if (vendorWalletDisc != 0) _buildDiscrepancyItem('Vendor Wallet', vendorWalletDisc),
+              if (adminRevenueDisc != 0) _buildDiscrepancyItem('Admin Revenue', adminRevenueDisc),
+              if (codDebtDisc != 0) _buildDiscrepancyItem('COD Debt', codDebtDisc),
+              if (centralEscrowDisc != 0) _buildDiscrepancyItem('Central Escrow', centralEscrowDisc),
             ],
           ],
         ),
@@ -137,25 +151,23 @@ class _AdminReconciliationScreenState extends State<AdminReconciliationScreen> {
     );
   }
 
-  Widget _buildMismatchItem(Map<String, dynamic> mismatch) {
-    final account = mismatch['account']?.toString() ?? '';
-    final ledgerBalance = (mismatch['ledger_balance'] as num?)?.toDouble() ?? 0;
-    final dbBalance = (mismatch['db_balance'] as num?)?.toDouble() ?? 0;
-    final difference = ledgerBalance - dbBalance;
-
+  Widget _buildDiscrepancyItem(String account, double difference) {
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       color: Colors.white,
       child: Padding(
         padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             Text(account, style: const TextStyle(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 4),
-            _detailRow('Ledger Balance', 'PKR ${ledgerBalance.toStringAsFixed(2)}'),
-            _detailRow('DB Balance', 'PKR ${dbBalance.toStringAsFixed(2)}'),
-            _detailRow('Difference', 'PKR ${difference.toStringAsFixed(2)}'),
+            Text(
+              'PKR ${difference.toStringAsFixed(2)}',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                color: difference > 0 ? Colors.green : Colors.red,
+              ),
+            ),
           ],
         ),
       ),
