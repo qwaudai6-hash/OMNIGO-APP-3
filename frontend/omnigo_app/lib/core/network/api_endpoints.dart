@@ -410,6 +410,33 @@ class ApiEndpoints {
   static String adminVendorPayoutReject(String id) =>
       '$adminBase/admin/finance/vendor-payouts/$id/reject';
 
+  // ── Admin: Stripe Events Audit ──────────────────────────────────
+  static String adminStripeEvents({String? type, int limit = 50, int offset = 0}) {
+    final params = <String>['limit=$limit', 'offset=$offset'];
+    if (type != null && type.isNotEmpty) params.add('type=$type');
+    return '$adminBase/admin/finance/stripe-events?${params.join('&')}';
+  }
+
+  // ── Admin: Saved Cards Audit ────────────────────────────────────
+  static String adminSavedCards(String customerId) =>
+      '$adminBase/admin/payments/cards/$customerId';
+
+  // ── Admin: Ledger Balance & Entries ─────────────────────────────
+  static String adminLedgerBalance(String account) =>
+      '$paymentBase/api/v1/ledger/balance/$account';
+  static String adminLedgerEntries(String type, String id) =>
+      '$paymentBase/api/v1/ledger/entries/$type/$id';
+
+  // ── Admin: Escrow Holds ─────────────────────────────────────────
+  static String adminEscrowHolds(String vendorId) =>
+      '$paymentBase/api/v1/payments/escrow/holds/$vendorId';
+
+  // ── Admin: Financial Reconciliation ─────────────────────────────
+  static String adminReconcile() => '$paymentBase/api/v1/finance/reconcile';
+
+  // ── Admin: 1LINK/1IBFT CSV Export ───────────────────────────────
+  static String adminExport1ibft() => '$paymentBase/api/v1/finance/payouts/export-1ibft';
+
   // ── Payment Disputes (via payment-orchestrator) ─────────────────
   static String paymentDisputeList({String? status}) {
     final params = <String>[];

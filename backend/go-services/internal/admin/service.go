@@ -25,11 +25,18 @@ type AdminLineageReport struct {
 	TotalAmount    float64 `json:"total_amount"`
 	CustomerID     string  `json:"customer_id"`
 	CustomerName   string  `json:"customer_name"`
+	CustomerPhone  string  `json:"customer_phone"`
+	CustomerLat    float64 `json:"customer_lat"`
+	CustomerLng    float64 `json:"customer_lng"`
 	StoreID        string  `json:"store_id"`
 	StoreName      string  `json:"store_name"`
+	StoreLat       float64 `json:"store_lat"`
+	StoreLng       float64 `json:"store_lng"`
 	ProductID      string  `json:"product_id"`
 	ProductName    string  `json:"product_name"`
 	RiderID        string  `json:"rider_id"`
+	RiderName      string  `json:"rider_name"`
+	RiderPhone     string  `json:"rider_phone"`
 	DeliveryStatus string  `json:"delivery_status"`
 	CurrentHexagon string  `json:"current_h3_hexagon"`
 }
@@ -41,9 +48,16 @@ type FullLineageReport struct {
 	TotalAmount    float64         `json:"total_amount"`
 	CustomerID     string          `json:"customer_id"`
 	CustomerName   string          `json:"customer_name"`
+	CustomerPhone  string          `json:"customer_phone"`
+	CustomerLat    float64         `json:"customer_lat"`
+	CustomerLng    float64         `json:"customer_lng"`
 	StoreID        string          `json:"store_id"`
 	StoreName      string          `json:"store_name"`
+	StoreLat       float64         `json:"store_lat"`
+	StoreLng       float64         `json:"store_lng"`
 	RiderID        string          `json:"rider_id"`
+	RiderName      string          `json:"rider_name"`
+	RiderPhone     string          `json:"rider_phone"`
 	DeliveryID     string          `json:"delivery_id"`
 	DeliveryStatus string          `json:"delivery_status"`
 	RideID         string          `json:"ride_id"`
@@ -212,17 +226,25 @@ func (s *AdminSurveillanceService) GetCompleteOrderLineage(ctx context.Context, 
 			o.status,
 			o.total_amount,
 			o.customer_tracking_id,
-			COALESCE(c.full_name, 'Customer'),
+			COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'') as customer_name,
+			COALESCE(c.phone,''),
+			COALESCE(o.customer_lat, 0),
+			COALESCE(o.customer_lng, 0),
 			COALESCE(o.store_tracking_id, 'N/A'),
 			COALESCE(s.store_name, 'N/A'),
+			COALESCE(s.latitude, 0),
+			COALESCE(s.longitude, 0),
 			COALESCE((SELECT oi.product_tracking_id FROM order_items oi WHERE oi.order_tracking_id = o.order_tracking_id LIMIT 1), 'N/A'),
 			COALESCE((SELECT p.name FROM products p JOIN order_items oi ON oi.product_tracking_id = p.product_tracking_id WHERE oi.order_tracking_id = o.order_tracking_id LIMIT 1), 'N/A'),
 			COALESCE(o.rider_tracking_id, d.rider_tracking_id, 'UNASSIGNED'),
+			COALESCE(ru.first_name,'') || ' ' || COALESCE(ru.last_name,'') as rider_name,
+			COALESCE(ru.phone,''),
 			COALESCE(d.status, 'PENDING')
 		FROM orders o
 		LEFT JOIN users c ON o.customer_tracking_id = c.tracking_id
 		LEFT JOIN stores s ON o.store_tracking_id = s.store_tracking_id
 		LEFT JOIN deliveries d ON o.order_tracking_id = d.order_tracking_id
+		LEFT JOIN users ru ON COALESCE(o.rider_tracking_id, d.rider_tracking_id) = ru.tracking_id
 		WHERE o.order_tracking_id = $1
 		LIMIT 1
 	`
@@ -235,11 +257,18 @@ func (s *AdminSurveillanceService) GetCompleteOrderLineage(ctx context.Context, 
 		&r.TotalAmount,
 		&r.CustomerID,
 		&r.CustomerName,
+		&r.CustomerPhone,
+		&r.CustomerLat,
+		&r.CustomerLng,
 		&r.StoreID,
 		&r.StoreName,
+		&r.StoreLat,
+		&r.StoreLng,
 		&r.ProductID,
 		&r.ProductName,
 		&r.RiderID,
+		&r.RiderName,
+		&r.RiderPhone,
 		&r.DeliveryStatus,
 	)
 	if err != nil {
@@ -642,16 +671,24 @@ func (s *AdminSurveillanceService) GetFullOrderLineage(ctx context.Context, rawT
 		SELECT
 			o.order_tracking_id, o.status, o.total_amount,
 			o.customer_tracking_id,
-			COALESCE(c.full_name, ''),
+			COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'') as customer_name,
+			COALESCE(c.phone,''),
+			COALESCE(o.customer_lat, 0),
+			COALESCE(o.customer_lng, 0),
 			COALESCE(o.store_tracking_id, 'N/A'),
 			COALESCE(s.store_name, 'N/A'),
+			COALESCE(s.latitude, 0),
+			COALESCE(s.longitude, 0),
 			COALESCE(o.rider_tracking_id, d.rider_tracking_id, 'UNASSIGNED'),
+			COALESCE(ru.first_name,'') || ' ' || COALESCE(ru.last_name,'') as rider_name,
+			COALESCE(ru.phone,''),
 			COALESCE(d.tracking_id, 'N/A'),
 			COALESCE(d.status, 'PENDING')
 		FROM orders o
 		LEFT JOIN users c ON o.customer_tracking_id = c.tracking_id
 		LEFT JOIN stores s ON o.store_tracking_id = s.store_tracking_id
 		LEFT JOIN deliveries d ON o.order_tracking_id = d.order_tracking_id
+		LEFT JOIN users ru ON COALESCE(o.rider_tracking_id, d.rider_tracking_id) = ru.tracking_id
 		WHERE o.order_tracking_id = $1
 		LIMIT 1
 	`
@@ -659,9 +696,11 @@ func (s *AdminSurveillanceService) GetFullOrderLineage(ctx context.Context, rawT
 	var riderID, deliveryID, deliveryStatus string
 	err = s.dbReader.QueryRow(ctx, query, orderTrackingID).Scan(
 		&r.OrderID, &r.OrderStatus, &r.TotalAmount,
-		&r.CustomerID, &r.CustomerName,
-		&r.StoreID, &r.StoreName,
-		&riderID, &deliveryID, &deliveryStatus,
+		&r.CustomerID, &r.CustomerName, &r.CustomerPhone,
+		&r.CustomerLat, &r.CustomerLng,
+		&r.StoreID, &r.StoreName, &r.StoreLat, &r.StoreLng,
+		&riderID, &r.RiderName, &r.RiderPhone,
+		&deliveryID, &deliveryStatus,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("full lineage fetch failed: %w", err)
@@ -1071,6 +1110,15 @@ type AdminOrderItem struct {
 	DeliveredAt         *string  `json:"delivered_at,omitempty"`
 	CreatedAt           string   `json:"created_at"`
 	UpdatedAt           string   `json:"updated_at"`
+	CustomerName        string   `json:"customer_name"`
+	CustomerPhone       string   `json:"customer_phone"`
+	CustomerLat         float64  `json:"customer_lat"`
+	CustomerLng         float64  `json:"customer_lng"`
+	RiderName           string   `json:"rider_name"`
+	RiderPhone          string   `json:"rider_phone"`
+	StoreName           string   `json:"store_name"`
+	StoreLat            float64  `json:"store_lat"`
+	StoreLng            float64  `json:"store_lng"`
 }
 
 // GetAllOrders returns all orders with optional status filter and pagination.
@@ -1087,14 +1135,24 @@ func (s *AdminSurveillanceService) GetAllOrders(ctx context.Context, status stri
 		return nil, 0, fmt.Errorf("failed to count orders: %w", err)
 	}
 
-	query := `SELECT id, order_tracking_id, customer_tracking_id, vendor_tracking_id,
-		store_tracking_id, COALESCE(rider_tracking_id,''), status,
-		COALESCE(payment_gateway,''), COALESCE(payment_status,'pending'),
-		total_amount, currency, admin_commission, vendor_escrow, delivery_escrow,
-		escrow_released, dispute_status,
-		CASE WHEN delivered_at IS NOT NULL THEN delivered_at::text END,
-		created_at::text, updated_at::text
-		FROM orders`
+	query := `SELECT o.id, o.order_tracking_id, o.customer_tracking_id, o.vendor_tracking_id,
+		o.store_tracking_id, COALESCE(o.rider_tracking_id,''), o.status,
+		COALESCE(o.payment_gateway,''), COALESCE(o.payment_status,'pending'),
+		o.total_amount, o.currency, o.admin_commission, o.vendor_escrow, o.delivery_escrow,
+		o.escrow_released, o.dispute_status,
+		CASE WHEN o.delivered_at IS NOT NULL THEN o.delivered_at::text END,
+		o.created_at::text, o.updated_at::text,
+		COALESCE(u.first_name,'') || ' ' || COALESCE(u.last_name,'') as customer_name,
+		COALESCE(u.phone,''),
+		COALESCE(o.customer_lat, 0), COALESCE(o.customer_lng, 0),
+		COALESCE(ru.first_name,'') || ' ' || COALESCE(ru.last_name,'') as rider_name,
+		COALESCE(ru.phone,''),
+		COALESCE(s.store_name,'Unknown'),
+		COALESCE(s.latitude, 0), COALESCE(s.longitude, 0)
+		FROM orders o
+		LEFT JOIN users u ON o.customer_tracking_id = u.tracking_id
+		LEFT JOIN users ru ON o.rider_tracking_id = ru.tracking_id
+		LEFT JOIN stores s ON o.store_tracking_id = s.store_tracking_id`
 	if status != "" {
 		query += " WHERE status = $1"
 		query += " ORDER BY created_at DESC LIMIT $2 OFFSET $3"
@@ -1125,6 +1183,9 @@ func (s *AdminSurveillanceService) GetAllOrders(ctx context.Context, status stri
 			&item.TotalAmount, &item.Currency, &item.AdminCommission,
 			&item.VendorEscrow, &item.DeliveryEscrow, &item.EscrowReleased,
 			&item.DisputeStatus, &item.DeliveredAt, &item.CreatedAt, &item.UpdatedAt,
+			&item.CustomerName, &item.CustomerPhone, &item.CustomerLat, &item.CustomerLng,
+			&item.RiderName, &item.RiderPhone,
+			&item.StoreName, &item.StoreLat, &item.StoreLng,
 		); err != nil {
 			return nil, 0, err
 		}

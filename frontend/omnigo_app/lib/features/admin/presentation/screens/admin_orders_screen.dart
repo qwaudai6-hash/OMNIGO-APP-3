@@ -161,10 +161,23 @@ class _AdminOrdersScreenState extends State<AdminOrdersScreen> {
     final paymentStatus = order['payment_status']?.toString() ?? '';
     final createdAt = order['created_at']?.toString() ?? '';
     final customerId = order['customer_tracking_id']?.toString() ?? '';
+    final customerName = order['customer_name']?.toString()?.trim() ?? '';
+    final customerPhone = order['customer_phone']?.toString() ?? '';
+    final customerLat = (order['customer_lat'] as num?)?.toDouble() ?? 0.0;
+    final customerLng = (order['customer_lng'] as num?)?.toDouble() ?? 0.0;
     final vendorId = order['vendor_tracking_id']?.toString() ?? '';
     final storeId = order['store_tracking_id']?.toString() ?? '';
+    final storeName = order['store_name']?.toString() ?? '';
+    final storeLat = (order['store_lat'] as num?)?.toDouble() ?? 0.0;
+    final storeLng = (order['store_lng'] as num?)?.toDouble() ?? 0.0;
     final riderId = order['rider_tracking_id']?.toString() ?? '';
+    final riderName = order['rider_name']?.toString()?.trim() ?? '';
+    final riderPhone = order['rider_phone']?.toString() ?? '';
     final commission = (order['admin_commission'] as num?)?.toDouble() ?? 0.0;
+
+    final paymentColor = paymentStatus == 'paid' ? Colors.green
+        : paymentStatus == 'pending' ? Colors.orange
+        : Colors.grey;
 
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
@@ -188,25 +201,73 @@ class _AdminOrdersScreenState extends State<AdminOrdersScreen> {
             ),
             const SizedBox(width: 8),
             Expanded(
-              child: Text(orderId, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(orderId, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                  const SizedBox(height: 2),
+                  Text(
+                    '${customerName.isNotEmpty ? customerName : customerId}',
+                    style: TextStyle(color: Colors.grey.shade600, fontSize: 11),
+                  ),
+                ],
+              ),
             ),
           ],
         ),
         subtitle: Padding(
           padding: const EdgeInsets.only(top: 4),
-          child: Text('PKR ${amount.toStringAsFixed(0)} • $paymentStatus', style: TextStyle(color: Colors.grey.shade600, fontSize: 12)),
+          child: Row(
+            children: [
+              Text('PKR ${amount.toStringAsFixed(0)}', style: TextStyle(color: Colors.grey.shade600, fontSize: 12)),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: paymentColor.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(paymentStatus, style: TextStyle(color: paymentColor, fontSize: 10, fontWeight: FontWeight.bold)),
+              ),
+            ],
+          ),
         ),
         children: [
-          // Full order details
-          _detailRow('Customer', customerId),
-          _detailRow('Vendor', vendorId),
-          _detailRow('Store', storeId),
-          _detailRow('Rider', riderId),
-          _detailRow('Amount', 'PKR ${amount.toStringAsFixed(0)}'),
-          _detailRow('Commission', 'PKR ${commission.toStringAsFixed(0)}'),
-          _detailRow('Payment', paymentStatus),
+          // Customer info
+          if (customerName.isNotEmpty || customerPhone.isNotEmpty)
+            _infoSection('Customer', [
+              if (customerName.isNotEmpty) _detailRow('Name', customerName),
+              if (customerPhone.isNotEmpty) _detailRow('Phone', customerPhone),
+              _detailRow('ID', customerId),
+              if (customerLat != 0 && customerLng != 0)
+                _detailRow('Delivery Location', '${customerLat.toStringAsFixed(4)}, ${customerLng.toStringAsFixed(4)}'),
+            ]),
+          // Store info
+          if (storeName.isNotEmpty || storeLat != 0)
+            _infoSection('Store (Pickup)', [
+              if (storeName.isNotEmpty) _detailRow('Store', storeName),
+              _detailRow('Store ID', storeId),
+              _detailRow('Vendor ID', vendorId),
+              if (storeLat != 0 && storeLng != 0)
+                _detailRow('Store Location', '${storeLat.toStringAsFixed(4)}, ${storeLng.toStringAsFixed(4)}'),
+            ]),
+          // Rider info
+          if (riderName.isNotEmpty || riderPhone.isNotEmpty || riderId.isNotEmpty)
+            _infoSection('Rider (Delivery)', [
+              if (riderName.isNotEmpty) _detailRow('Rider', riderName),
+              if (riderPhone.isNotEmpty) _detailRow('Phone', riderPhone),
+              _detailRow('Rider ID', riderId),
+            ]),
+          // Financial
+          _infoSection('Financials', [
+            _detailRow('Total', 'PKR ${amount.toStringAsFixed(0)}'),
+            _detailRow('Admin Commission', 'PKR ${commission.toStringAsFixed(0)}'),
+            _detailRow('Vendor Escrow', 'PKR ${((order['vendor_escrow'] as num?)?.toDouble() ?? 0).toStringAsFixed(0)}'),
+            _detailRow('Delivery Escrow', 'PKR ${((order['delivery_escrow'] as num?)?.toDouble() ?? 0).toStringAsFixed(0)}'),
+            _detailRow('Escrow Released', order['escrow_released'] == true ? 'Yes' : 'No'),
+          ]),
           _detailRow('Created', createdAt),
-          const Divider(),
+          const SizedBox(height: 8),
           // Action buttons
           Row(
             children: [
@@ -240,6 +301,20 @@ class _AdminOrdersScreenState extends State<AdminOrdersScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  Widget _infoSection(String title, List<Widget> children) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: 4),
+          child: Text(title, style: TextStyle(color: Colors.grey.shade800, fontSize: 13, fontWeight: FontWeight.bold)),
+        ),
+        ...children,
+        const Divider(),
+      ],
     );
   }
 

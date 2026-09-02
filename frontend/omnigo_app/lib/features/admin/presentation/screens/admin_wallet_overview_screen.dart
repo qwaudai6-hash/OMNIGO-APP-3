@@ -13,12 +13,20 @@ class AdminWalletOverviewScreen extends StatefulWidget {
 
 class _AdminWalletOverviewScreenState extends State<AdminWalletOverviewScreen> {
   Map<String, dynamic>? _walletData;
+  List<dynamic> _escrowHolds = [];
   bool _isLoading = true;
+  final _vendorController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
     _fetchWalletOverview();
+  }
+
+  @override
+  void dispose() {
+    _vendorController.dispose();
+    super.dispose();
   }
 
   Future<void> _fetchWalletOverview() async {
@@ -33,6 +41,23 @@ class _AdminWalletOverviewScreenState extends State<AdminWalletOverviewScreen> {
       }
     } catch (e) {
       if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _fetchEscrowHolds(String vendorId) async {
+    try {
+      final data = await sl<ApiClient>().get(ApiEndpoints.adminEscrowHolds(vendorId));
+      if (data is Map<String, dynamic> && mounted) {
+        setState(() {
+          _escrowHolds = data['holds'] as List<dynamic>? ?? [];
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to load escrow holds: $e'), backgroundColor: Colors.red),
+        );
+      }
     }
   }
 
@@ -108,9 +133,107 @@ class _AdminWalletOverviewScreenState extends State<AdminWalletOverviewScreen> {
                       // Pie Chart
                       if (_walletData!['liabilities'] != null)
                         _buildPieChart(),
+                      const SizedBox(height: 16),
+                      // Escrow Holds Section
+                      _buildSectionTitle('Escrow Holds'),
+                      const SizedBox(height: 8),
+                      _buildEscrowSearchBar(),
+                      if (_escrowHolds.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        ..._escrowHolds.map((hold) => _buildEscrowHoldCard(hold as Map<String, dynamic>)),
+                      ],
                     ],
                   ),
                 ),
+    );
+  }
+
+  Widget _buildEscrowSearchBar() {
+    return Card(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _vendorController,
+                decoration: InputDecoration(
+                  hintText: 'Vendor ID (e.g., VEND-xxx)',
+                  hintStyle: TextStyle(color: Colors.grey.shade400),
+                  prefixIcon: const Icon(Icons.store, color: Colors.grey),
+                  filled: true,
+                  fillColor: Colors.grey[100],
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide.none,
+                  ),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            ElevatedButton(
+              onPressed: () {
+                final vendorId = _vendorController.text.trim();
+                if (vendorId.isNotEmpty) _fetchEscrowHolds(vendorId);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.black87,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+              child: const Text('Search'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEscrowHoldCard(Map<String, dynamic> hold) {
+    final orderId = hold['order_id']?.toString() ?? '';
+    final amount = (hold['amount'] as num?)?.toDouble() ?? 0;
+    final status = hold['status']?.toString() ?? '';
+    final holdExpiresAt = hold['hold_expires_at']?.toString() ?? '';
+
+    final statusColor = status == 'held' ? Colors.orange : Colors.green;
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: statusColor.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Icon(Icons.lock, color: statusColor, size: 20),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(orderId, style: const TextStyle(fontWeight: FontWeight.bold)),
+                  Text(holdExpiresAt.isNotEmpty ? 'Expires: $holdExpiresAt' : '', style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+                ],
+              ),
+            ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text('PKR ${amount.toStringAsFixed(0)}', style: TextStyle(fontWeight: FontWeight.bold, color: statusColor)),
+                Text(status.toUpperCase(), style: TextStyle(fontSize: 10, color: statusColor)),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
   }
 

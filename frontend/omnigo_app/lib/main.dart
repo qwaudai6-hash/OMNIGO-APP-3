@@ -30,6 +30,14 @@ import 'features/admin/presentation/screens/admin_orders_screen.dart';
 import 'features/admin/presentation/screens/admin_disputes_screen.dart';
 import 'features/admin/presentation/screens/admin_wallet_overview_screen.dart';
 import 'features/admin/presentation/screens/admin_analytics_screen.dart';
+import 'features/admin/presentation/screens/admin_rider_cod_screen.dart';
+import 'features/admin/presentation/screens/admin_rider_gps_screen.dart';
+import 'features/admin/presentation/screens/admin_vendor_payouts_screen.dart';
+import 'features/admin/presentation/screens/admin_stripe_events_screen.dart';
+import 'features/admin/presentation/screens/admin_saved_cards_screen.dart';
+import 'features/admin/presentation/screens/admin_ledger_screen.dart';
+import 'features/admin/presentation/screens/admin_reconciliation_screen.dart';
+import 'features/admin/presentation/screens/admin_export_screen.dart';
 
 import 'package:sentry_flutter/sentry_flutter.dart';
 
@@ -214,7 +222,7 @@ class _OmnigoAppState extends State<OmnigoApp> with WidgetsBindingObserver {
         }
 
         // Admin Route Guard
-        if (name == '/admin-surveillance' || name == '/admin-finance' || name == '/admin-ai-control' || name == '/admin-orders' || name == '/admin-disputes' || name == '/admin-wallet-overview' || name == '/admin-analytics') {
+        if (name == '/admin-surveillance' || name == '/admin-finance' || name == '/admin-ai-control' || name == '/admin-orders' || name == '/admin-disputes' || name == '/admin-wallet-overview' || name == '/admin-analytics' || name == '/admin-rider-cod' || name == '/admin-rider-gps' || name == '/admin-vendor-payouts' || name == '/admin-stripe-events' || name == '/admin-saved-cards' || name == '/admin-ledger' || name == '/admin-reconciliation' || name == '/admin-export') {
           if (!isLoggedIn) {
             return MaterialPageRoute(
               builder: (context) => const DynamicSignupScreen(startInLoginMode: true),
@@ -315,6 +323,46 @@ class _OmnigoAppState extends State<OmnigoApp> with WidgetsBindingObserver {
         if (settings.name == '/admin-analytics') {
           return MaterialPageRoute(
             builder: (context) => const AdminAnalyticsScreen(),
+          );
+        }
+        if (settings.name == '/admin-rider-cod') {
+          return MaterialPageRoute(
+            builder: (context) => const AdminRiderCodScreen(),
+          );
+        }
+        if (settings.name == '/admin-rider-gps') {
+          return MaterialPageRoute(
+            builder: (context) => const AdminRiderGpsScreen(),
+          );
+        }
+        if (settings.name == '/admin-vendor-payouts') {
+          return MaterialPageRoute(
+            builder: (context) => const AdminVendorPayoutsScreen(),
+          );
+        }
+        if (settings.name == '/admin-stripe-events') {
+          return MaterialPageRoute(
+            builder: (context) => const AdminStripeEventsScreen(),
+          );
+        }
+        if (settings.name == '/admin-saved-cards') {
+          return MaterialPageRoute(
+            builder: (context) => const AdminSavedCardsScreen(),
+          );
+        }
+        if (settings.name == '/admin-ledger') {
+          return MaterialPageRoute(
+            builder: (context) => const AdminLedgerScreen(),
+          );
+        }
+        if (settings.name == '/admin-reconciliation') {
+          return MaterialPageRoute(
+            builder: (context) => const AdminReconciliationScreen(),
+          );
+        }
+        if (settings.name == '/admin-export') {
+          return MaterialPageRoute(
+            builder: (context) => const AdminExportScreen(),
           );
         }
         // #57: Return a proper 404 page instead of null

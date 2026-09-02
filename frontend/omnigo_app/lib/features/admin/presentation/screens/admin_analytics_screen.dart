@@ -96,6 +96,7 @@ class _AdminAnalyticsScreenState extends State<AdminAnalyticsScreen> {
                   // Tab content
                   if (_selectedTab == 0) _buildOrderTrackingList(),
                   if (_selectedTab == 1) _buildPaymentHistoryList(),
+                  if (_selectedTab == 2) _buildHeatmapsSection(),
                 ],
               ),
             ),
@@ -201,7 +202,7 @@ class _AdminAnalyticsScreenState extends State<AdminAnalyticsScreen> {
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Center(
-                child: Text('Order Tracking', style: TextStyle(
+                child: Text('Orders', style: TextStyle(
                   color: _selectedTab == 0 ? Colors.white : Colors.black87,
                   fontWeight: FontWeight.bold,
                 )),
@@ -220,8 +221,27 @@ class _AdminAnalyticsScreenState extends State<AdminAnalyticsScreen> {
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Center(
-                child: Text('Payment History', style: TextStyle(
+                child: Text('Payments', style: TextStyle(
                   color: _selectedTab == 1 ? Colors.white : Colors.black87,
+                  fontWeight: FontWeight.bold,
+                )),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: GestureDetector(
+            onTap: () => setState(() => _selectedTab = 2),
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              decoration: BoxDecoration(
+                color: _selectedTab == 2 ? Colors.black87 : Colors.white,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Center(
+                child: Text('Heatmaps', style: TextStyle(
+                  color: _selectedTab == 2 ? Colors.white : Colors.black87,
                   fontWeight: FontWeight.bold,
                 )),
               ),
@@ -551,15 +571,26 @@ class _AdminAnalyticsScreenState extends State<AdminAnalyticsScreen> {
                     ]),
                     _lineageSection('Customer', [
                       _lineageRow('Customer ID', lineage['customer_id']?.toString() ?? ''),
-                      _lineageRow('Customer Name', lineage['customer_name']?.toString() ?? ''),
+                      if (lineage['customer_name']?.toString().isNotEmpty == true)
+                        _lineageRow('Name', lineage['customer_name']?.toString() ?? ''),
+                      if (lineage['customer_phone']?.toString().isNotEmpty == true)
+                        _lineageRow('Phone', lineage['customer_phone']?.toString() ?? ''),
+                      if (((lineage['customer_lat'] as num?)?.toDouble() ?? 0) != 0)
+                        _lineageRow('Delivery Location', '${((lineage['customer_lat'] as num?)?.toDouble() ?? 0).toStringAsFixed(4)}, ${((lineage['customer_lng'] as num?)?.toDouble() ?? 0).toStringAsFixed(4)}'),
                     ]),
-                    _lineageSection('Vendor/Store', [
+                    _lineageSection('Store (Pickup Location)', [
                       _lineageRow('Store ID', lineage['store_id']?.toString() ?? ''),
-                      _lineageRow('Store Name', lineage['store_name']?.toString() ?? ''),
+                      if (lineage['store_name']?.toString().isNotEmpty == true)
+                        _lineageRow('Store Name', lineage['store_name']?.toString() ?? ''),
+                      if (((lineage['store_lat'] as num?)?.toDouble() ?? 0) != 0)
+                        _lineageRow('Store Location', '${((lineage['store_lat'] as num?)?.toDouble() ?? 0).toStringAsFixed(4)}, ${((lineage['store_lng'] as num?)?.toDouble() ?? 0).toStringAsFixed(4)}'),
                     ]),
-                    _lineageSection('Rider/Delivery', [
+                    _lineageSection('Rider (Delivery)', [
                       _lineageRow('Rider ID', lineage['rider_id']?.toString() ?? ''),
-                      _lineageRow('Delivery ID', lineage['delivery_id']?.toString() ?? ''),
+                      if (lineage['rider_name']?.toString().isNotEmpty == true)
+                        _lineageRow('Rider Name', lineage['rider_name']?.toString() ?? ''),
+                      if (lineage['rider_phone']?.toString().isNotEmpty == true)
+                        _lineageRow('Phone', lineage['rider_phone']?.toString() ?? ''),
                       _lineageRow('Delivery Status', lineage['delivery_status']?.toString() ?? ''),
                     ]),
                     if (lineage['items'] != null) ...[
@@ -609,6 +640,94 @@ class _AdminAnalyticsScreenState extends State<AdminAnalyticsScreen> {
           Text(label, style: TextStyle(color: Colors.grey.shade600, fontSize: 12)),
           Flexible(child: Text(value, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500), textAlign: TextAlign.end)),
         ],
+      ),
+    );
+  }
+
+  Widget _buildHeatmapsSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildHeatmapCard(
+          'Delivery Heatmap',
+          'Delivery locations concentration',
+          ApiEndpoints.adminAnalyticsDeliveryHeatmap(days: _selectedDays),
+          Colors.green,
+          Icons.delivery_dining,
+        ),
+        const SizedBox(height: 12),
+        _buildHeatmapCard(
+          'Vendor Heatmap',
+          'Vendor store locations',
+          ApiEndpoints.adminAnalyticsVendorHeatmap(days: _selectedDays),
+          Colors.blue,
+          Icons.store,
+        ),
+        const SizedBox(height: 12),
+        _buildHeatmapCard(
+          'Demand Heatmap',
+          'Order demand concentration',
+          ApiEndpoints.adminDemandHeatmap(),
+          Colors.orange,
+          Icons.trending_up,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildHeatmapCard(String title, String subtitle, String endpoint, Color color, IconData icon) {
+    return Card(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: color.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Icon(icon, color: color, size: 24),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
+                      Text(subtitle, style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Container(
+              height: 150,
+              width: double.infinity,
+              decoration: BoxDecoration(
+                color: Colors.grey[200],
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.map, color: Colors.grey.shade400, size: 40),
+                    const SizedBox(height: 8),
+                    Text('Map View', style: TextStyle(color: Colors.grey.shade600)),
+                    const SizedBox(height: 4),
+                    Text('Google Maps integration', style: TextStyle(color: Colors.grey.shade500, fontSize: 11)),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
