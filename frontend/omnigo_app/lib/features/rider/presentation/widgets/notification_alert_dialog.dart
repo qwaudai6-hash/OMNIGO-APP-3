@@ -32,6 +32,7 @@ class NotificationAlertDialogState extends State<NotificationAlertDialog> {
 
   void _startTimer() {
     _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) { timer.cancel(); return; }
       if (_secondsLeft > 0) {
         setState(() {
           _secondsLeft--;

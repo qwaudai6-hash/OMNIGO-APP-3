@@ -172,31 +172,24 @@ func (h *OrderHandler) GetOrdersByVendor(c *gin.Context) {
 		return
 	}
 
-	orders, err := h.svc.GetOrdersByVendor(c.Request.Context(), vendorID)
-	if err != nil {
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	// MEDIUM-28: bound response size. Full pagination pushdown into the
-	// repository is tracked separately; this slice prevents unbounded
-	// payloads for high-volume vendors today.
+	// BUG-2 FIX: Push pagination and status filter down to SQL level
+	status := c.DefaultQuery("status", "")
 	limit := 100
 	if v, err := strconv.Atoi(c.DefaultQuery("limit", "100")); err == nil && v > 0 && v <= 500 {
 		limit = v
 	}
 	offset := 0
-	if v, err := strconv.Atoi(c.DefaultQuery("offset", "0")); err == nil && v > 0 {
+	if v, err := strconv.Atoi(c.DefaultQuery("offset", "0")); err == nil && v >= 0 {
 		offset = v
 	}
-	if offset > len(orders) {
-		offset = len(orders)
+
+	orders, err := h.svc.GetOrdersByVendor(c.Request.Context(), vendorID, status, limit, offset)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
-	end := offset + limit
-	if end > len(orders) {
-		end = len(orders)
-	}
-	c.JSON(http.StatusOK, orders[offset:end])
+
+	c.JSON(http.StatusOK, orders)
 }
 
 // UpdateOrderStatus HTTP handler for PATCH /orders/:tracking_id/status
@@ -521,7 +514,17 @@ func (h *OrderHandler) GetVendorMyOrders(c *gin.Context) {
 		return
 	}
 
-	orders, err := h.svc.GetOrdersByVendor(c.Request.Context(), callerID)
+	status := c.DefaultQuery("status", "")
+	limit := 100
+	if v, err := strconv.Atoi(c.DefaultQuery("limit", "100")); err == nil && v > 0 && v <= 500 {
+		limit = v
+	}
+	offset := 0
+	if v, err := strconv.Atoi(c.DefaultQuery("offset", "0")); err == nil && v >= 0 {
+		offset = v
+	}
+
+	orders, err := h.svc.GetOrdersByVendor(c.Request.Context(), callerID, status, limit, offset)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

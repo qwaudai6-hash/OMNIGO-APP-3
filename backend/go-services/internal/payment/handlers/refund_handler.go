@@ -153,9 +153,17 @@ func (h *RefundHandler) executeRefund(ctx context.Context, req RefundRequest) (g
 		}
 	}
 
-	// Update order status to refunded via order repo.
-	if err := h.orderRepo.UpdateOrderStatus(ctx, req.OrderID, "refunded"); err != nil {
-		return gin.H{"error": "refund recorded but order status update failed: " + err.Error()}, http.StatusInternalServerError, err
+	// Update order status to refunded via ORDER SERVICE (not repo directly).
+	// The service layer handles escrow cancellation (CancelForOrder) and
+	// COD debt cleanup, which the repo layer does not.
+	if h.orderSvc != nil {
+		if err := h.orderSvc.UpdateOrderStatus(ctx, req.OrderID, "refunded"); err != nil {
+			return gin.H{"error": "refund recorded but order status update failed: " + err.Error()}, http.StatusInternalServerError, err
+		}
+	} else {
+		if err := h.orderRepo.UpdateOrderStatus(ctx, req.OrderID, "refunded"); err != nil {
+			return gin.H{"error": "refund recorded but order status update failed: " + err.Error()}, http.StatusInternalServerError, err
+		}
 	}
 
 	// Notify dependent services (notification, SMS, email) of the refund.

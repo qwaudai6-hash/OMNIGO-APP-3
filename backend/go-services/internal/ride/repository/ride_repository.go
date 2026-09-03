@@ -64,13 +64,14 @@ func (r *RideRepository) GetRideByTrackingID(ctx context.Context, trackingID str
 		&ride.CreatedAt, &ride.UpdatedAt,
 	)
 
+	if err != nil {
+		return nil, err
+	}
+
 	if riderID != nil {
 		ride.RiderTrackID = *riderID
 	}
 
-	if err != nil {
-		return nil, err
-	}
 	return &ride, nil
 }
 
@@ -129,6 +130,7 @@ func (r *RideRepository) UpdateRideStatus(ctx context.Context, trackingID, rider
 		          (status = 'accepted'    AND $4::text IN ('in_progress', 'cancelled'))
 		       OR (status = 'in_progress' AND $4::text IN ('completed',  'cancelled'))
 		     ))
+		     OR ($4::text = 'cancelled' AND customer_tracking_id = $3 AND status IN ('requested', 'accepted'))
 		  )
 	`
 	tag, err := r.writer.Exec(ctx, query, newStatus, trackingID, riderTrackID, newStatus)
@@ -174,7 +176,7 @@ func (r *RideRepository) SaveBid(ctx context.Context, bid *models.RideBid) error
 		label string
 		query string
 	}{
-		{bid.RideTrackID, "ride", "SELECT 1 FROM rides WHERE tracking_id = $1"},
+		{bid.RideTrackID, "ride", "SELECT 1 FROM rides WHERE tracking_id = $1 AND status = 'requested'"},
 		{bid.RiderTrackID, "user", "SELECT 1 FROM users WHERE tracking_id = $1"},
 	}
 	for _, c := range checks {
@@ -233,6 +235,17 @@ func (r *RideRepository) AcceptBid(ctx context.Context, rideTrackID string, bidI
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+
+	// Lock the ride row to prevent concurrent accepts
+	var rideStatus string
+	lockQuery := `SELECT status FROM rides WHERE tracking_id = $1 FOR UPDATE`
+	err = tx.QueryRow(ctx, lockQuery, rideTrackID).Scan(&rideStatus)
+	if err != nil {
+		return nil, fmt.Errorf("ride not found: %w", err)
+	}
+	if rideStatus != "requested" {
+		return nil, ErrRideAlreadyAccepted
+	}
 
 	// Update the chosen bid
 	var bid models.RideBid

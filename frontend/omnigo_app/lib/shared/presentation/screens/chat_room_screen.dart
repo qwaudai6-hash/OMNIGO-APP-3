@@ -41,6 +41,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     super.initState();
     _fetchHistory();
     _markRead();
+    _markDelivered();
     // Subscribe to incoming WS messages — only repaint if it's our
     // thread.
     _msgSub = ChatService.instance.incoming.listen((msg) {
@@ -55,6 +56,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       });
       _scrollToBottom();
       _markRead();
+      _markDelivered();
     });
     _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       if (mounted) _fetchHistory();
@@ -95,6 +97,12 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     } catch (_) {}
   }
 
+  Future<void> _markDelivered() async {
+    try {
+      await ChatService.instance.markDelivered(widget.orderId);
+    } catch (_) {}
+  }
+
   Future<void> _send() async {
     final text = _inputController.text.trim();
     if (text.isEmpty || _isSending) return;
@@ -117,8 +125,15 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       _scrollToBottom();
     } catch (e) {
       if (!mounted) return;
+      final errStr = e.toString().toLowerCase();
+      String message = 'Failed to send message.';
+      if (errStr.contains('timeout') || errStr.contains('network')) {
+        message = 'Network error. Message not sent.';
+      } else if (errStr.contains('401') || errStr.contains('unauthorized')) {
+        message = 'Session expired. Please login again.';
+      }
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Send failed: $e')),
+        SnackBar(content: Text(message), backgroundColor: Colors.red),
       );
     } finally {
       if (mounted) setState(() => _isSending = false);
@@ -259,17 +274,37 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
               ),
             ),
             const SizedBox(height: 4),
-            Text(
-              _formatTime(m.createdAt),
-              style: TextStyle(
-                fontSize: 10,
-                color: isMine ? Colors.black54 : Colors.grey.shade600,
-              ),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  _formatTime(m.createdAt),
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: isMine ? Colors.black54 : Colors.grey.shade600,
+                  ),
+                ),
+                if (isMine) ...[
+                  const SizedBox(width: 4),
+                  _statusIcon(m),
+                ],
+              ],
             ),
           ],
         ),
       ),
     );
+  }
+
+  /// M1: Blue tick status icon — single tick, double grey, double blue.
+  Widget _statusIcon(ChatMessage m) {
+    if (m.readAt != null) {
+      return const Icon(Icons.done_all, size: 14, color: Colors.blue);
+    } else if (m.deliveredAt != null) {
+      return const Icon(Icons.done_all, size: 14, color: Colors.grey);
+    } else {
+      return const Icon(Icons.done, size: 14, color: Colors.grey);
+    }
   }
 
   Widget _buildComposer() {

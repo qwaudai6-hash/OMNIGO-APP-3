@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/omnigo/backend/internal/ledger"
 	"github.com/omnigo/backend/internal/payment/payfast"
 	sharedAuth "github.com/omnigo/backend/internal/shared/auth"
@@ -33,6 +34,7 @@ type WalletHandler struct {
 	kafka          *messaging.KafkaClient
 	redis          redis.UniversalClient
 	memStore       sync.Map
+	db             *pgxpool.Pool // FIX H8: needed for outbox event creation
 }
 
 // OrderStatusUpdater is the small surface order-service exposes to wallet callbacks.
@@ -75,6 +77,13 @@ func (h *WalletHandler) WithKafka(k *messaging.KafkaClient) *WalletHandler {
 // callback can be bound to the exact customer + amount that initiated it.
 func (h *WalletHandler) WithRedis(r redis.UniversalClient) *WalletHandler {
 	h.redis = r
+	return h
+}
+
+// WithDB attaches the database pool for creating settlement outbox events
+// when wallet callbacks arrive (FIX H8).
+func (h *WalletHandler) WithDB(db *pgxpool.Pool) *WalletHandler {
+	h.db = db
 	return h
 }
 
@@ -363,13 +372,11 @@ func (h *WalletHandler) emitPaymentCompleted(ctx context.Context, orderID, txnID
 // processWalletCallback updates the order and emits a Kafka event when a verified
 // wallet callback arrives.
 //
-// IMPORTANT: This function NO LONGER credits the rider wallet directly.
-// The old code passed order.TotalAmount as rider earning with 0 commission,
-// which gave the rider 100% of the order value and zero revenue to the platform.
-//
-// Payment splits are now handled exclusively by the Payment Orchestrator service
-// (port 9006) via its Stripe/PayFast split handlers. This callback only marks
-// the order as paid and emits an event for downstream processing.
+// FIX H8: Creates a payment_transactions record and outbox event so the
+// SettlementWorker performs the proper 3-way ledger split
+// (admin_commission + vendor_escrow + delivery_escrow). Previously, wallet
+// callback orders were marked paid but never split — vendors and riders
+// never got paid on JazzCash/EasyPaisa wallet orders.
 func (h *WalletHandler) processWalletCallback(ctx context.Context, cb *service.WalletCallback) error {
 	if h.orderSvc == nil {
 		return fmt.Errorf("order service not configured")
@@ -379,19 +386,40 @@ func (h *WalletHandler) processWalletCallback(ctx context.Context, cb *service.W
 		return fmt.Errorf("failed to mark order paid: %w", err)
 	}
 
-	h.emitPaymentCompleted(ctx, cb.OrderID, cb.TransactionID, cb.Gateway, cb.AmountCents)
+	// FIX H8: Create payment transaction + outbox event for SettlementWorker.
+	if h.db != nil {
+		// Derive amount from cents (the callback provides amount_cents).
+		amountPKR := float64(cb.AmountCents) / 100.0
 
-	// DEPRECATED: Rider wallet credit is now handled by the Payment Orchestrator.
-	// The old code at this location passed order.TotalAmount (the entire order value)
-	// as rider earning with 0 commission, resulting in:
-	// - Rider getting 100% of order value
-	// - Platform getting 0% revenue
-	// - No payment split, no escrow, no ledger entry
-	//
-	// The Payment Orchestrator (port 9006) handles all splits via:
-	// - StripeSplitHandler for card payments
-	// - PayFastSplitHandler for PayFast payments
-	// - CODHandler for cash on delivery
+		// Insert payment transaction (idempotent via ON CONFLICT).
+		_, err := h.db.Exec(ctx, `
+			INSERT INTO payment_transactions (id, order_tracking_id, gateway, gateway_txn_id, amount, currency, status, kind, idempotency_key, created_at, updated_at)
+			VALUES (gen_random_uuid(), $1, $2, $3, $4, 'PKR', 'settlement_pending', 'payment', $5, NOW(), NOW())
+			ON CONFLICT (idempotency_key) DO NOTHING
+		`, cb.OrderID, cb.Gateway, cb.TransactionID, amountPKR, fmt.Sprintf("wallet:%s", cb.TransactionID))
+		if err != nil {
+			log.Printf("[WalletCallback] Warning: failed to create payment transaction for order %s: %v", cb.OrderID, err)
+			// Non-fatal: order is already marked paid. Settlement may need manual trigger.
+		}
+
+		// Create outbox event for SettlementWorker (idempotent via ON CONFLICT).
+		eventPayload, _ := json.Marshal(map[string]interface{}{
+			"order_id":       cb.OrderID,
+			"gateway":        cb.Gateway,
+			"gateway_txn_id": cb.TransactionID,
+			"amount":         amountPKR,
+		})
+		_, err = h.db.Exec(ctx, `
+			INSERT INTO outbox_events (id, topic, key, payload, status, created_at, updated_at)
+			VALUES (gen_random_uuid(), 'payment_settlement', $1, $2, 'PENDING', NOW(), NOW())
+			ON CONFLICT (idempotency_key) DO NOTHING
+		`, cb.OrderID, eventPayload, fmt.Sprintf("wallet_settle:%s", cb.OrderID))
+		if err != nil {
+			log.Printf("[WalletCallback] Warning: failed to create outbox event for order %s: %v", cb.OrderID, err)
+		}
+	}
+
+	h.emitPaymentCompleted(ctx, cb.OrderID, cb.TransactionID, cb.Gateway, cb.AmountCents)
 
 	return nil
 }

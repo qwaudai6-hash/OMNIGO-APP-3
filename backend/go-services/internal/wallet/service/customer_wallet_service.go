@@ -73,9 +73,33 @@ func (s *CustomerWalletService) GetWallet(ctx context.Context, customerTrackingI
 }
 
 // CreditFunds adds funds to a customer wallet (e.g. via Refund or Top-up).
+//
+// FIX C5: Ledger transfer now happens BEFORE wallet commit. If the ledger
+// transfer fails, the wallet transaction is rolled back. If the ledger
+// succeeds but the wallet commit fails, the ledger has the entry (safe:
+// money is recorded but customer can't spend — admin can reconcile).
 func (s *CustomerWalletService) CreditFunds(ctx context.Context, customerTrackingID, referenceID string, amount float64, sourceAccount ledger.Account, description string) error {
 	if amount <= 0 {
 		return fmt.Errorf("credit amount must be positive")
+	}
+
+	// FIX C5: Do the ledger transfer FIRST (before wallet commit).
+	// This ensures the ledger is always updated if the wallet is updated.
+	// If the ledger fails, we don't update the wallet at all.
+	if s.ledger != nil {
+		idempotencyKey := fmt.Sprintf("customer_credit:%s:%s", referenceID, customerTrackingID)
+		if _, err := s.ledger.Transfer(ctx, ledger.TransferRequest{
+			DebitAccount:   sourceAccount,
+			CreditAccount:  ledger.AccountCustomerWallet,
+			Amount:         amount,
+			Currency:       "PKR",
+			ReferenceType:  "customer_wallet_credit",
+			ReferenceID:    referenceID,
+			Description:    description,
+			IdempotencyKey: idempotencyKey,
+		}); err != nil {
+			return fmt.Errorf("ledger transfer failed, wallet not credited: %w", err)
+		}
 	}
 
 	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{})
@@ -101,23 +125,6 @@ func (s *CustomerWalletService) CreditFunds(ctx context.Context, customerTrackin
 		return fmt.Errorf("wallet commit failed: %w", err)
 	}
 
-	// Double-entry ledger transfer: Source -> Customer Wallet
-	if s.ledger != nil {
-		idempotencyKey := fmt.Sprintf("customer_credit:%s:%s", referenceID, customerTrackingID)
-		if _, err := s.ledger.Transfer(ctx, ledger.TransferRequest{
-			DebitAccount:   sourceAccount,
-			CreditAccount:  ledger.AccountCustomerWallet,
-			Amount:         amount,
-			Currency:       "PKR",
-			ReferenceType:  "customer_wallet_credit",
-			ReferenceID:    referenceID,
-			Description:    description,
-			IdempotencyKey: idempotencyKey,
-		}); err != nil {
-			fmt.Printf("[CustomerWallet] Warning: ledger transfer failed for reference %s: %v\n", referenceID, err)
-		}
-	}
-
 	messaging.EmitFinancialNotification(
 		ctx, customerTrackingID, "customer", "wallet_credited",
 		"Wallet Credited", fmt.Sprintf("Aapke Omnigo Wallet mein Rs. %.2f credit ho gaye hain.", amount),
@@ -128,9 +135,31 @@ func (s *CustomerWalletService) CreditFunds(ctx context.Context, customerTrackin
 }
 
 // DeductForPurchase subtracts money from wallet for a purchase.
+//
+// FIX C5: Ledger transfer now happens BEFORE wallet commit. If the ledger
+// transfer fails, the wallet deduction is rolled back. This prevents the
+// scenario where the wallet is debited but the ledger never records it.
 func (s *CustomerWalletService) DeductForPurchase(ctx context.Context, customerTrackingID, orderTrackingID string, amount float64) error {
 	if amount <= 0 {
 		return fmt.Errorf("deduct amount must be positive")
+	}
+
+	// FIX C5: Do the ledger transfer FIRST (before wallet deduction).
+	// If the ledger fails, the wallet is not deducted.
+	if s.ledger != nil {
+		idempotencyKey := fmt.Sprintf("customer_purchase:%s:%s", orderTrackingID, customerTrackingID)
+		if _, err := s.ledger.Transfer(ctx, ledger.TransferRequest{
+			DebitAccount:   ledger.AccountCustomerWallet,
+			CreditAccount:  ledger.AccountCentralEscrow,
+			Amount:         amount,
+			Currency:       "PKR",
+			ReferenceType:  "wallet_purchase",
+			ReferenceID:    orderTrackingID,
+			Description:    fmt.Sprintf("Customer purchase for order %s", orderTrackingID),
+			IdempotencyKey: idempotencyKey,
+		}); err != nil {
+			return fmt.Errorf("ledger transfer failed, wallet not deducted: %w", err)
+		}
 	}
 
 	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{})
@@ -163,23 +192,6 @@ func (s *CustomerWalletService) DeductForPurchase(ctx context.Context, customerT
 
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("wallet commit failed: %w", err)
-	}
-
-	// Double-entry ledger transfer: Customer Wallet -> Central Escrow
-	if s.ledger != nil {
-		idempotencyKey := fmt.Sprintf("customer_purchase:%s:%s", orderTrackingID, customerTrackingID)
-		if _, err := s.ledger.Transfer(ctx, ledger.TransferRequest{
-			DebitAccount:   ledger.AccountCustomerWallet,
-			CreditAccount:  ledger.AccountCentralEscrow,
-			Amount:         amount,
-			Currency:       "PKR",
-			ReferenceType:  "wallet_purchase",
-			ReferenceID:    orderTrackingID,
-			Description:    fmt.Sprintf("Customer purchase for order %s", orderTrackingID),
-			IdempotencyKey: idempotencyKey,
-		}); err != nil {
-			fmt.Printf("[CustomerWallet] Warning: ledger transfer failed for order %s: %v\n", orderTrackingID, err)
-		}
 	}
 
 	return nil

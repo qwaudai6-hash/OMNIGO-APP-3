@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 	middleware "github.com/omnigo/backend/internal/shared/middleware"
 	"github.com/omnigo/backend/internal/order/repository"
 	"github.com/omnigo/backend/internal/payment/service"
@@ -18,6 +19,7 @@ type CheckoutHandler struct {
 	walletSvc    *walletService.CustomerWalletService
 	orderRepo    *repository.OrderRepository
 	escrowSvc    escrowService
+	db           *pgxpool.Pool // FIX C4: needed for settlement outbox events
 }
 
 type escrowService interface {
@@ -31,6 +33,13 @@ func NewCheckoutHandler(orchestrator *service.Orchestrator, walletSvc *walletSer
 		orderRepo:    orderRepo,
 		escrowSvc:    escrowSvc,
 	}
+}
+
+// WithDB attaches the database pool for creating settlement outbox events
+// when wallet payments succeed (FIX C4).
+func (h *CheckoutHandler) WithDB(db *pgxpool.Pool) *CheckoutHandler {
+	h.db = db
+	return h
 }
 
 type CheckoutReq struct {
@@ -110,6 +119,22 @@ func (h *CheckoutHandler) CreateCheckout(c *gin.Context) {
 			if order != nil {
 				_ = h.escrowSvc.CreateHold(c.Request.Context(), req.OrderID, order.VendorTrackID, req.Amount)
 			}
+		}
+		// FIX C4: Create payment transaction + outbox event for SettlementWorker
+		// to perform the proper 3-way ledger split (admin + vendor + delivery).
+		if h.db != nil {
+			txnID := fmt.Sprintf("wallet_%d", time.Now().UnixNano())
+			_, _ = h.db.Exec(c.Request.Context(), `
+				INSERT INTO payment_transactions (id, order_tracking_id, gateway, gateway_txn_id, amount, currency, status, kind, idempotency_key, created_at, updated_at)
+				VALUES (gen_random_uuid(), $1, 'wallet', $2, $3, 'PKR', 'settlement_pending', 'payment', $4, NOW(), NOW())
+				ON CONFLICT (idempotency_key) DO NOTHING
+			`, req.OrderID, txnID, req.Amount, fmt.Sprintf("wallet:%s", req.OrderID))
+			eventPayload := fmt.Sprintf(`{"order_id":"%s","gateway":"wallet","gateway_txn_id":"%s","amount":%.2f}`, req.OrderID, txnID, req.Amount)
+			_, _ = h.db.Exec(c.Request.Context(), `
+				INSERT INTO outbox_events (id, topic, key, payload, status, created_at, updated_at)
+				VALUES (gen_random_uuid(), 'payment_settlement', $1, $2, 'PENDING', NOW(), NOW())
+				ON CONFLICT (idempotency_key) DO NOTHING
+			`, req.OrderID, eventPayload, fmt.Sprintf("wallet_settle:%s", req.OrderID))
 		}
 		// Return immediate success
 		c.JSON(http.StatusOK, service.CheckoutResponse{

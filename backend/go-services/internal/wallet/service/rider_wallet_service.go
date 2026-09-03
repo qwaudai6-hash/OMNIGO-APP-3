@@ -182,3 +182,21 @@ func (s *RiderWalletService) ClearCODCollection(ctx context.Context, riderTracki
 	}
 	return nil
 }
+
+// DecrementCODCollection decrements cash_in_hand when a COD debt is settled.
+// FIX H1: Ensures cash_in_hand accurately reflects actual cash on hand.
+func (s *RiderWalletService) DecrementCODCollection(ctx context.Context, riderTrackingID string, amount float64) error {
+	if amount <= 0 {
+		return nil
+	}
+	query := `
+		UPDATE rider_wallet
+		SET cash_in_hand = GREATEST(0, cash_in_hand - $1), updated_at = NOW()
+		WHERE rider_tracking_id = $2
+	`
+	_, err := s.db.Exec(ctx, query, amount, riderTrackingID)
+	if err != nil {
+		return fmt.Errorf("failed to decrement COD collection: %w", err)
+	}
+	return nil
+}

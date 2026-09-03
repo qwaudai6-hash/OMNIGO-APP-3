@@ -145,6 +145,12 @@ func New(opts Options) *Gateway {
 	add("/api/v1/reviews", "PRODUCT_SERVICE_URL", "http://127.0.0.1:9001")
 	add("/api/v1/vendor/products", "PRODUCT_SERVICE_URL", "http://127.0.0.1:9001")
 	add("/uploads", "PRODUCT_SERVICE_URL", "http://127.0.0.1:9001")
+	// BUG-IMAGE-1 FIX: Delivery proof photos and KYC docs are stored in
+	// separate services but were unreachable through the gateway because
+	// /uploads only proxied to product-service. Now each sub-path routes
+	// to the correct upstream.
+	add("/uploads/proofs", "DELIVERY_SERVICE_URL", "http://127.0.0.1:9003")
+	add("/uploads/kyc", "AUTH_SERVICE_URL", "http://127.0.0.1:9000")
 	add("/api/v1/stores", "VENDOR_STORE_SERVICE_URL", "http://127.0.0.1:9002")
 	add("/api/v1/vendor", "VENDOR_STORE_SERVICE_URL", "http://127.0.0.1:9002")
 	add("/api/v1/geocoding", "VENDOR_STORE_SERVICE_URL", "http://127.0.0.1:9002")

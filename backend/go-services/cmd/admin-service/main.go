@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"github.com/getsentry/sentry-go/gin"
 	"log"
 	"net/http"
@@ -389,6 +390,85 @@ func main() {
 			c.JSON(http.StatusOK, gin.H{"users": users, "total": total, "limit": limit, "offset": offset})
 		})
 
+		// ── M12: Dedicated riders endpoint with rider-specific fields ─────────────────
+		adminRoutes.GET("/riders", func(c *gin.Context) {
+			limit, offset := parsePagination(c)
+			ctx := c.Request.Context()
+			search := c.Query("search")
+			status := c.Query("status") // active, inactive, pending
+
+			var total int
+			countQ := `SELECT COUNT(*) FROM users WHERE role = 'rider'`
+			args := []interface{}{}
+			argIdx := 1
+			if search != "" {
+				countQ += fmt.Sprintf(` AND (full_name ILIKE $%d OR email ILIKE $%d OR phone ILIKE $%d OR tracking_id ILIKE $%d)`, argIdx, argIdx, argIdx, argIdx)
+				args = append(args, "%"+search+"%")
+				argIdx++
+			}
+			if status == "active" {
+				countQ += ` AND is_verified = true`
+			} else if status == "inactive" {
+				countQ += ` AND is_verified = false`
+			}
+			_ = dbPool.QueryRow(ctx, countQ, args...).Scan(&total)
+
+			queryQ := `
+				SELECT u.tracking_id, u.full_name, u.email, COALESCE(u.phone,''),
+				       u.is_verified, COALESCE(u.created_at::text,''),
+				       COALESCE(rw.balance, 0) AS wallet_balance,
+				       COALESCE(rw.cash_in_hand, 0) AS cash_in_hand,
+				       COALESCE((SELECT COUNT(*) FROM deliveries d WHERE d.rider_tracking_id = u.tracking_id AND d.status = 'completed'), 0) AS completed_deliveries,
+				       COALESCE((SELECT COUNT(*) FROM deliveries d WHERE d.rider_tracking_id = u.tracking_id AND d.status IN ('broadcasting','accepted','picked_up','in_transit')), 0) AS active_deliveries
+				FROM users u
+				LEFT JOIN rider_wallet rw ON rw.rider_tracking_id = u.tracking_id
+				WHERE u.role = 'rider'`
+			queryArgs := []interface{}{}
+			qIdx := 1
+			if search != "" {
+				queryQ += fmt.Sprintf(` AND (u.full_name ILIKE $%d OR u.email ILIKE $%d OR u.phone ILIKE $%d OR u.tracking_id ILIKE $%d)`, qIdx, qIdx, qIdx, qIdx)
+				queryArgs = append(queryArgs, "%"+search+"%")
+				qIdx++
+			}
+			if status == "active" {
+				queryQ += ` AND u.is_verified = true`
+			} else if status == "inactive" {
+				queryQ += ` AND u.is_verified = false`
+			}
+			queryQ += fmt.Sprintf(` ORDER BY u.created_at DESC LIMIT $%d OFFSET $%d`, qIdx, qIdx+1)
+			queryArgs = append(queryArgs, limit, offset)
+
+			rows, err := dbPool.Query(ctx, queryQ, queryArgs...)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			defer rows.Close()
+
+			type RiderInfo struct {
+				TrackingID         string  `json:"tracking_id"`
+				FullName           string  `json:"full_name"`
+				Email              string  `json:"email"`
+				Phone              string  `json:"phone"`
+				IsVerified         bool    `json:"is_verified"`
+				CreatedAt          string  `json:"created_at"`
+				WalletBalance      float64 `json:"wallet_balance"`
+				CashInHand         float64 `json:"cash_in_hand"`
+				CompletedDeliveries int    `json:"completed_deliveries"`
+				ActiveDeliveries   int     `json:"active_deliveries"`
+			}
+			var riders []RiderInfo
+			for rows.Next() {
+				var r RiderInfo
+				if err := rows.Scan(&r.TrackingID, &r.FullName, &r.Email, &r.Phone, &r.IsVerified, &r.CreatedAt,
+					&r.WalletBalance, &r.CashInHand, &r.CompletedDeliveries, &r.ActiveDeliveries); err != nil {
+					continue
+				}
+				riders = append(riders, r)
+			}
+			c.JSON(http.StatusOK, gin.H{"riders": riders, "total": total, "limit": limit, "offset": offset})
+		})
+
 		adminRoutes.GET("/orders", func(c *gin.Context) {
 			status := c.Query("status")
 			limit, offset := parsePagination(c)
@@ -682,6 +762,80 @@ func main() {
 			c.JSON(http.StatusOK, gin.H{"events": events, "total": total})
 		})
 
+		// ── M3: PayFast IPN Events (audit trail, mirrors stripe_events) ─────────────────
+		adminRoutes.GET("/finance/payfast-events", func(c *gin.Context) {
+			limit, offset := parsePagination(c)
+			ctx := c.Request.Context()
+
+			filterType := c.Query("type")
+			filterStatus := c.Query("status")
+
+			var total int
+			countQ := `SELECT COUNT(*) FROM payfast_events WHERE 1=1`
+			args := []interface{}{}
+			argIdx := 1
+			if filterType != "" {
+				countQ += fmt.Sprintf(` AND event_type = $%d`, argIdx)
+				args = append(args, filterType)
+				argIdx++
+			}
+			if filterStatus != "" {
+				countQ += fmt.Sprintf(` AND status_code = $%d`, argIdx)
+				args = append(args, filterStatus)
+				argIdx++
+			}
+			_ = dbPool.QueryRow(ctx, countQ, args...).Scan(&total)
+
+			queryQ := `
+				SELECT id::text, basket_id, COALESCE(gateway_txn_id,''), event_type, COALESCE(status_code,''),
+					   COALESCE(amount::text,'0'), order_id,
+					   processed_at IS NULL as is_unprocessed, process_error, received_at
+				FROM payfast_events WHERE 1=1`
+			queryArgs := []interface{}{}
+			qIdx := 1
+			if filterType != "" {
+				queryQ += fmt.Sprintf(` AND event_type = $%d`, qIdx)
+				queryArgs = append(queryArgs, filterType)
+				qIdx++
+			}
+			if filterStatus != "" {
+				queryQ += fmt.Sprintf(` AND status_code = $%d`, qIdx)
+				queryArgs = append(queryArgs, filterStatus)
+				qIdx++
+			}
+			queryQ += fmt.Sprintf(` ORDER BY received_at DESC LIMIT $%d OFFSET $%d`, qIdx, qIdx+1)
+			queryArgs = append(queryArgs, limit, offset)
+
+			rows, err := dbPool.Query(ctx, queryQ, queryArgs...)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			defer rows.Close()
+
+			type PayFastEvent struct {
+				ID            string  `json:"id"`
+				BasketID      string  `json:"basket_id"`
+				GatewayTxnID  string  `json:"gateway_txn_id"`
+				EventType     string  `json:"event_type"`
+				StatusCode    string  `json:"status_code"`
+				Amount        string  `json:"amount"`
+				OrderID       *string `json:"order_id"`
+				IsUnprocessed bool    `json:"is_unprocessed"`
+				ProcessError  *string `json:"process_error"`
+				ReceivedAt    string  `json:"received_at"`
+			}
+			var events []PayFastEvent
+			for rows.Next() {
+				var e PayFastEvent
+				if err := rows.Scan(&e.ID, &e.BasketID, &e.GatewayTxnID, &e.EventType, &e.StatusCode, &e.Amount, &e.OrderID, &e.IsUnprocessed, &e.ProcessError, &e.ReceivedAt); err != nil {
+					continue
+				}
+				events = append(events, e)
+			}
+			c.JSON(http.StatusOK, gin.H{"events": events, "total": total})
+		})
+
 		// ── Customer Saved Cards (fraud audit) ─────────────────
 		adminRoutes.GET("/payments/cards/:customer_id", func(c *gin.Context) {
 			customerID := c.Param("customer_id")
@@ -815,35 +969,197 @@ func main() {
 		})
 
 		// ── Rider COD Collection Status ─────────────────────────
+		// ── M7: COD Collection with date filtering + daily summary ─────────────────
 		adminRoutes.GET("/rider/cod-collection", func(c *gin.Context) {
 			ctx := c.Request.Context()
-			rows, err := dbPool.Query(ctx, `
-				SELECT rw.rider_tracking_id, COALESCE(rw.cash_in_hand, 0), COALESCE(u.full_name, 'Unknown'),
-					   (SELECT COUNT(*) FROM cod_debts cd WHERE cd.rider_tracking_id = rw.rider_tracking_id AND cd.status = 'pending')
-				FROM rider_wallet rw
-				LEFT JOIN users u ON u.tracking_id = rw.rider_tracking_id
-				WHERE rw.cash_in_hand > 0
-				ORDER BY rw.cash_in_hand DESC`)
+			from := c.Query("from")
+			to := c.Query("to")
+			riderID := c.Query("rider_id")
+
+			// Default: last 7 days
+			if from == "" {
+				from = time.Now().AddDate(0, 0, -7).Format("2006-01-02")
+			}
+			if to == "" {
+				to = time.Now().AddDate(0, 0, 1).Format("2006-01-02")
+			}
+
+			// Per-rider COD summary with date range
+			query := `
+				SELECT cd.rider_tracking_id, COALESCE(u.full_name, 'Unknown'),
+				       COUNT(*) AS orders_collected,
+				       SUM(cd.amount_owed) AS total_cod_collected,
+				       SUM(CASE WHEN cd.status = 'settled' THEN cd.amount_owed ELSE 0 END) AS settled_amount,
+				       SUM(CASE WHEN cd.status = 'pending' THEN cd.amount_owed ELSE 0 END) AS pending_amount,
+				       COALESCE(rw.cash_in_hand, 0) AS cash_in_hand
+				FROM cod_debts cd
+				LEFT JOIN users u ON u.tracking_id = cd.rider_tracking_id
+				LEFT JOIN rider_wallet rw ON rw.rider_tracking_id = cd.rider_tracking_id
+				WHERE cd.created_at >= $1::DATE AND cd.created_at < $2::DATE`
+			args := []interface{}{from, to}
+			argIdx := 3
+			if riderID != "" {
+				query += fmt.Sprintf(` AND cd.rider_tracking_id = $%d`, argIdx)
+				args = append(args, riderID)
+				argIdx++
+			}
+			query += ` GROUP BY cd.rider_tracking_id, u.full_name, rw.cash_in_hand ORDER BY total_cod_collected DESC`
+
+			rows, err := dbPool.Query(ctx, query, args...)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
 			}
 			defer rows.Close()
-			type RiderCOD struct {
-				RiderID    string  `json:"rider_tracking_id"`
-				Name       string  `json:"name"`
-				CashInHand float64 `json:"cash_in_hand"`
-				PendingDebts int   `json:"pending_debts"`
+
+			type RiderCODSummary struct {
+				RiderID          string  `json:"rider_tracking_id"`
+				Name             string  `json:"name"`
+				OrdersCollected  int     `json:"orders_collected"`
+				TotalCOD         float64 `json:"total_cod_collected"`
+				SettledAmount    float64 `json:"settled_amount"`
+				PendingAmount    float64 `json:"pending_amount"`
+				CashInHand       float64 `json:"cash_in_hand"`
 			}
-			var riders []RiderCOD
+			var riders []RiderCODSummary
 			for rows.Next() {
-				var r RiderCOD
-				if err := rows.Scan(&r.RiderID, &r.CashInHand, &r.Name, &r.PendingDebts); err != nil {
+				var r RiderCODSummary
+				if err := rows.Scan(&r.RiderID, &r.Name, &r.OrdersCollected, &r.TotalCOD, &r.SettledAmount, &r.PendingAmount, &r.CashInHand); err != nil {
 					continue
 				}
 				riders = append(riders, r)
 			}
-			c.JSON(http.StatusOK, gin.H{"pending": riders, "count": len(riders)})
+
+			// Platform-wide totals for the period
+			var grossCOD, collected, outstanding float64
+			var totalOrders int
+			_ = dbPool.QueryRow(ctx, `
+				SELECT COALESCE(SUM(amount_owed),0), COALESCE(SUM(CASE WHEN status='settled' THEN amount_owed ELSE 0 END),0),
+				       COALESCE(SUM(CASE WHEN status='pending' THEN amount_owed ELSE 0 END),0), COUNT(*)
+				FROM cod_debts WHERE created_at >= $1::DATE AND created_at < $2::DATE`, from, to,
+			).Scan(&grossCOD, &collected, &outstanding, &totalOrders)
+
+			settlementRate := 0.0
+			if totalOrders > 0 {
+				settlementRate = float64(int(collected/grossCOD*1000+0.5)) / 10
+			}
+
+			c.JSON(http.StatusOK, gin.H{
+				"riders":          riders,
+				"summary": gin.H{
+					"from":            from,
+					"to":              to,
+					"gross_cod":       grossCOD,
+					"collected":       collected,
+					"outstanding":     outstanding,
+					"total_orders":    totalOrders,
+					"settlement_rate": settlementRate,
+				},
+			})
+		})
+
+		// ── M7: COD Daily Breakdown ─────────────────────────────────
+		adminRoutes.GET("/cod/daily", func(c *gin.Context) {
+			ctx := c.Request.Context()
+			from := c.Query("from")
+			to := c.Query("to")
+			if from == "" {
+				from = time.Now().AddDate(0, 0, -7).Format("2006-01-02")
+			}
+			if to == "" {
+				to = time.Now().AddDate(0, 0, 1).Format("2006-01-02")
+			}
+
+			rows, err := dbPool.Query(ctx, `
+				SELECT DATE(created_at) AS day, COUNT(*) AS total_orders,
+				       SUM(amount_owed) AS gross_cod,
+				       SUM(CASE WHEN status='settled' THEN amount_owed ELSE 0 END) AS collected,
+				       SUM(CASE WHEN status='pending' THEN amount_owed ELSE 0 END) AS outstanding
+				FROM cod_debts
+				WHERE created_at >= $1::DATE AND created_at < $2::DATE
+				GROUP BY DATE(created_at) ORDER BY day DESC`, from, to)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			defer rows.Close()
+
+			type DailyCOD struct {
+				Day        string  `json:"day"`
+				TotalOrders int    `json:"total_orders"`
+				GrossCOD   float64 `json:"gross_cod"`
+				Collected  float64 `json:"collected"`
+				Outstanding float64 `json:"outstanding"`
+			}
+			var days []DailyCOD
+			for rows.Next() {
+				var d DailyCOD
+				if err := rows.Scan(&d.Day, &d.TotalOrders, &d.GrossCOD, &d.Collected, &d.Outstanding); err != nil {
+					continue
+				}
+				days = append(days, d)
+			}
+			c.JSON(http.StatusOK, gin.H{"daily": days, "from": from, "to": to})
+		})
+
+		// ── M11: Rider Analytics (per-rider performance) ─────────────────
+		adminRoutes.GET("/analytics/riders", func(c *gin.Context) {
+			ctx := c.Request.Context()
+			days, _ := strconv.Atoi(c.DefaultQuery("days", "30"))
+			if days <= 0 || days > 365 {
+				days = 30
+			}
+			limit, offset := parsePagination(c)
+
+			var total int
+			_ = dbPool.QueryRow(ctx, `SELECT COUNT(DISTINCT rider_tracking_id) FROM deliveries WHERE created_at > NOW() - INTERVAL '1 day' * $1 AND rider_tracking_id IS NOT NULL`, days).Scan(&total)
+
+			rows, err := dbPool.Query(ctx, `
+				SELECT d.rider_tracking_id,
+				       COALESCE(u.full_name, 'Unknown'),
+				       COUNT(*) AS total_deliveries,
+				       COUNT(*) FILTER (WHERE d.status = 'completed') AS completed,
+				       COUNT(*) FILTER (WHERE d.status = 'cancelled') AS cancelled,
+				       ROUND(100.0 * COUNT(*) FILTER (WHERE d.status = 'completed') / NULLIF(COUNT(*), 0), 1) AS completion_rate,
+				       COALESCE(rw.balance, 0) AS wallet_balance,
+				       COALESCE(rw.cash_in_hand, 0) AS cash_in_hand,
+				       COALESCE((SELECT COUNT(*) FROM cod_debts cd WHERE cd.rider_tracking_id = d.rider_tracking_id AND cd.status = 'pending'), 0) AS pending_debts,
+				       COALESCE((SELECT AVG(r.rating) FROM ratings r WHERE r.rater_id = d.rider_tracking_id), 0) AS avg_rating
+				FROM deliveries d
+				LEFT JOIN users u ON u.tracking_id = d.rider_tracking_id
+				LEFT JOIN rider_wallet rw ON rw.rider_tracking_id = d.rider_tracking_id
+				WHERE d.created_at > NOW() - INTERVAL '1 day' * $1 AND d.rider_tracking_id IS NOT NULL
+				GROUP BY d.rider_tracking_id, u.full_name, rw.balance, rw.cash_in_hand
+				ORDER BY completed DESC
+				LIMIT $2 OFFSET $3`, days, limit, offset)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			defer rows.Close()
+
+			type RiderAnalytics struct {
+				TrackingID      string  `json:"tracking_id"`
+				Name            string  `json:"name"`
+				TotalDeliveries int     `json:"total_deliveries"`
+				Completed       int     `json:"completed"`
+				Cancelled       int     `json:"cancelled"`
+				CompletionRate  float64 `json:"completion_rate"`
+				WalletBalance   float64 `json:"wallet_balance"`
+				CashInHand      float64 `json:"cash_in_hand"`
+				PendingDebts    int     `json:"pending_debts"`
+				AvgRating       float64 `json:"avg_rating"`
+			}
+			var riders []RiderAnalytics
+			for rows.Next() {
+				var r RiderAnalytics
+				if err := rows.Scan(&r.TrackingID, &r.Name, &r.TotalDeliveries, &r.Completed, &r.Cancelled,
+					&r.CompletionRate, &r.WalletBalance, &r.CashInHand, &r.PendingDebts, &r.AvgRating); err != nil {
+					continue
+				}
+				riders = append(riders, r)
+			}
+			c.JSON(http.StatusOK, gin.H{"riders": riders, "total": total, "period_days": days})
 		})
 
 		// ── Analytics Overview ─────────────────────────────────

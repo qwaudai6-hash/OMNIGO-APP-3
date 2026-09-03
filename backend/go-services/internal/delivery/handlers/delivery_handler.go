@@ -274,7 +274,8 @@ func (h *DeliveryHandler) DisputeGig(c *gin.Context) {
 
 	callerID := middleware.GetTrackingID(c)
 	if callerID == "" {
-		callerID = c.GetHeader("X-User-Tracking-ID")
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
 	}
 
 	err := h.svc.DisputeGig(c.Request.Context(), &req, callerID)

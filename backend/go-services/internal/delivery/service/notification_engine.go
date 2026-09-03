@@ -64,7 +64,7 @@ func (s *DeliveryService) AttemptToLockGig(ctx context.Context, trackingID strin
 	lockKey := fmt.Sprintf("gig:lock:%s", trackingID)
 
 	// SETNX: Set only if it does not exist. Atomic operation.
-	acquired, err := s.redis.SetNX(ctx, lockKey, riderTrackID, 12*time.Hour).Result()
+	acquired, err := s.redis.SetNX(ctx, lockKey, riderTrackID, 60*time.Second).Result()
 	if err != nil {
 		return false, err
 	}

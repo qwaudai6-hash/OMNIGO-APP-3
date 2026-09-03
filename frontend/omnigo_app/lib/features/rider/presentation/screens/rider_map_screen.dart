@@ -73,11 +73,6 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
   // OSRM-backed polyline drawn on the MapLibre map. The flutter_mapbox_navigation
   // package was removed because it is no longer in pubspec.yaml; the Go
   // map-service can be wired in later for native turn-by-turn routing.
-  // ignore: unused_field
-  final bool _isNavigating = false;
-  // ignore: unused_field
-  final bool _routeBuilt = false;
-  // ignore: unused_field
   final WebSocketClient _wsClient = sl<WebSocketClient>();
   final ApiClient _apiClient = sl<ApiClient>();
   MapLibreMapController? _mapController;
@@ -579,7 +574,9 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
             );
           }
         }
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('WS gig topic parse error: $e');
+      }
     });
   }
 
@@ -660,22 +657,33 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
   }
 
   Future<String?> _uploadPhoto(File imageFile) async {
-    try {
-      final uri = Uri.parse('${ApiEndpoints.deliveryBase}/delivery/gig/upload-proof');
-      final request = http.MultipartRequest('POST', uri);
-      final token = SessionRegistry.instance.token ?? '';
-      if (token.isNotEmpty) {
-        request.headers['Authorization'] = 'Bearer $token';
+    const maxRetries = 2;
+    for (int attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        final uri = Uri.parse(ApiEndpoints.deliveryGigUploadProof());
+        final request = http.MultipartRequest('POST', uri);
+        final token = SessionRegistry.instance.token ?? '';
+        if (token.isNotEmpty) {
+          request.headers['Authorization'] = 'Bearer $token';
+        }
+        request.files.add(await http.MultipartFile.fromPath('photo', imageFile.path));
+        final streamedResponse = await request.send().timeout(const Duration(seconds: 30));
+        final response = await http.Response.fromStream(streamedResponse);
+        if (response.statusCode == 200) {
+          final data = jsonDecode(response.body) as Map<String, dynamic>;
+          return data['photo_url'] as String?;
+        }
+        if (response.statusCode >= 500 && attempt < maxRetries) {
+          await Future<void>.delayed(Duration(seconds: attempt + 1));
+          continue;
+        }
+        debugPrint('Upload failed (${response.statusCode}): ${response.body}');
+      } catch (e) {
+        debugPrint('Upload error (attempt ${attempt + 1}): $e');
+        if (attempt < maxRetries) {
+          await Future<void>.delayed(Duration(seconds: attempt + 1));
+        }
       }
-      request.files.add(await http.MultipartFile.fromPath('photo', imageFile.path));
-      final streamedResponse = await request.send().timeout(const Duration(seconds: 30));
-      final response = await http.Response.fromStream(streamedResponse);
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
-        return data['photo_url'] as String?;
-      }
-    } catch (e) {
-      debugPrint('Upload error: $e');
     }
     return null;
   }
@@ -848,6 +856,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
   }
 
   Future<void> _sendRideStatusUpdate(String nextStatus) async {
+    if (_broadcastedGig == null) return;
     final rideId = _broadcastedGig!['tracking_id'] as String?;
     if (rideId == null) return;
 
@@ -886,7 +895,18 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to update ride: $e')));
+        final errStr = e.toString().toLowerCase();
+        String message = 'Failed to update ride status.';
+        if (errStr.contains('timeout') || errStr.contains('network')) {
+          message = 'Network timeout. Check your connection and try again.';
+        } else if (errStr.contains('409') || errStr.contains('conflict')) {
+          message = 'Status already updated by another device.';
+        } else if (errStr.contains('401') || errStr.contains('unauthorized')) {
+          message = 'Session expired. Please login again.';
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(message), backgroundColor: Colors.red),
+        );
       }
     }
   }
@@ -961,6 +981,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
         );
       }
     } catch (e) {
+      final errStr = e.toString().toLowerCase();
       final payload = {
         "status": nextStatus,
         "otp_code": otp,
@@ -968,8 +989,14 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
       };
       await OfflineGigStorage.queuePendingStatusSync(payload);
       if (mounted) {
+        String msg = 'Offline mode: Status saved locally and will sync when online.';
+        if (errStr.contains('otp') || errStr.contains('invalid')) {
+          msg = 'Invalid OTP. Please check the code and try again.';
+        } else if (errStr.contains('413') || errStr.contains('payload')) {
+          msg = 'Photo too large. Please try a smaller image.';
+        }
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Offline mode: Status saved locally and will sync when online.')),
+          SnackBar(content: Text(msg)),
         );
       }
     }
@@ -978,13 +1005,14 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
   Future<void> _acceptRide() async {
     if (_broadcastedGig == null) return;
     final rideId = _broadcastedGig!['tracking_id'] as String?;
+    if (rideId == null) return;
 
     setState(() {
       _activeGigStatus = 'Accepting...';
     });
 
     try {
-      await _apiClient.post(ApiEndpoints.rideAccept(rideId ?? ''), {
+      await _apiClient.post(ApiEndpoints.rideAccept(rideId), {
         "rider_tracking_id": widget.trackingId,
       });
 
@@ -992,7 +1020,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
       
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('active_customer_id', (_broadcastedGig!['customer_tracking_id'] as String?) ?? '');
-      await prefs.setString('active_order_id', rideId ?? '');
+      await prefs.setString('active_order_id', rideId);
 
       if (mounted) {
         setState(() {
@@ -1377,9 +1405,11 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                             );
                           }
                         }
-                        setState(() {
-                          _isOnline = val;
-                        });
+                        if (mounted) {
+                          setState(() {
+                            _isOnline = val;
+                          });
+                        }
                       },
                     ),
                   ],
@@ -1438,8 +1468,8 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      'Store: ${_broadcastedGig!['vendor_store_tracking_id']}\nOrder: ${_broadcastedGig!['order_tracking_id']}\nEarning: Rs. ${_broadcastedGig!['rider_earning']}'
-                      '${_broadcastedGig!['delivery_fee'] != null ? '\nDelivery Fee: Rs. ${_broadcastedGig!['delivery_fee']}' : ''}',
+                      'Store: ${_broadcastedGig?['vendor_store_tracking_id'] ?? 'N/A'}\nOrder: ${_broadcastedGig?['order_tracking_id'] ?? 'N/A'}\nEarning: Rs. ${_broadcastedGig?['rider_earning'] ?? 'N/A'}'
+                      '${_broadcastedGig?['delivery_fee'] != null ? '\nDelivery Fee: Rs. ${_broadcastedGig?['delivery_fee']}' : ''}',
                       style: const TextStyle(color: Colors.grey, fontSize: 14),
                     ),
                     if (_routeEtaMinutes != null) ...[
@@ -1492,12 +1522,12 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                   const SizedBox(height: 8),
                   if (_activeGigStatus.startsWith('ride_')) ...[
                     Text(
-                      'Vehicle: ${_broadcastedGig!['vehicle_type'] ?? 'Standard'}\nFare: PKR ${_broadcastedGig!['fare_amount']}',
+                      'Vehicle: ${_broadcastedGig?['vehicle_type'] ?? 'Standard'}\nFare: PKR ${_broadcastedGig?['fare_amount'] ?? 'N/A'}',
                       style: const TextStyle(color: Colors.grey, fontSize: 13),
                     ),
                   ] else ...[
                     Text(
-                      'Store: ${_broadcastedGig!['vendor_store_tracking_id']}\nOrder: ${_broadcastedGig!['order_tracking_id']}',
+                      'Store: ${_broadcastedGig?['vendor_store_tracking_id'] ?? 'N/A'}\nOrder: ${_broadcastedGig?['order_tracking_id'] ?? 'N/A'}',
                       style: const TextStyle(color: Colors.grey, fontSize: 13),
                     ),
                   ],
@@ -1508,7 +1538,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                         final messenger = ScaffoldMessenger.of(context);
                         final Uri launchUri = Uri(
                           scheme: 'tel',
-                          path: (_broadcastedGig!['customer_phone'] as String?) ?? '',
+                          path: (_broadcastedGig!['customer_phone']?.toString()) ?? '',
                         );
                         if (await canLaunchUrl(launchUri)) {
                           await launchUrl(launchUri);
@@ -1577,7 +1607,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
     try {
       final request = http.MultipartRequest(
         'PUT',
-        Uri.parse('${ApiEndpoints.authBase}/auth/kyc'),
+        Uri.parse(ApiEndpoints.authKycUpload()),
       );
       final token = SessionRegistry.instance.token ?? widget.trackingId;
       request.headers['Authorization'] = 'Bearer $token';
@@ -2003,7 +2033,6 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                       if (_isOnline) {
                         await _telemetryService.goOffline();
                       }
-                      _wsClient.disconnect();
                       await SessionRegistry.instance.logout();
                       if (mounted) {
                         unawaited(navigator.pushNamedAndRemoveUntil('/', (route) => false));
@@ -2068,7 +2097,8 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                             const Text('Available Balance', style: TextStyle(color: AppTheme.blackAccent, fontSize: 12)),
                             const SizedBox(height: 6),
                             Text(
-                              'PKR ${((_walletSummary?['available_balance'] as num?) ?? 0).toStringAsFixed(2)}',
+                              // FIX M5: Use 'balance' key (matches API response)
+                              'PKR ${((_walletSummary?['balance'] as num?) ?? 0).toStringAsFixed(2)}',
                               style: const TextStyle(color: AppTheme.blackAccent, fontSize: 18, fontWeight: FontWeight.bold),
                             ),
                           ],
@@ -2134,7 +2164,8 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
       } else {
         if (mounted) setState(() => _isLoadingCodDebts = false);
       }
-    } catch (_) {
+    } catch (e) {
+      debugPrint('Failed to fetch COD debts: $e');
       if (mounted) setState(() => _isLoadingCodDebts = false);
     }
   }
@@ -2153,7 +2184,9 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
           _walletSummary = data;
         });
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('Failed to fetch wallet summary: $e');
+    }
   }
 
   void _showVerificationPromptDialog() {
@@ -2194,7 +2227,6 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
 
   void _showPayDebtDialog(String codDebtId, double amount) {
     String selectedGateway = 'jazzcash';
-    final pinController = TextEditingController();
     bool isSubmitting = false;
 
     showDialog<void>(
@@ -2279,25 +2311,9 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                   ],
                 ),
                 const SizedBox(height: 20),
-                const Text('Enter 4-Digit Mobile Wallet MPIN:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.black87)),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: pinController,
-                  keyboardType: TextInputType.number,
-                  maxLength: 4,
-                  obscureText: true,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, letterSpacing: 12),
-                  decoration: InputDecoration(
-                    hintText: '••••',
-                    counterText: '',
-                    filled: true,
-                    fillColor: Colors.grey.shade100,
-                    contentPadding: const EdgeInsets.symmetric(vertical: 12),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: Colors.grey.shade300)),
-                    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppTheme.blackAccent, width: 2)),
-                  ),
-                ),
+                // FIX C8: Removed MPIN input — it was collected but never sent to the API.
+                // The settlement is handled server-side via JazzCash/EasyPaisa webhook callback.
+                // Payment is initiated by launching the deep link returned from codPayNow.
               ],
             ),
           ),
@@ -2310,10 +2326,6 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
               onPressed: isSubmitting ? null : () async {
                 final messenger = ScaffoldMessenger.of(context);
                 final dialogNavigator = Navigator.of(ctx);
-                if (pinController.text.length != 4) {
-                  messenger.showSnackBar(const SnackBar(content: Text('Please enter your complete 4-digit MPIN.')));
-                  return;
-                }
                 setDialogState(() => isSubmitting = true);
                 try {
                   final token = SessionRegistry.instance.token ?? '';
@@ -2331,28 +2343,26 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                   ).timeout(const Duration(seconds: 10));
 
                   if (res.statusCode == 200) {
-                    final settleUrl = Uri.parse('${ApiEndpoints.paymentBase}/cod/settlement');
-                    await http.post(
-                      settleUrl,
-                      headers: {
-                        'Authorization': 'Bearer $token',
-                        'Content-Type': 'application/json',
-                      },
-                      body: jsonEncode({
-                        'cod_debt_id': codDebtId,
-                        'transaction_id': 'TXN-${DateTime.now().millisecondsSinceEpoch}',
-                        'amount': amount,
-                        'status': 'success',
-                        'webhook_event_id': 'EVT-${DateTime.now().millisecondsSinceEpoch}',
-                        'gateway': selectedGateway,
-                      }),
-                    ).timeout(const Duration(seconds: 10));
+                    // FIX C9: Removed client-fabricated settlement call.
+                    // The backend handles settlement via the payment gateway's
+                    // webhook callback. The client should NOT fabricate
+                    // transaction_id or webhook_event_id — these must come
+                    // from the actual payment gateway.
+                    // Decode the response to get the deep link for payment.
+                    final respBody = jsonDecode(res.body) as Map<String, dynamic>;
+                    final deepLink = respBody['deep_link'] as String?;
+                    if (deepLink != null && deepLink.isNotEmpty) {
+                      final uri = Uri.parse(deepLink);
+                      if (await canLaunchUrl(uri)) {
+                        await launchUrl(uri, mode: LaunchMode.externalApplication);
+                      }
+                    }
 
                     if (mounted) {
                       dialogNavigator.pop();
                       messenger.showSnackBar(
                         SnackBar(
-                          content: Text('Settlement Successful! PKR ${amount.toStringAsFixed(2)} deposited via ${selectedGateway.toUpperCase()}.'),
+                          content: Text('Payment initiated via ${selectedGateway.toUpperCase()}. Complete payment in the ${selectedGateway} app.'),
                           backgroundColor: Colors.green,
                         ),
                       );
@@ -2462,9 +2472,9 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
               ...credits.map((c) {
                 final item = c as Map<String, dynamic>;
                 final orderId = item['order_id']?.toString() ?? 'N/A';
-                final net = (item['net_credit'] ?? 0).toDouble();
-                final fee = (item['delivery_fee'] ?? 0).toDouble();
-                final commission = (item['admin_commission'] ?? 0).toDouble();
+                final net = num.tryParse(item['net_credit']?.toString() ?? '0')?.toDouble() ?? 0.0;
+                final fee = num.tryParse(item['delivery_fee']?.toString() ?? '0')?.toDouble() ?? 0.0;
+                final commission = num.tryParse(item['admin_commission']?.toString() ?? '0')?.toDouble() ?? 0.0;
 
                 return Container(
                   margin: const EdgeInsets.only(bottom: 12),

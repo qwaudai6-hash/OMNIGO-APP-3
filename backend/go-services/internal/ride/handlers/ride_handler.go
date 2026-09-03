@@ -252,11 +252,24 @@ func (h *RideHandler) GetBidsForRide(c *gin.Context) {
 		return
 	}
 
+	callerID := middleware.GetTrackingID(c)
 	bids, err := h.svc.GetBidsForRide(c.Request.Context(), trackingID)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+
+	// Verify caller owns the ride
+	ride, err := h.svc.GetRide(c.Request.Context(), trackingID)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "ride not found"})
+		return
+	}
+	if ride.CustomerTrackID != callerID {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "FORBIDDEN_OWNERSHIP"})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{"bids": bids})
 }
 

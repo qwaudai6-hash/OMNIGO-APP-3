@@ -18,8 +18,9 @@ import (
 // Pattern: Production e-commerce systems always have abandoned cart/order cleanup.
 // Reference: hopstack.io + commercetools.com order lifecycle best practices.
 type OrderTimeoutWorker struct {
-	db      *pgxpool.Pool
-	timeout time.Duration
+	db         *pgxpool.Pool
+	timeout    time.Duration
+	escrowSvc  EscrowHolder
 }
 
 // NewOrderTimeoutWorker constructs the worker with a 30-minute default timeout.
@@ -28,6 +29,11 @@ func NewOrderTimeoutWorker(db *pgxpool.Pool) *OrderTimeoutWorker {
 		db:      db,
 		timeout: 30 * time.Minute,
 	}
+}
+
+// SetEscrowService injects the optional escrow service for cancel-time cleanup.
+func (w *OrderTimeoutWorker) SetEscrowService(svc EscrowHolder) {
+	w.escrowSvc = svc
 }
 
 // Start begins the cleanup loop. Call cancel() to stop.
@@ -105,7 +111,7 @@ func (w *OrderTimeoutWorker) cancelStaleOrders(ctx context.Context) {
 	}
 }
 
-// cancelOrder performs the full cancellation: order + delivery gig + stock release.
+// cancelOrder performs the full cancellation: order + delivery gig + stock release + escrow + COD debts.
 func (w *OrderTimeoutWorker) cancelOrder(ctx context.Context, orderID string) error {
 	tx, err := w.db.Begin(ctx)
 	if err != nil {
@@ -133,15 +139,31 @@ func (w *OrderTimeoutWorker) cancelOrder(ctx context.Context, orderID string) er
 		orderID,
 	)
 
-	// 3. Delete any Redis gig offer/lock keys (best-effort, handled by caller if needed)
-	// Note: Redis cleanup is done asynchronously by the delivery service
+	// 3. Cancel any COD debts for this order
+	_, _ = tx.Exec(ctx,
+		`UPDATE cod_debts SET status = 'cancelled', updated_at = NOW()
+		 WHERE order_tracking_id = $1 AND status != 'cancelled'`,
+		orderID,
+	)
 
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+
+	// 4. Cancel escrow hold (outside DB tx — escrow service uses its own connection)
+	if w.escrowSvc != nil {
+		if err := w.escrowSvc.CancelForOrder(ctx, orderID); err != nil {
+			log.Printf("[OrderTimeout] WARNING: escrow cancel failed for order %s: %v (order was cancelled in DB)", orderID, err)
+		}
+	}
+
+	return nil
 }
 
 // StartOrderTimeoutWorker is a convenience method on OrderService that
 // creates and starts the timeout worker using the service's own DB pool.
 func (s *OrderService) StartOrderTimeoutWorker(ctx context.Context) {
 	w := NewOrderTimeoutWorker(s.repo.DB())
+	w.SetEscrowService(s.escrowService)
 	w.Start(ctx)
 }

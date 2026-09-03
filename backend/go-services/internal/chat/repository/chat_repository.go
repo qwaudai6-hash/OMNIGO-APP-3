@@ -11,8 +11,12 @@ import (
 
 type ChatRepository interface {
 	SaveMessage(ctx context.Context, msg *models.ChatMessage) error
-	GetMessagesByOrder(ctx context.Context, orderID string, limit int, offset int) ([]models.ChatMessage, error)
+	GetMessagesByOrder(ctx context.Context, orderID, senderID string, limit int, offset int) ([]models.ChatMessage, error)
 	MarkAsRead(ctx context.Context, orderID string, receiverID string) error
+	MarkAsDelivered(ctx context.Context, orderID string, receiverID string) error
+	EnqueueForDelivery(ctx context.Context, messageID, orderID, receiverID string) error
+	MarkDeliverySuccess(ctx context.Context, messageID string) error
+	GetPendingDeliveries(ctx context.Context, limit int) ([]PendingDelivery, error)
 	// ListConversations returns the most recent message per order thread
 	// for a user, ordered by created_at DESC. Used by the Flutter chat
 	// list screen to show all active conversations.
@@ -20,6 +24,15 @@ type ChatRepository interface {
 	// CountUnread returns the number of unread messages addressed to the
 	// given user. Used to render the bottom-nav badge.
 	CountUnread(ctx context.Context, userID string) (int, error)
+	// IsPartyToOrder checks if the user is a participant in the order
+	// (customer, vendor, or rider).
+	IsPartyToOrder(ctx context.Context, orderID, userID string) (bool, error)
+}
+
+type PendingDelivery struct {
+	MessageID  string
+	OrderID    string
+	ReceiverID string
 }
 
 type chatRepository struct {
@@ -31,12 +44,33 @@ func NewChatRepository(db *pgxpool.Pool) ChatRepository {
 }
 
 func (r *chatRepository) SaveMessage(ctx context.Context, msg *models.ChatMessage) error {
+	// Validate order exists
 	ok, err := database.Exists(ctx, r.db, "SELECT 1 FROM orders WHERE order_tracking_id = $1", msg.OrderID)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		return fmt.Errorf("order %s does not exist", msg.OrderID)
+	}
+
+	// Validate sender is a party to the order (customer, vendor, or rider)
+	party, err := r.IsPartyToOrder(ctx, msg.OrderID, msg.SenderID)
+	if err != nil {
+		return err
+	}
+	if !party {
+		return fmt.Errorf("user %s is not a party to order %s", msg.SenderID, msg.OrderID)
+	}
+
+	// Validate receiver is also a party to the order — prevents spam to non-participants
+	if msg.ReceiverID != "" {
+		receiverParty, err := r.IsPartyToOrder(ctx, msg.OrderID, msg.ReceiverID)
+		if err != nil {
+			return err
+		}
+		if !receiverParty {
+			return fmt.Errorf("receiver %s is not a party to order %s", msg.ReceiverID, msg.OrderID)
+		}
 	}
 
 	query := `
@@ -47,9 +81,34 @@ func (r *chatRepository) SaveMessage(ctx context.Context, msg *models.ChatMessag
 	return r.db.QueryRow(ctx, query, msg.ID, msg.OrderID, msg.SenderID, msg.ReceiverID, msg.Content, msg.IsRead).Scan(&msg.CreatedAt, &msg.UpdatedAt)
 }
 
-func (r *chatRepository) GetMessagesByOrder(ctx context.Context, orderID string, limit int, offset int) ([]models.ChatMessage, error) {
+// IsPartyToOrder checks if the user is a participant in the order.
+func (r *chatRepository) IsPartyToOrder(ctx context.Context, orderID, userID string) (bool, error) {
 	query := `
-		SELECT id, order_id, sender_id, receiver_id, content, is_read, created_at, updated_at
+		SELECT EXISTS(
+			SELECT 1 FROM orders
+			WHERE order_tracking_id = $1
+			  AND (customer_tracking_id = $2
+			       OR vendor_tracking_id = $2
+			       OR rider_tracking_id = $2)
+		)
+	`
+	var exists bool
+	err := r.db.QueryRow(ctx, query, orderID, userID).Scan(&exists)
+	return exists, err
+}
+
+func (r *chatRepository) GetMessagesByOrder(ctx context.Context, orderID, senderID string, limit int, offset int) ([]models.ChatMessage, error) {
+	// Validate sender is a party to the order
+	party, err := r.IsPartyToOrder(ctx, orderID, senderID)
+	if err != nil {
+		return nil, err
+	}
+	if !party {
+		return nil, fmt.Errorf("user %s is not a party to order %s", senderID, orderID)
+	}
+
+	query := `
+		SELECT id, order_id, sender_id, receiver_id, content, is_read, delivered_at, read_at, created_at, updated_at
 		FROM chat_messages
 		WHERE order_id = $1 AND deleted_at IS NULL
 		ORDER BY created_at ASC
@@ -64,7 +123,7 @@ func (r *chatRepository) GetMessagesByOrder(ctx context.Context, orderID string,
 	var messages []models.ChatMessage
 	for rows.Next() {
 		var msg models.ChatMessage
-		if err := rows.Scan(&msg.ID, &msg.OrderID, &msg.SenderID, &msg.ReceiverID, &msg.Content, &msg.IsRead, &msg.CreatedAt, &msg.UpdatedAt); err != nil {
+		if err := rows.Scan(&msg.ID, &msg.OrderID, &msg.SenderID, &msg.ReceiverID, &msg.Content, &msg.IsRead, &msg.DeliveredAt, &msg.ReadAt, &msg.CreatedAt, &msg.UpdatedAt); err != nil {
 			return nil, err
 		}
 		messages = append(messages, msg)
@@ -75,11 +134,57 @@ func (r *chatRepository) GetMessagesByOrder(ctx context.Context, orderID string,
 func (r *chatRepository) MarkAsRead(ctx context.Context, orderID string, receiverID string) error {
 	query := `
 		UPDATE chat_messages
-		SET is_read = true, updated_at = NOW()
+		SET is_read = true, read_at = NOW(), updated_at = NOW()
 		WHERE order_id = $1 AND receiver_id = $2 AND is_read = false
 	`
 	_, err := r.db.Exec(ctx, query, orderID, receiverID)
 	return err
+}
+
+func (r *chatRepository) MarkAsDelivered(ctx context.Context, orderID string, receiverID string) error {
+	query := `
+		UPDATE chat_messages
+		SET delivered_at = NOW(), updated_at = NOW()
+		WHERE order_id = $1 AND receiver_id = $2 AND delivered_at IS NULL
+	`
+	_, err := r.db.Exec(ctx, query, orderID, receiverID)
+	return err
+}
+
+func (r *chatRepository) EnqueueForDelivery(ctx context.Context, messageID, orderID, receiverID string) error {
+	_, err := r.db.Exec(ctx,
+		`INSERT INTO chat_delivery_outbox (message_id, order_id, receiver_id, status, next_retry_at)
+		 VALUES ($1, $2, $3, 'pending', NOW())
+		 ON CONFLICT (message_id) DO NOTHING`,
+		messageID, orderID, receiverID)
+	return err
+}
+
+func (r *chatRepository) MarkDeliverySuccess(ctx context.Context, messageID string) error {
+	_, err := r.db.Exec(ctx,
+		`UPDATE chat_delivery_outbox SET status = 'delivered' WHERE message_id = $1`, messageID)
+	return err
+}
+
+func (r *chatRepository) GetPendingDeliveries(ctx context.Context, limit int) ([]PendingDelivery, error) {
+	rows, err := r.db.Query(ctx,
+		`SELECT message_id, order_id, receiver_id FROM chat_delivery_outbox
+		 WHERE status = 'pending' AND next_retry_at <= NOW() AND attempts < 5
+		 ORDER BY created_at ASC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []PendingDelivery
+	for rows.Next() {
+		var d PendingDelivery
+		if err := rows.Scan(&d.MessageID, &d.OrderID, &d.ReceiverID); err != nil {
+			continue
+		}
+		out = append(out, d)
+	}
+	return out, nil
 }
 
 // ListConversations returns the most recent message per order thread for

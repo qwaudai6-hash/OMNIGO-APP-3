@@ -18,6 +18,8 @@ class ChatMessage {
       receiverId: (json['receiver_id'] ?? '').toString(),
       content: (json['content'] ?? '').toString(),
       isRead: (json['is_read'] ?? json['isRead'] ?? false) as bool,
+      deliveredAt: DateTime.tryParse((json['delivered_at'] ?? '').toString()),
+      readAt: DateTime.tryParse((json['read_at'] ?? '').toString()),
       createdAt: DateTime.tryParse((json['created_at'] ?? '').toString()) ?? DateTime.now(),
       updatedAt: DateTime.tryParse((json['updated_at'] ?? '').toString()),
     );
@@ -29,6 +31,8 @@ class ChatMessage {
     required this.receiverId,
     required this.content,
     required this.isRead,
+    this.deliveredAt,
+    this.readAt,
     required this.createdAt,
     this.updatedAt,
   });
@@ -39,6 +43,8 @@ class ChatMessage {
   final String receiverId;
   final String content;
   final bool isRead;
+  final DateTime? deliveredAt;
+  final DateTime? readAt;
   final DateTime createdAt;
   final DateTime? updatedAt;
 
@@ -160,16 +166,56 @@ class ChatService {
 
   String get myUserId => _myUserId ?? '';
 
+  /// Helper: HTTP GET with retry on 5xx errors.
+  Future<http.Response> _getWithRetry(Uri url, String token, {int maxRetries = 2}) async {
+    for (int attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        final resp = await http.get(url, headers: {'Authorization': 'Bearer $token'})
+            .timeout(const Duration(seconds: 8));
+        if (resp.statusCode < 500 || attempt == maxRetries) return resp;
+      } catch (e) {
+        if (attempt == maxRetries) rethrow;
+      }
+      await Future<void>.delayed(Duration(seconds: attempt + 1));
+    }
+    throw Exception('unreachable');
+  }
+
+  /// Helper: HTTP POST with retry on 5xx errors.
+  Future<http.Response> _postWithRetry(Uri url, String token, {required Map<String, dynamic> body, int maxRetries = 2}) async {
+    for (int attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        final resp = await http.post(url, headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        }, body: jsonEncode(body))
+            .timeout(const Duration(seconds: 8));
+        if (resp.statusCode < 500 || attempt == maxRetries) return resp;
+      } catch (e) {
+        if (attempt == maxRetries) rethrow;
+      }
+      await Future<void>.delayed(Duration(seconds: attempt + 1));
+    }
+    throw Exception('unreachable');
+  }
+
   /// Fetch the chat list (conversations) for the current user.
   Future<List<ChatConversation>> fetchConversations({int page = 1}) async {
     final prefs = await SharedPreferences.getInstance();
     final token = prefs.getString('jwt_token') ?? '';
-    final resp = await http.get(
+    final resp = await _getWithRetry(
       Uri.parse('${ApiEndpoints.chatConversations}?page=$page'),
-      headers: {'Authorization': 'Bearer $token'},
-    ).timeout(const Duration(seconds: 8));
+      token,
+    );
     if (resp.statusCode != 200) {
-      throw Exception('Failed to fetch conversations: ${resp.statusCode}');
+      final Map<String, dynamic> body;
+      try {
+        body = jsonDecode(resp.body) as Map<String, dynamic>;
+      } catch (_) {
+        throw Exception('Server error (${resp.statusCode})');
+      }
+      final errMsg = body['error'] as String? ?? 'Failed to load conversations (${resp.statusCode})';
+      throw Exception(errMsg);
     }
     final data = jsonDecode(resp.body) as Map<String, dynamic>;
     final list = (data['data'] as List<dynamic>? ?? const [])
@@ -185,12 +231,19 @@ class ChatService {
   Future<List<ChatMessage>> fetchMessages(String orderId, {int page = 1}) async {
     final prefs = await SharedPreferences.getInstance();
     final token = prefs.getString('jwt_token') ?? '';
-    final resp = await http.get(
+    final resp = await _getWithRetry(
       Uri.parse('${ApiEndpoints.chatMessages}?order_id=$orderId&page=$page'),
-      headers: {'Authorization': 'Bearer $token'},
-    ).timeout(const Duration(seconds: 8));
+      token,
+    );
     if (resp.statusCode != 200) {
-      throw Exception('Failed to fetch messages: ${resp.statusCode}');
+      final Map<String, dynamic> body;
+      try {
+        body = jsonDecode(resp.body) as Map<String, dynamic>;
+      } catch (_) {
+        throw Exception('Server error (${resp.statusCode})');
+      }
+      final errMsg = body['error'] as String? ?? 'Failed to load messages (${resp.statusCode})';
+      throw Exception(errMsg);
     }
     final data = jsonDecode(resp.body) as Map<String, dynamic>;
     final list = (data['data'] as List<dynamic>? ?? const [])
@@ -210,20 +263,24 @@ class ChatService {
   }) async {
     final prefs = await SharedPreferences.getInstance();
     final token = prefs.getString('jwt_token') ?? '';
-    final resp = await http.post(
+    final resp = await _postWithRetry(
       Uri.parse(ApiEndpoints.chatMessages),
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer $token',
-      },
-      body: jsonEncode({
+      token,
+      body: {
         'order_id': orderId,
         'receiver_id': receiverId,
         'content': content,
-      }),
-    ).timeout(const Duration(seconds: 8));
+      },
+    );
     if (resp.statusCode != 200) {
-      throw Exception('Failed to send message: ${resp.statusCode}');
+      final Map<String, dynamic> body;
+      try {
+        body = jsonDecode(resp.body) as Map<String, dynamic>;
+      } catch (_) {
+        throw Exception('Server error (${resp.statusCode})');
+      }
+      final errMsg = body['error'] as String? ?? 'Failed to send message (${resp.statusCode})';
+      throw Exception(errMsg);
     }
     final data = jsonDecode(resp.body) as Map<String, dynamic>;
     return ChatMessage.fromJson(data['data'] as Map<String, dynamic>);
@@ -239,6 +296,16 @@ class ChatService {
     ).timeout(const Duration(seconds: 5));
   }
 
+  /// M1: Mark every message in this thread addressed to me as delivered.
+  Future<void> markDelivered(String orderId) async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('jwt_token') ?? '';
+    await http.put(
+      Uri.parse('${ApiEndpoints.chatMessages}/$orderId/delivered'),
+      headers: {'Authorization': 'Bearer $token'},
+    ).timeout(const Duration(seconds: 5));
+  }
+
   /// Cheap poll for the bottom-nav badge. Calls every 15s from the
   /// chat button widget.
   Future<int> fetchUnreadCount() async {
@@ -249,10 +316,14 @@ class ChatService {
       headers: {'Authorization': 'Bearer $token'},
     ).timeout(const Duration(seconds: 5));
     if (resp.statusCode != 200) return 0;
-    final data = jsonDecode(resp.body) as Map<String, dynamic>;
-    final n = (data['unread_count'] ?? 0) as int;
-    _unreadController.add(n);
-    return n;
+    try {
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      final n = (data['unread_count'] ?? 0) as int;
+      _unreadController.add(n);
+      return n;
+    } catch (_) {
+      return 0;
+    }
   }
 
   /// Forward a WS-broadcast message to subscribers. Useful when the chat

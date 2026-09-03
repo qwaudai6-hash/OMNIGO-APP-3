@@ -140,7 +140,7 @@ func main() {
 	commissionCalculator := payment_orchestrator.NewCommissionCalculator(db.Writer)
 
 	customerWalletSvc := walletSvc.NewCustomerWalletService(db.Writer, ledgerSvc)
-	newCheckoutHandler := paymentHandlers.NewCheckoutHandler(paymentOrchestrator, customerWalletSvc, repo, escrowSvc)
+	newCheckoutHandler := paymentHandlers.NewCheckoutHandler(paymentOrchestrator, customerWalletSvc, repo, escrowSvc).WithDB(db.Writer)
 
 	var rdbForWebhook redis.UniversalClient
 	if redisClient != nil {
@@ -201,7 +201,8 @@ func main() {
 		WithCustomerWallet(customerWalletSvc).
 		WithOrderService(svc).
 		WithKafka(kafkaClient).
-		WithRedis(rdbForWallet)
+		WithRedis(rdbForWallet).
+		WithDB(db.Writer) // FIX H8: wallet callback needs DB for outbox events
 	if rdbForWallet == nil {
 		log.Println("Warning: wallet top-up callbacks are DISABLED without redis (pending-load verification unavailable)")
 	}
@@ -226,6 +227,7 @@ func main() {
 	chatGroup.POST("/messages", cH.SendMessage)
 	chatGroup.GET("/messages", cH.GetHistory)
 	chatGroup.PUT("/messages/:orderId/read", cH.MarkRead)
+	chatGroup.PUT("/messages/:orderId/delivered", cH.MarkDelivered)
 	chatGroup.GET("/conversations", cH.ListConversations)
 	chatGroup.GET("/unread", cH.UnreadCount)
 

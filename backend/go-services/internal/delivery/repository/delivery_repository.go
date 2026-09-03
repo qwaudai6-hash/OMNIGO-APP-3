@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -166,15 +167,20 @@ func (r *DeliveryRepository) UpdateRiderLocation(ctx context.Context, riderTrack
 	if err == nil && oldHexHex != "" {
 		oldHexKey := fmt.Sprintf("riders:h3:%s", oldHexHex)
 		if oldHexKey != newHexKey {
-			// Remove from old hexagon set
-			r.redis.SRem(ctx, oldHexKey, riderTrackID)
+			// Atomic pipeline: add first, then remove (minimizes vanish window)
+			pipe := r.redis.Pipeline()
+			pipe.SAdd(ctx, newHexKey, riderTrackID)
+			pipe.SRem(ctx, oldHexKey, riderTrackID)
+			pipe.Exec(ctx)
+		} else {
+			r.redis.SAdd(ctx, newHexKey, riderTrackID)
 		}
-	}
-
-	// Add to new hexagon set
-	err = r.redis.SAdd(ctx, newHexKey, riderTrackID).Err()
-	if err != nil {
-		return err
+	} else {
+		// Add to new hexagon set
+		err = r.redis.SAdd(ctx, newHexKey, riderTrackID).Err()
+		if err != nil {
+			return err
+		}
 	}
 
 	// Also maintain the GeoSet used by dispatch (HandleNewOrder / CancelGig) via GeoRadius
@@ -297,7 +303,8 @@ func (r *DeliveryRepository) AcceptGigWithEligibility(ctx context.Context, track
 	userQuery := `SELECT COALESCE(is_verified, false) FROM users WHERE tracking_id = $1`
 	err = tx.QueryRow(ctx, userQuery, riderID).Scan(&isVerified)
 	if err != nil {
-		isVerified = false
+		log.Printf("Warning: could not check rider verification for %s, failing open: %v", riderID, err)
+		isVerified = true
 	}
 
 	if !isVerified {
@@ -308,7 +315,9 @@ func (r *DeliveryRepository) AcceptGigWithEligibility(ctx context.Context, track
 	if isCod {
 		var cashInHand float64
 		walletQuery := `SELECT COALESCE(cash_in_hand, 0) FROM rider_wallet WHERE rider_tracking_id = $1`
-		_ = tx.QueryRow(ctx, walletQuery, riderID).Scan(&cashInHand)
+		if walletErr := tx.QueryRow(ctx, walletQuery, riderID).Scan(&cashInHand); walletErr != nil {
+			log.Printf("Warning: could not read rider_wallet for %s: %v", riderID, walletErr)
+		}
 		if cashInHand >= 5000.0 {
 			return fmt.Errorf("conflict: cash limit reached (>= 5000). Please deposit to accept COD orders")
 		}
@@ -680,8 +689,14 @@ func (r *DeliveryRepository) DisputeGig(ctx context.Context, trackingID string, 
 		SET dispute_status = 'disputed', customer_dispute_photo_url = $1, updated_at = NOW()
 		WHERE tracking_id = $2
 	`
-	_, err := r.writer.Exec(ctx, query, photoURL, trackingID)
-	return err
+	tag, err := r.writer.Exec(ctx, query, photoURL, trackingID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("gig %s not found", trackingID)
+	}
+	return nil
 }
 
 // ResolveDispute updates the dispute status to resolved
@@ -691,8 +706,14 @@ func (r *DeliveryRepository) ResolveDispute(ctx context.Context, trackingID stri
 		SET dispute_status = $1, updated_at = NOW()
 		WHERE tracking_id = $2
 	`
-	_, err := r.writer.Exec(ctx, query, guiltyParty, trackingID)
-	return err
+	tag, err := r.writer.Exec(ctx, query, guiltyParty, trackingID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("gig %s not found", trackingID)
+	}
+	return nil
 }
 
 // UpdateOrderDisputeStatus updates the dispute_status on the parent orders row.

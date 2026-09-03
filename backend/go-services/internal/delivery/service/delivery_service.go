@@ -149,7 +149,12 @@ func (s *DeliveryService) HandleNewOrder(ctx context.Context, order models.Order
 	// Resolve store pickup coordinates from the stores table
 	pickupLat, pickupLng, err := s.repo.GetStoreCoordinates(ctx, order.VendorStoreTrackID)
 	if err != nil {
-		log.Printf("Dispatch Warning: could not resolve store coordinates for %s: %v", order.VendorStoreTrackID, err)
+		log.Printf("Dispatch Error: could not resolve store coordinates for %s: %v", order.VendorStoreTrackID, err)
+		return
+	}
+	if pickupLat == 0 && pickupLng == 0 {
+		log.Printf("Dispatch Error: store %s has zero coordinates, cannot dispatch", order.VendorStoreTrackID)
+		return
 	}
 
 	otpVal, _ := rand.Int(rand.Reader, big.NewInt(10000))
@@ -285,7 +290,7 @@ func (s *DeliveryService) AcceptGig(ctx context.Context, req *models.AcceptGigRe
 	// Resolve rider's last known H3 hex from the sync-worker's res-5 index with coordinate fallback.
 	var riderHex h3.H3Index
 	if s.redis != nil {
-		lastHexHex, err := s.redis.Get(ctx, fmt.Sprintf("rider:last_h5:%s", req.RiderTrackID)).Result()
+		lastHexHex, err := s.redis.Get(ctx, fmt.Sprintf("rider:last_hex:%s", req.RiderTrackID)).Result()
 		if err == nil && lastHexHex != "" {
 			_, _ = fmt.Sscanf(lastHexHex, "%x", &riderHex)
 		} else {
@@ -452,22 +457,14 @@ func (s *DeliveryService) UpdateGigStatus(ctx context.Context, trackingID string
 				); err != nil {
 					log.Printf("Warning: COD release after delivery failed for order %s: %v", gig.OrderTrackingID, err)
 				}
-
-				// CLAIM-2/3 FIX: credit the vendor wallet + write the paid_out
-				// escrow audit row + auto-create the rider's cod_debts row so
-				// the Pay Now flow has a bill to settle.
-				if err := s.repo.SettleCODVendorAndDebt(
-					ctx,
-					gig.OrderTrackingID,
-					gig.VendorStoreTrackID,
-					assignedRider,
-					gig.OrderTotal,
-					gig.AdminCommission,
-					gig.RiderEarning,
-				); err != nil {
-					log.Printf("CRITICAL: COD vendor settlement/debt recording failed for order %s: %v", gig.OrderTrackingID, err)
-				}
 			}
+
+			// FIX C1+C2: Removed SettleCODVendorAndDebt call.
+			// The ReleaseAfterDelivery above already splits central_escrow →
+			// admin_revenue + vendor_locked_escrow via the ledger. The PayoutWorker
+			// will release the vendor portion after the 48-hour escrow hold.
+			// The old SettleCODVendorAndDebt was double-crediting the vendor
+			// (direct wallet credit + PayoutWorker credit from escrow hold).
 		}
 	}
 
@@ -657,9 +654,9 @@ func (s *DeliveryService) EstimateRide(ctx context.Context, req *models.RideEsti
 	}
 
 	vehicleConfigs := []models.FareBreakdown{
-		{VehicleType: "bike", BaseFare: 50, PerKmRate: 15, Currency: "PKR"},
-		{VehicleType: "rickshaw", BaseFare: 80, PerKmRate: 20, Currency: "PKR"},
-		{VehicleType: "car", BaseFare: 150, PerKmRate: 35, Currency: "PKR"},
+		{VehicleType: "bike", BaseFare: envFloat("FARE_BIKE_BASE", 50), PerKmRate: envFloat("FARE_BIKE_PER_KM", 15), Currency: "PKR"},
+		{VehicleType: "rickshaw", BaseFare: envFloat("FARE_RICKSHAW_BASE", 80), PerKmRate: envFloat("FARE_RICKSHAW_PER_KM", 20), Currency: "PKR"},
+		{VehicleType: "car", BaseFare: envFloat("FARE_CAR_BASE", 150), PerKmRate: envFloat("FARE_CAR_PER_KM", 35), Currency: "PKR"},
 	}
 
 	var estimates []models.FareBreakdown
@@ -873,25 +870,28 @@ func roundToTwo(v float64) float64 {
 
 // CancelGig handles a rider cancelling an active order mid-delivery
 func (s *DeliveryService) CancelGig(ctx context.Context, req *models.CancelGigRequest) error {
-	// First, release the lock in Redis so another rider can claim it
+	// Verify the caller is the assigned rider
+	gig, err := s.repo.GetGigByTrackingID(ctx, req.TrackingID)
+	if err != nil {
+		return fmt.Errorf("gig not found: %w", err)
+	}
+	if gig.AssignedRiderID != req.RiderTrackID {
+		return fmt.Errorf("forbidden: only the assigned rider can cancel this gig")
+	}
+
+	// Release the lock in Redis
 	if s.redis != nil {
 		s.redis.Del(ctx, fmt.Sprintf("gig:lock:%s", req.TrackingID))
 	}
 
 	// Unassign in the database (we could set status to broadcasting again)
-	_, _, err := s.repo.UpdateGigStatus(ctx, req.TrackingID, models.StatusBroadcasting, "", "", 0)
+	_, _, err = s.repo.UpdateGigStatus(ctx, req.TrackingID, models.StatusBroadcasting, "", "", 0)
 	if err != nil {
 		return err
 	}
 
 	// Also clear rider_tracking_id on the parent order so it can be reassigned
 	_, _ = s.repo.ClearOrderRider(ctx, req.TrackingID)
-
-	// Fetch the gig details so we can re-broadcast
-	gig, err := s.repo.GetGigByTrackingID(ctx, req.TrackingID)
-	if err != nil {
-		return err
-	}
 
 	// Re-broadcast logic: search progressively like initial dispatch (k=1 to k=5, 5km to 25km)
 	centerCoord := h3.GeoCoord{Latitude: gig.PickupLat, Longitude: gig.PickupLng}
@@ -1083,7 +1083,7 @@ func (s *DeliveryService) CreateRideBid(ctx context.Context, req *models.CreateB
 // SubmitCounterBid processes a rider's counter-offer and pushes it to the customer via WebSocket.
 func (s *DeliveryService) SubmitCounterBid(ctx context.Context, req *models.CounterBidRequest) error {
 	if s.redis == nil {
-		return nil
+		return fmt.Errorf("redis unavailable: counter-bid cannot be published")
 	}
 
 	offerPayload := map[string]interface{}{

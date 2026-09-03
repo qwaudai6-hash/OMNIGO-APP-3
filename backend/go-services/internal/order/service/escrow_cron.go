@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -52,7 +53,9 @@ func (s *EscrowCronService) ProcessPendingEscrows(ctx context.Context) {
 	// schema default for new orders: NONE — older rows may have 'NONE'
 	// before the migration, so we cover both with LOWER().
 	query := `
-		SELECT order_tracking_id, total_amount, vendor_tracking_id
+		SELECT order_tracking_id, total_amount, vendor_tracking_id,
+		       COALESCE(vendor_escrow, 0) AS vendor_escrow,
+		       COALESCE(admin_commission, 0) AS admin_commission
 		FROM orders
 		WHERE status = 'delivered'
 		  AND LOWER(COALESCE(dispute_status, 'none')) = 'none'
@@ -74,6 +77,8 @@ func (s *EscrowCronService) ProcessPendingEscrows(ctx context.Context) {
 		OrderTrackingID  string
 		TotalAmount      float64
 		VendorTrackingID string
+		VendorEscrow     float64
+		AdminCommission  float64
 	}
 
 	for rows.Next() {
@@ -81,8 +86,10 @@ func (s *EscrowCronService) ProcessPendingEscrows(ctx context.Context) {
 			OrderTrackingID  string
 			TotalAmount      float64
 			VendorTrackingID string
+			VendorEscrow     float64
+			AdminCommission  float64
 		}
-		if err := rows.Scan(&r.OrderTrackingID, &r.TotalAmount, &r.VendorTrackingID); err != nil {
+		if err := rows.Scan(&r.OrderTrackingID, &r.TotalAmount, &r.VendorTrackingID, &r.VendorEscrow, &r.AdminCommission); err != nil {
 			log.Printf("[EscrowCron] Failed to scan row: %v", err)
 			continue
 		}
@@ -94,12 +101,54 @@ func (s *EscrowCronService) ProcessPendingEscrows(ctx context.Context) {
 	rows.Close() // close early so we can do updates
 
 	for _, r := range toRelease {
-		// 1. Release in Ledger
-		// (admin commission vs vendor payout)
-		_, err := s.ledgerSvc.ReleaseEscrowToVendor(ctx, r.OrderTrackingID, r.TotalAmount, s.commissionRate)
-		if err != nil {
-			log.Printf("[EscrowCron] Failed to release escrow in ledger for order %s: %v", r.OrderTrackingID, err)
-			continue
+		// FIX C3+M8: Use pre-computed vendor_escrow + admin_commission instead of
+		// total_amount. The SettlementWorker already computed the correct split
+		// at payment time. Using total_amount would re-apply the commission rate
+		// and over-credit the vendor with the delivery fee portion.
+		//
+		// Also fix M8: We no longer call ReleaseEscrowToVendor which applies
+		// commissionRate again (double-dip). Instead, we directly transfer the
+		// pre-computed amounts to their respective accounts.
+		vendorAmount := r.VendorEscrow
+		adminAmount := r.AdminCommission
+		if vendorAmount+adminAmount <= 0 {
+			// Fallback for legacy orders without pre-computed split
+			vendorAmount = r.TotalAmount * (1 - s.commissionRate)
+			adminAmount = r.TotalAmount * s.commissionRate
+		}
+
+		// 1. Release pre-computed splits directly in Ledger
+		if adminAmount > 0 {
+			_, err := s.ledgerSvc.Transfer(ctx, ledger.TransferRequest{
+				DebitAccount:   ledger.AccountVendorPendingEscrow,
+				CreditAccount:  ledger.AccountAdminRevenue,
+				Amount:         adminAmount,
+				Currency:       "PKR",
+				ReferenceType:  "admin_commission",
+				ReferenceID:    r.OrderTrackingID,
+				Description:    fmt.Sprintf("Admin commission for order %s", r.OrderTrackingID),
+				IdempotencyKey: fmt.Sprintf("commission_%s", r.OrderTrackingID),
+			})
+			if err != nil {
+				log.Printf("[EscrowCron] Failed to transfer admin commission for order %s: %v", r.OrderTrackingID, err)
+				continue
+			}
+		}
+		if vendorAmount > 0 {
+			_, err := s.ledgerSvc.Transfer(ctx, ledger.TransferRequest{
+				DebitAccount:   ledger.AccountVendorPendingEscrow,
+				CreditAccount:  ledger.AccountVendorWallet,
+				Amount:         vendorAmount,
+				Currency:       "PKR",
+				ReferenceType:  "vendor_payout",
+				ReferenceID:    r.OrderTrackingID,
+				Description:    fmt.Sprintf("Vendor payout for order %s", r.OrderTrackingID),
+				IdempotencyKey: fmt.Sprintf("vendor_payout_%s", r.OrderTrackingID),
+			})
+			if err != nil {
+				log.Printf("[EscrowCron] Failed to transfer vendor payout for order %s: %v", r.OrderTrackingID, err)
+				continue
+			}
 		}
 
 		// 2. Mark as released in DB
@@ -110,6 +159,6 @@ func (s *EscrowCronService) ProcessPendingEscrows(ctx context.Context) {
 			// Note: The ledger enforces idempotency, so if this cron runs again, it won't duplicate the ledger transfer.
 		}
 
-		log.Printf("[EscrowCron] Successfully released %.2f for order %s (Vendor %s)", r.TotalAmount, r.OrderTrackingID, r.VendorTrackingID)
+		log.Printf("[EscrowCron] Successfully released %.2f for order %s (Vendor %s, Admin %.2f, Vendor %.2f)", vendorAmount+adminAmount, r.OrderTrackingID, r.VendorTrackingID, adminAmount, vendorAmount)
 	}
 }

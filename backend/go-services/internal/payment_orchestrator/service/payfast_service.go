@@ -3,8 +3,10 @@ package service
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -170,9 +172,16 @@ func NewPayFastService(
 	secret := os.Getenv("INTERNAL_CALLBACK_SECRET")
 	if secret == "" {
 		secret = os.Getenv("HMAC_SECRET")
-		if secret == "" {
-			secret = "XLZg8xSIgUncVPqiObww9hRzOVc5Y68E+5xjB0+ac7c="
+	}
+	if secret == "" {
+		log.Printf("[PayFastService] CRITICAL: neither INTERNAL_CALLBACK_SECRET nor HMAC_SECRET is set — 3DS callbacks will use INSECURE fallback. SET THESE ENV VARS.")
+		// Use a random secret for this process lifetime so 3DS callbacks fail
+		// safely rather than being forgeable with a known hardcoded key.
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			panic("payfast: cannot generate fallback HMAC secret: " + err.Error())
 		}
+		secret = base64.StdEncoding.EncodeToString(b)
 	}
 	publicBase := strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/")
 	if publicBase == "" {
@@ -1267,13 +1276,31 @@ func (s *PayFastService) HandleIPN(ctx context.Context, params IPNParams) error 
 	statusCode := params.NormalizedStatusCode()
 	receivedHash := params.NormalizedHash()
 
+	// M3: Log raw IPN event for audit trail (mirrors stripe_events pattern)
+	var eventID string
+	payloadJSON, _ := json.Marshal(params)
+	var txnAmt float64
+	fmt.Sscanf(params.TxnAmt, "%f", &txnAmt)
+	err := s.db.QueryRow(ctx,
+		`INSERT INTO payfast_events (basket_id, gateway_txn_id, event_type, status_code, amount, payload, order_id)
+		 VALUES ($1, NULLIF($2,''), 'ipn_received', NULLIF($3,''), NULLIF($4,0)::NUMERIC, $5, NULLIF($6,''))
+		 ON CONFLICT DO NOTHING RETURNING id`,
+		basketID, params.TransactionID, statusCode, txnAmt, string(payloadJSON), params.OrderID,
+	).Scan(&eventID)
+	if err != nil {
+		// Non-fatal: log but don't block IPN processing
+		log.Printf("[PayFastService] WARNING: failed to log IPN event for basket %s: %v", basketID, err)
+	}
+
 	if basketID == "" {
 		telemetry.RecordIPNReceived(false)
+		s.markIPNEventFailed(ctx, eventID, "missing basket_id")
 		return errors.New("validation: missing basket_id in IPN payload")
 	}
 
 	if !s.payfast.VerifyIPNHash(basketID, statusCode, receivedHash) {
 		telemetry.RecordIPNReceived(false)
+		s.markIPNEventFailed(ctx, eventID, "hash verification failed")
 		log.Printf("[PayFastService] SECURITY: IPN hash verification failed for basket_id=%s — possible spoofed callback, ignoring", basketID)
 		return errors.New("validation: IPN hash verification failed")
 	}
@@ -1282,7 +1309,6 @@ func (s *PayFastService) HandleIPN(ctx context.Context, params IPNParams) error 
 	// Robust transaction lookup: match by gateway_txn_id first if supplied, otherwise fallback to active/latest txn for order
 	var internalTxnID, gatewayTxnID string
 	var amount float64
-	var err error
 
 	if params.TransactionID != "" {
 		err = s.db.QueryRow(ctx,
@@ -1303,6 +1329,7 @@ func (s *PayFastService) HandleIPN(ctx context.Context, params IPNParams) error 
 	}
 
 	if err != nil {
+		s.markIPNEventFailed(ctx, eventID, fmt.Sprintf("no payment transaction found: %v", err))
 		return fmt.Errorf("no payment transaction found for basket_id %s: %w", basketID, err)
 	}
 
@@ -1310,12 +1337,49 @@ func (s *PayFastService) HandleIPN(ctx context.Context, params IPNParams) error 
 		gatewayTxnID = params.TransactionID
 	}
 
+	// Update event with resolved IDs
+	if eventID != "" {
+		s.db.Exec(ctx,
+			`UPDATE payfast_events SET gateway_txn_id = NULLIF($1,''), order_id = NULLIF($2,''), event_type = 'ipn_verified'
+			 WHERE id = $3 AND gateway_txn_id IS NULL`,
+			gatewayTxnID, internalTxnID, eventID)
+	}
+
 	if !payfast.IsSuccessCode(statusCode) && statusCode != "" {
 		if markErr := s.MarkPaymentFailed(ctx, internalTxnID, "IPN reported failure, status_code: "+statusCode); markErr != nil {
 			log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
 		}
+		s.markIPNEventProcessed(ctx, eventID, nil)
 		return nil
 	}
 
-	return s.VerifyAndSettle(ctx, internalTxnID, basketID, gatewayTxnID, amount)
+	result := s.VerifyAndSettle(ctx, internalTxnID, basketID, gatewayTxnID, amount)
+	s.markIPNEventProcessed(ctx, eventID, result)
+	return result
+}
+
+// markIPNEventFailed updates a payfast_events row with processing error.
+func (s *PayFastService) markIPNEventFailed(ctx context.Context, eventID string, errMsg string) {
+	if eventID == "" {
+		return
+	}
+	s.db.Exec(ctx,
+		`UPDATE payfast_events SET process_error = $1, event_type = 'ipn_failed', processed_at = NOW() WHERE id = $2`,
+		errMsg, eventID)
+}
+
+// markIPNEventProcessed updates a payfast_events row as successfully processed.
+func (s *PayFastService) markIPNEventProcessed(ctx context.Context, eventID string, processErr error) {
+	if eventID == "" {
+		return
+	}
+	if processErr != nil {
+		s.db.Exec(ctx,
+			`UPDATE payfast_events SET process_error = $1, processed_at = NOW() WHERE id = $2`,
+			processErr.Error(), eventID)
+	} else {
+		s.db.Exec(ctx,
+			`UPDATE payfast_events SET processed_at = NOW() WHERE id = $1`,
+			eventID)
+	}
 }

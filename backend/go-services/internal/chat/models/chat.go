@@ -6,15 +6,17 @@ import (
 
 // ChatMessage represents a single text message sent between any two users (e.g. Customer and Rider).
 type ChatMessage struct {
-	ID         string     `json:"id"`
-	OrderID    string     `json:"order_id"`
-	SenderID   string     `json:"sender_id"`
-	ReceiverID string     `json:"receiver_id"`
-	Content    string     `json:"content"`
-	IsRead     bool       `json:"is_read"`
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
-	DeletedAt  *time.Time `json:"-"`
+	ID          string     `json:"id"`
+	OrderID     string     `json:"order_id"`
+	SenderID    string     `json:"sender_id"`
+	ReceiverID  string     `json:"receiver_id"`
+	Content     string     `json:"content"`
+	IsRead      bool       `json:"is_read"`
+	DeliveredAt *time.Time `json:"delivered_at,omitempty"`
+	ReadAt      *time.Time `json:"read_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	DeletedAt   *time.Time `json:"-"`
 }
 
 // ChatThread represents an active thread. We can just use it as a response struct if needed.

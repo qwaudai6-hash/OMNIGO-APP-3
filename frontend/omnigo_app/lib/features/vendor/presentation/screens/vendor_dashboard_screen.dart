@@ -106,9 +106,10 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
   }
 
   /// BUG-19 FIX: Count all active gig states, not just 'shipped'.
+  /// BUG-4 FIX: 'picked_up' is a delivery-level status, not order-level.
+  /// Order statuses are: pending, paid, accepted, shipped, in_transit, delivered, completed.
   void _recalculateActiveGigs() {
-    // #37: Check both 'status' and 'order_status' fields for API compatibility
-    const activeStatuses = {'accepted', 'shipped', 'in_transit', 'picked_up'};
+    const activeStatuses = {'accepted', 'shipped', 'in_transit'};
     final count = _orders.where((o) {
       final status = o['status']?.toString() ?? o['order_status']?.toString() ?? '';
       return activeStatuses.contains(status);

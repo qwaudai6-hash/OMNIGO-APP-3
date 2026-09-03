@@ -201,13 +201,16 @@ void onStart(ServiceInstance service) async {
     if (channel != null) {
       try {
         await channel!.sink.close();
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('Telemetry: error closing WS sink: $e');
+      }
     }
     await service.stopSelf();
   });
 
   final LocationPermission permission = await Geolocator.checkPermission();
   if (permission == LocationPermission.denied) {
+    debugPrint('Telemetry: location permission denied, telemetry disabled');
      return;
   }
 
@@ -243,7 +246,9 @@ void onStart(ServiceInstance service) async {
       batteryLevel = await battery.batteryLevel;
       final state = await battery.batteryState;
       isCharging = state == BatteryState.charging;
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('Telemetry: battery info unavailable: $e');
+    }
 
     // 1. Locally smooth coordinates via Kalman Filters
     final double smoothedLat = latFilter.update(position.latitude);

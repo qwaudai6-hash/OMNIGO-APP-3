@@ -154,6 +154,23 @@ func (w *StripeReplayWorker) replayPaymentSucceeded(ctx context.Context, event s
 		return nil // Already paid
 	}
 
+	// FIX H10: Create payment transaction + outbox event for SettlementWorker
+	// so the 3-way ledger split + escrow hold is created. Previously, the
+	// replay worker skipped this step, leaving vendors unpaid on replayed events.
+	amountPKR := float64(pi.Amount) / 100.0 // Stripe amounts are in paisa/cents
+	_, _ = w.db.Exec(ctx, `
+		INSERT INTO payment_transactions (id, order_tracking_id, gateway, gateway_txn_id, amount, currency, status, kind, idempotency_key, created_at, updated_at)
+		VALUES (gen_random_uuid(), $1, 'stripe', $2, $3, 'PKR', 'settlement_pending', 'payment', $4, NOW(), NOW())
+		ON CONFLICT (idempotency_key) DO NOTHING
+	`, orderID, pi.ID, amountPKR, fmt.Sprintf("stripe_replay:%s", pi.ID))
+
+	eventPayload := fmt.Sprintf(`{"order_id":"%s","gateway":"stripe","gateway_txn_id":"%s","amount":%.2f}`, orderID, pi.ID, amountPKR)
+	_, _ = w.db.Exec(ctx, `
+		INSERT INTO outbox_events (id, topic, key, payload, status, created_at, updated_at)
+		VALUES (gen_random_uuid(), 'payment_settlement', $1, $2, 'PENDING', NOW(), NOW())
+		ON CONFLICT (idempotency_key) DO NOTHING
+	`, orderID, eventPayload, fmt.Sprintf("stripe_settle:%s", orderID))
+
 	// Update payment_transactions
 	_, _ = w.db.Exec(ctx,
 		`UPDATE payment_transactions SET status = 'completed', updated_at = NOW() WHERE gateway_txn_id = $1`,

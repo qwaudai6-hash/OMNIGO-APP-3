@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -406,11 +407,18 @@ func (h *CODHandler) Settlement(c *gin.Context) {
 		return
 	}
 
-	// Decrement rider cash_in_hand in rider_wallet table
-	_, _ = h.db.Exec(ctx,
+	// FIX H1: Decrement rider cash_in_hand with proper error handling.
+	// Previously this was silently discarded (_, _) which could mask
+	// balance drift between actual cash and system records.
+	tag, cashErr := h.db.Exec(ctx,
 		`UPDATE rider_wallet SET cash_in_hand = GREATEST(0, cash_in_hand - $1), updated_at = NOW() WHERE rider_tracking_id = $2`,
 		amountOwed, riderID,
 	)
+	if cashErr != nil {
+		log.Printf("[CODSettlement] WARNING: failed to decrement cash_in_hand for rider %s: %v", riderID, cashErr)
+	} else if tag.RowsAffected() == 0 {
+		log.Printf("[CODSettlement] WARNING: no rider_wallet row found for rider %s during cash_in_hand decrement", riderID)
+	}
 
 	// Create escrow hold for vendor portion
 	h.escrow.CreateHold(ctx, orderID, vendorFallback(vendorTrackID, storeID), split.VendorEscrow)

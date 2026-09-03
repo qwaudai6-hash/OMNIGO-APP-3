@@ -18,6 +18,7 @@ class _RiderWalletScreenState extends State<RiderWalletScreen> {
   Map<String, dynamic>? _wallet;
   List<dynamic> _codDebts = [];
   bool _isLoading = true;
+  String? _errorMessage;
 
   @override
   void initState() {
@@ -26,42 +27,54 @@ class _RiderWalletScreenState extends State<RiderWalletScreen> {
   }
 
   Future<void> _fetchWallet() async {
-    setState(() => _isLoading = true);
+    setState(() { _isLoading = true; _errorMessage = null; });
     try {
       final prefs = await SharedPreferences.getInstance();
       final token = prefs.getString('jwt_token') ?? '';
 
-      // Fetch wallet and COD debts in parallel
-      final walletFuture = http.get(
-        Uri.parse(ApiEndpoints.riderWallet(widget.trackingId)),
-        headers: {'Authorization': 'Bearer $token'},
-      ).timeout(const Duration(seconds: 8));
-
-      final codDebtsFuture = http.get(
-        Uri.parse(ApiEndpoints.codDebts(widget.trackingId)),
-        headers: {'Authorization': 'Bearer $token'},
-      ).timeout(const Duration(seconds: 8));
+      // Fetch wallet and COD debts in parallel with retry
+      final walletFuture = _fetchWithRetry(ApiEndpoints.riderWallet(widget.trackingId), token);
+      final codDebtsFuture = _fetchWithRetry(ApiEndpoints.codDebts(widget.trackingId), token);
 
       final responses = await Future.wait([walletFuture, codDebtsFuture]);
 
       if (mounted) {
         if (responses[0].statusCode == 200) {
-          _wallet = jsonDecode(responses[0].body) as Map<String, dynamic>;
+          final decoded = jsonDecode(responses[0].body);
+          if (decoded is Map<String, dynamic>) _wallet = decoded;
         }
         if (responses[1].statusCode == 200) {
-          final codData = jsonDecode(responses[1].body) as Map<String, dynamic>;
-          _codDebts = (codData['debts'] as List<dynamic>?) ?? <dynamic>[];
+          final decoded = jsonDecode(responses[1].body);
+          if (decoded is Map<String, dynamic>) {
+            _codDebts = (decoded['debts'] as List<dynamic>?) ?? <dynamic>[];
+          }
         }
         setState(() => _isLoading = false);
       }
     } catch (e) {
       if (mounted) {
-        setState(() => _isLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Network error: $e')),
-        );
+        setState(() {
+          _isLoading = false;
+          _errorMessage = 'Failed to load wallet data.';
+        });
       }
     }
+  }
+
+  Future<http.Response> _fetchWithRetry(String url, String token, {int maxRetries = 2}) async {
+    for (int attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        final res = await http.get(
+          Uri.parse(url),
+          headers: {'Authorization': 'Bearer $token'},
+        ).timeout(const Duration(seconds: 8));
+        if (res.statusCode < 500 || attempt == maxRetries) return res;
+      } catch (e) {
+        if (attempt == maxRetries) rethrow;
+        await Future<void>.delayed(Duration(seconds: attempt + 1));
+      }
+    }
+    throw Exception('unreachable');
   }
 
   Future<void> _payNow(String codDebtId, String gateway) async {
@@ -161,7 +174,28 @@ class _RiderWalletScreenState extends State<RiderWalletScreen> {
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator(color: Colors.black87))
-          : RefreshIndicator(
+          : _errorMessage != null
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(32),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.error_outline, size: 64, color: Colors.redAccent),
+                        const SizedBox(height: 16),
+                        Text(_errorMessage!, textAlign: TextAlign.center, style: const TextStyle(fontSize: 16, color: Colors.grey)),
+                        const SizedBox(height: 24),
+                        ElevatedButton.icon(
+                          onPressed: _fetchWallet,
+                          icon: const Icon(Icons.refresh, color: Colors.white),
+                          label: const Text('Retry', style: TextStyle(color: Colors.white)),
+                          style: ElevatedButton.styleFrom(backgroundColor: Colors.black87),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              : RefreshIndicator(
               onRefresh: _fetchWallet,
               color: Colors.black87,
               child: SingleChildScrollView(
@@ -343,9 +377,9 @@ class _RiderWalletScreenState extends State<RiderWalletScreen> {
 
   Widget _buildCreditCard(Map<String, dynamic> c) {
     final orderId = c['order_id']?.toString() ?? 'N/A';
-    final net = (c['net_credit'] ?? 0).toDouble();
-    final fee = (c['delivery_fee'] ?? 0).toDouble();
-    final commission = (c['admin_commission'] ?? 0).toDouble();
+    final net = num.tryParse(c['net_credit']?.toString() ?? '0')?.toDouble() ?? 0.0;
+    final fee = num.tryParse(c['delivery_fee']?.toString() ?? '0')?.toDouble() ?? 0.0;
+    final commission = num.tryParse(c['admin_commission']?.toString() ?? '0')?.toDouble() ?? 0.0;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 12),

@@ -8,10 +8,13 @@ import (
 
 // MEDIUM-26: cap request body size at the edge. Without this, the gateway
 // will happily buffer multi-GB bodies before an upstream rejects them — a
-// trivial memory/CPU DoS. 2 MiB covers every legit JSON/multipart payload in
-// OMNIGO (largest: KYC images, enforced separately at 5-10 MB by handlers
-// that need more via their own MaxBytesReader).
-const MaxBodyBytes = 2 << 20 // 2 MiB
+// trivial memory/CPU DoS. 15 MiB covers all multipart image uploads:
+//   - Product images: 5 MB max
+//   - Delivery proof photos: 5 MB max
+//   - KYC documents: 10 MB max
+//
+// Individual handlers enforce their own stricter limits via MaxBytesReader.
+const MaxBodyBytes = 15 << 20 // 15 MiB (multipart overhead included)
 
 func BodyLimit() gin.HandlerFunc {
 	return func(c *gin.Context) {

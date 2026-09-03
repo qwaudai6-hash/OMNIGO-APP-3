@@ -15,6 +15,7 @@ func FindNearbyRiders(ctx context.Context, rdb redis.UniversalClient, lat, lng f
 	vendorHex := h3.FromGeo(centerCoord, 5)
 	neighbors := h3.KRing(vendorHex, 1)
 
+	seen := make(map[string]bool)
 	var riders []string
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -31,7 +32,10 @@ func FindNearbyRiders(ctx context.Context, rdb redis.UniversalClient, lat, lng f
 			if err == nil && len(res) > 0 {
 				mu.Lock()
 				for _, loc := range res {
-					riders = append(riders, loc.Name)
+					if !seen[loc.Name] {
+						seen[loc.Name] = true
+						riders = append(riders, loc.Name)
+					}
 				}
 				mu.Unlock()
 			}

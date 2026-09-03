@@ -341,8 +341,19 @@ func (r *OrderRepository) GetOrdersByCustomerID(ctx context.Context, customerID 
 	return orders, nil
 }
 
-// GetOrdersByVendorID retrieves all orders for stores owned by a vendor, joining user details
-func (r *OrderRepository) GetOrdersByVendorID(ctx context.Context, vendorID string) ([]*models.Order, error) {
+// GetOrdersByVendorID retrieves orders for stores owned by a vendor, with
+// optional status filter and SQL-level pagination.
+func (r *OrderRepository) GetOrdersByVendorID(ctx context.Context, vendorID string, status string, limit, offset int) ([]*models.Order, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
 	query := `
 		SELECT 
 			o.id, o.order_tracking_id, o.customer_tracking_id, o.store_tracking_id, o.vendor_tracking_id, o.rider_tracking_id, 
@@ -357,10 +368,12 @@ func (r *OrderRepository) GetOrdersByVendorID(ctx context.Context, vendorID stri
 		FROM orders o
 		LEFT JOIN users c ON o.customer_tracking_id = c.tracking_id
 		LEFT JOIN users rd ON o.rider_tracking_id = rd.tracking_id
-		WHERE o.vendor_tracking_id = $1 OR o.store_tracking_id IN (SELECT store_tracking_id FROM stores WHERE vendor_tracking_id = $1)
+		WHERE (o.vendor_tracking_id = $1 OR o.store_tracking_id IN (SELECT store_tracking_id FROM stores WHERE vendor_tracking_id = $1))
+		  AND ($2 = '' OR o.status = $2)
 		ORDER BY o.created_at DESC
+		LIMIT $3 OFFSET $4
 	`
-	rows, err := r.reader.Query(ctx, query, vendorID)
+	rows, err := r.reader.Query(ctx, query, vendorID, status, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -451,12 +464,15 @@ func (r *OrderRepository) GetOrdersByVendorID(ctx context.Context, vendorID stri
 
 // UpdateOrderStatus mutates order status and sets updated_at
 func (r *OrderRepository) UpdateOrderStatus(ctx context.Context, trackingID string, status string) error {
-	// SP-GO-13: guard against silent last-writer-wins overwrites. A status
-	// update only applies if the row is not ALREADY in the target status and
-	// has not moved past it to a terminal state. Terminal states are final.
+	// BUG-1 FIX: When transitioning to "delivered", atomically stamp delivered_at
+	// so the escrow release cron can pick it up. Previously MarkOrderDelivered
+	// wrote directly then called UpdateOrderStatus, causing the Kafka event to
+	// be silently dropped (early return on same-status check).
 	query := `
 		UPDATE orders
-		SET status = $1, updated_at = NOW()
+		SET status = $1,
+		    updated_at = NOW(),
+		    delivered_at = CASE WHEN $1 = 'delivered' THEN NOW() ELSE delivered_at END
 		WHERE order_tracking_id = $2
 		  AND status <> $1
 		  AND NOT (status IN ('cancelled', 'failed', 'refunded', 'returned') AND $1 <> 'refunded')

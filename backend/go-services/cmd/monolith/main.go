@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"log"
@@ -412,8 +414,14 @@ func main() {
 		log.Println("ℹ Using default production JWT_SECRET_KEY")
 	}
 	if strings.TrimSpace(os.Getenv("HMAC_SECRET")) == "" {
-		_ = os.Setenv("HMAC_SECRET", "XLZg8xSIgUncVPqiObww9hRzOVc5Y68E+5xjB0+ac7c=")
-		log.Println("ℹ Using default production HMAC_SECRET")
+		// Generate a random HMAC secret for this process lifetime instead of
+		// using a hardcoded value that could be forged if leaked to attackers.
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			log.Fatalf("FATAL: cannot generate HMAC_SECRET: %v", err)
+		}
+		_ = os.Setenv("HMAC_SECRET", base64.StdEncoding.EncodeToString(b))
+		log.Println("WARNING: HMAC_SECRET not set — generated random secret for this process. SET HMAC_SECRET IN RAILWAY ENV FOR PERSISTENT KEYS.")
 	}
 	if strings.TrimSpace(os.Getenv("HMAC_TOKEN_ENCRYPTION_KEY")) == "" {
 		hmacSecret := os.Getenv("HMAC_SECRET")
@@ -455,7 +463,7 @@ func main() {
 	// in lookupPrefix. Add new routes here, not in a switch statement, so
 	// adding a service is a one-line change.
 	register("auth-service",
-		[]string{"/api/v1/auth", "/api/v1/users"},
+		[]string{"/api/v1/auth", "/api/v1/users", "/uploads/kyc"},
 		envPortOr("AUTH_SERVICE_PORT", "9000"))
 	register("product-service",
 		[]string{"/api/v1/products", "/api/v1/wishlist", "/api/v1/reviews", "/api/v1/vendor/products", "/uploads"},
@@ -463,8 +471,9 @@ func main() {
 	register("vendor-store-service",
 		[]string{"/api/v1/vendor", "/api/v1/stores", "/api/v1/geocoding"},
 		envPortOr("VENDOR_SERVICE_PORT", "9002"))
+	// BUG-IMAGE-1 FIX: /uploads/proofs routes to delivery-service for proof photos.
 	register("delivery-gig-service",
-		[]string{"/api/v1/delivery", "/api/v1/ride"},
+		[]string{"/api/v1/delivery", "/api/v1/ride", "/uploads/proofs"},
 		envPortOr("DELIVERY_SERVICE_PORT", "9003"))
 	register("ride-service",
 		[]string{"/api/v1/rides"},

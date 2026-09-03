@@ -13,9 +13,10 @@ import (
 
 type ChatService interface {
 	SendMessage(ctx context.Context, orderID, senderID, receiverID, content string) (*models.ChatMessage, error)
-	GetChatHistory(ctx context.Context, orderID string, page int) ([]models.ChatMessage, error)
+	GetChatHistory(ctx context.Context, orderID, senderID string, page, limit int) ([]models.ChatMessage, error)
 	MarkMessagesRead(ctx context.Context, orderID, receiverID string) error
-	ListConversations(ctx context.Context, userID string, page int) ([]models.ChatConversation, error)
+	MarkMessagesDelivered(ctx context.Context, orderID, receiverID string) error
+	ListConversations(ctx context.Context, userID string, page, limit int) ([]models.ChatConversation, error)
 	CountUnread(ctx context.Context, userID string) (int, error)
 }
 
@@ -50,8 +51,12 @@ func (s *chatService) SendMessage(ctx context.Context, orderID, senderID, receiv
 		return nil, err
 	}
 
-	// 2. Publish to Redis for WebSocket Gateway to pick up
-	// Payload should match what the WebSocket expects, or we can just send the raw JSON
+	// 2. M2: Insert into chat_delivery_outbox for reliable WS delivery
+	if err := s.repo.EnqueueForDelivery(ctx, msg.ID, orderID, receiverID); err != nil {
+		// Non-fatal: message is saved, WS delivery will still work via pub/sub
+	}
+
+	// 3. Publish to Redis for WebSocket Gateway to pick up
 	payload, _ := json.Marshal(map[string]interface{}{
 		"action":      "CHAT_MESSAGE",
 		"message_id":  msg.ID,
@@ -62,9 +67,6 @@ func (s *chatService) SendMessage(ctx context.Context, orderID, senderID, receiv
 		"created_at":  msg.CreatedAt,
 	})
 
-	// Publish to a specific channel the websocket-gateway can subscribe to,
-	// or directly to the user's channel if we had user-specific topics.
-	// We'll use a general "chat.broadcast" topic.
 	if s.redis != nil {
 		s.redis.Publish(ctx, "chat.broadcast", payload)
 	}
@@ -72,24 +74,32 @@ func (s *chatService) SendMessage(ctx context.Context, orderID, senderID, receiv
 	return msg, nil
 }
 
-func (s *chatService) GetChatHistory(ctx context.Context, orderID string, page int) ([]models.ChatMessage, error) {
+func (s *chatService) GetChatHistory(ctx context.Context, orderID, senderID string, page, limit int) ([]models.ChatMessage, error) {
 	if page < 1 {
 		page = 1
 	}
-	limit := 50
+	if limit < 1 || limit > 100 {
+		limit = 50
+	}
 	offset := (page - 1) * limit
-	return s.repo.GetMessagesByOrder(ctx, orderID, limit, offset)
+	return s.repo.GetMessagesByOrder(ctx, orderID, senderID, limit, offset)
 }
 
 func (s *chatService) MarkMessagesRead(ctx context.Context, orderID, receiverID string) error {
 	return s.repo.MarkAsRead(ctx, orderID, receiverID)
 }
 
-func (s *chatService) ListConversations(ctx context.Context, userID string, page int) ([]models.ChatConversation, error) {
+func (s *chatService) MarkMessagesDelivered(ctx context.Context, orderID, receiverID string) error {
+	return s.repo.MarkAsDelivered(ctx, orderID, receiverID)
+}
+
+func (s *chatService) ListConversations(ctx context.Context, userID string, page, limit int) ([]models.ChatConversation, error) {
 	if page < 1 {
 		page = 1
 	}
-	limit := 30
+	if limit < 1 || limit > 100 {
+		limit = 30
+	}
 	offset := (page - 1) * limit
 	return s.repo.ListConversations(ctx, userID, limit, offset)
 }

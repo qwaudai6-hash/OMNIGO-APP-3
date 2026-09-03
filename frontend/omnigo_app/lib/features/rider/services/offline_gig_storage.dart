@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 
 class OfflineGigStorage {
@@ -61,7 +62,8 @@ class OfflineGigStorage {
     if (raw != null) {
       try {
         queue = jsonDecode(raw) as List<dynamic>;
-      } catch (_) {
+      } catch (e) {
+        debugPrint('OfflineGigStorage: corrupted pending sync data, resetting: $e');
         queue = [];
       }
     }
@@ -78,18 +80,19 @@ class OfflineGigStorage {
       try {
         final decoded = jsonDecode(data);
         if (decoded is List && decoded.isNotEmpty) {
-          final first = decoded.removeAt(0) as Map<String, dynamic>;
+          final first = decoded.removeAt(0);
           if (decoded.isEmpty) {
             await box.delete(pendingSyncKey);
           } else {
             await box.put(pendingSyncKey, jsonEncode(decoded));
           }
-          return first;
+          return first is Map<String, dynamic> ? first : null;
         } else if (decoded is Map<String, dynamic>) {
           await box.delete(pendingSyncKey);
           return decoded;
         }
-      } catch (_) {
+      } catch (e) {
+        debugPrint('OfflineGigStorage: failed to decode pending sync, clearing: $e');
         await box.delete(pendingSyncKey);
       }
     }

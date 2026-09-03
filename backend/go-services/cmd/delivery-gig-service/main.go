@@ -81,13 +81,14 @@ func main() {
 		WithCODService(codSvc)
 	h := handlers.NewDeliveryHandler(svc)
 
-	// 4. Start Background Kafka Consumer
-	go svc.StartKafkaConsumer(context.Background())
+	// 4. Start Background Kafka Consumer with cancellable context
+	kafkaCtx, kafkaCancel := context.WithCancel(context.Background())
+	go svc.StartKafkaConsumer(kafkaCtx)
 
 	// Start Gig Timeout Worker — reaps gigs stuck in broadcasting > 5 minutes
 	if kafkaClient != nil {
 		gigTimeoutWorker := service.NewGigTimeoutWorker(db.Writer, rdb, kafkaClient.Client)
-		go gigTimeoutWorker.Start(context.Background())
+		go gigTimeoutWorker.Start(kafkaCtx)
 	} else {
 		log.Println("Warning: Kafka unavailable, gig timeout worker disabled")
 	}
@@ -96,6 +97,9 @@ func main() {
 	router := gin.Default()
 	router.RedirectTrailingSlash = false
 	router.Use(sentrygin.New(sentrygin.Options{Repanic: true}))
+
+	// BUG-IMAGE-1 FIX: Ensure upload directories exist before serving static files.
+	os.MkdirAll("./uploads/proofs", 0755)
 
 	// Healthcheck
 	router.GET("/health", func(c *gin.Context) {
@@ -124,7 +128,10 @@ func main() {
 	<-quit
 	log.Println("Shutting down server...")
 
-	ctxTimeout, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Cancel Kafka consumers and workers
+	kafkaCancel()
+
+	ctxTimeout, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctxTimeout); err != nil {
 		log.Fatal("Server forced to shutdown: ", err)

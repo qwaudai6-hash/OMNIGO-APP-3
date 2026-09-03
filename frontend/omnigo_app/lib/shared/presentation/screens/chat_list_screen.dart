@@ -1,8 +1,8 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../../core/services/session_registry.dart';
 import '../services/chat_service.dart';
 import 'chat_room_screen.dart';
 
@@ -55,8 +55,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
   }
 
   Future<void> _bootstrap() async {
-    final prefs = await SharedPreferences.getInstance();
-    _myUserId = prefs.getString('tracking_id');
+    _myUserId = SessionRegistry.instance.trackingId;
     if (_myUserId != null) {
       await ChatService.instance.setUserId(_myUserId!);
     }

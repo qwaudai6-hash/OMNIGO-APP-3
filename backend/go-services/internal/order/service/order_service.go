@@ -244,8 +244,8 @@ func (s *OrderService) GetOrdersByCustomer(ctx context.Context, customerID strin
 	return s.repo.GetOrdersByCustomerID(ctx, customerID, limit, status)
 }
 
-func (s *OrderService) GetOrdersByVendor(ctx context.Context, vendorID string) ([]*models.Order, error) {
-	return s.repo.GetOrdersByVendorID(ctx, vendorID)
+func (s *OrderService) GetOrdersByVendor(ctx context.Context, vendorID string, status string, limit, offset int) ([]*models.Order, error) {
+	return s.repo.GetOrdersByVendorID(ctx, vendorID, status, limit, offset)
 }
 
 // ReleaseStockForOrder releases reserved stock via product-service gRPC. It is
@@ -322,18 +322,24 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, trackingID string,
 		return fmt.Errorf("invalid order status transition from '%s' to '%s'", order.Status, status)
 	}
 
-	// If order is being cancelled or failed, compensate reserved inventory stock
+	// FIX M9: Perform the status update FIRST. Side effects execute ONLY after
+	// the write succeeds, eliminating the TOCTOU race where side effects ran on
+	// stale data before the status was actually persisted.
+	err = s.repo.UpdateOrderStatus(ctx, trackingID, status)
+	if err != nil {
+		return err
+	}
+
+	// Side effects — only execute after confirmed status change
 	if status == "cancelled" || status == "failed" {
 		if len(order.Items) > 0 {
 			_ = s.ReleaseStockForOrder(ctx, order)
 		}
-		// BUG-06 FIX: Cancel escrow hold so vendor doesn't receive funds for cancelled order
 		if s.escrowService != nil {
 			if err := s.escrowService.CancelForOrder(ctx, trackingID); err != nil {
 				log.Printf("[ORDER-%s] Warning: failed to cancel escrow on %s: %v", trackingID, status, err)
 			}
 		}
-		// BUG-09 FIX: Cancel any pending COD debts for this order so riders don't owe for cancelled orders
 		if s.repo != nil {
 			if err := s.repo.CancelCODDebtsForOrder(ctx, trackingID); err != nil {
 				log.Printf("[ORDER-%s] Warning: failed to cancel COD debts: %v", trackingID, err)
@@ -341,16 +347,10 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, trackingID string,
 		}
 	}
 
-	// BUG-06 FIX: Cancel escrow on return as well
 	if status == "returned" && s.escrowService != nil {
 		if err := s.escrowService.CancelForOrder(ctx, trackingID); err != nil {
 			log.Printf("[ORDER-%s] Warning: failed to cancel escrow on return: %v", trackingID, err)
 		}
-	}
-
-	err = s.repo.UpdateOrderStatus(ctx, trackingID, status)
-	if err != nil {
-		return err
 	}
 
 	// When an order is marked paid (online payment via PayFast/Stripe/JazzCash/EasyPaisa),
@@ -411,17 +411,19 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, trackingID string,
 	return nil
 }
 
-// MarkOrderDelivered is the canonical "delivery completed" action. It
-// atomically stamps the status as `delivered` AND sets `delivered_at`,
-// which is the precondition the escrow release cron
-// (`escrow_cron.go`) checks before settling funds.
+// MarkOrderDelivered is the canonical "delivery completed" action.
+// BUG-1 FIX: Previously this double-wrote status (repo + service), causing
+// the Kafka orders.updated event to be silently dropped. Now it delegates
+// entirely to UpdateOrderStatus, which stamps delivered_at atomically and
+// emits the Kafka event. If the order is already delivered, this is a
+// safe no-op (returns nil) to avoid breaking callers like ConfirmOrder
+// and the delivery status consumer.
 func (s *OrderService) MarkOrderDelivered(ctx context.Context, trackingID string) error {
-	if err := s.repo.MarkOrderDelivered(ctx, trackingID); err != nil {
-		return err
+	err := s.UpdateOrderStatus(ctx, trackingID, "delivered")
+	if err != nil && errors.Is(err, repository.ErrNoStatusChange) {
+		return nil // already delivered — safe no-op
 	}
-	// Deliveries satisfy the precondition for 24h escrow window. Broadcast
-	// update event so downstream telemetry/notifications pick it up.
-	return s.UpdateOrderStatus(ctx, trackingID, "delivered")
+	return err
 }
 
 // OrderLineage contains the unified lineage for an order across all actors.

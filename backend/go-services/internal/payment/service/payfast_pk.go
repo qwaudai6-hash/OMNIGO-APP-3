@@ -106,8 +106,23 @@ func (s *PayFastPKService) CreateCheckoutSession(ctx context.Context, req Checko
 	}, nil
 }
 
+// PayFastGatewayError is a sentinel error type for PayFast refunds that
+// require manual processing. The refund handler uses this to distinguish
+// "gateway cannot refund automatically" from "actual gateway failure".
+type PayFastGatewayError struct {
+	TransactionID string
+	Amount        float64
+}
+
+func (e *PayFastGatewayError) Error() string {
+	return fmt.Sprintf("payfast: automated refunds not supported for transaction %s (amount %.2f); requires manual processing via merchant portal", e.TransactionID, e.Amount)
+}
+
 func (s *PayFastPKService) Refund(_ context.Context, transactionID string, amount float64) error {
-	return fmt.Errorf("payfast: automated refunds not supported; contact PayFast support for transaction %s (amount %.2f)", transactionID, amount)
+	// FIX H9: Return a typed error instead of a plain error.
+	// The refund handler can detect this and create a 'pending_manual' record
+	// so admins can track and process PayFast refunds manually.
+	return &PayFastGatewayError{TransactionID: transactionID, Amount: amount}
 }
 
 // VerifyWebhook validates a PayFast IPN using the official SHA-256 formula:
