@@ -150,11 +150,6 @@ func (s *Service) Transfer(ctx context.Context, req TransferRequest) (uuid.UUID,
 		return uuid.Nil, fmt.Errorf("ledger insert failed: %w", err)
 	}
 
-	// Commit
-	if err := tx.Commit(ctx); err != nil {
-		return uuid.Nil, fmt.Errorf("ledger commit failed: %w", err)
-	}
-
 	// TigerBeetle Dual-Write via Transactional Outbox
 	// The outbox row commits atomically with ledger_entries, then a background
 	// worker relays to TigerBeetle. This replaces the old fire-and-forget goroutine.
@@ -174,6 +169,11 @@ func (s *Service) Transfer(ctx context.Context, req TransferRequest) (uuid.UUID,
 		if err := InsertTBOutboxEntry(ctx, tx, txID, []tb.Transfer{transfer}); err != nil {
 			return uuid.Nil, fmt.Errorf("failed to enqueue TB transfer: %w", err)
 		}
+	}
+
+	// Commit — ledger entries + outbox row commit atomically
+	if err := tx.Commit(ctx); err != nil {
+		return uuid.Nil, fmt.Errorf("ledger commit failed: %w", err)
 	}
 
 	return txID, nil
@@ -264,11 +264,7 @@ func (s *Service) MultiTransfer(ctx context.Context, reqs []TransferRequest) (uu
 		return uuid.Nil, fmt.Errorf("multi-transfer insert failed: %w", err)
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return uuid.Nil, fmt.Errorf("multi-transfer commit failed: %w", err)
-	}
-
-	// TigerBeetle Dual-Write via Transactional Outbox
+	// TigerBeetle Dual-Write via Transactional Outbox (BEFORE commit)
 	if s.tbService != nil {
 		var tbTransfers []tb.Transfer
 		for i, r := range reqs {
@@ -286,6 +282,11 @@ func (s *Service) MultiTransfer(ctx context.Context, reqs []TransferRequest) (uu
 		if err := InsertTBOutboxEntry(ctx, tx, txID, tbTransfers); err != nil {
 			return uuid.Nil, fmt.Errorf("failed to enqueue TB multi-transfer: %w", err)
 		}
+	}
+
+	// Commit — ledger entries + outbox row commit atomically
+	if err := tx.Commit(ctx); err != nil {
+		return uuid.Nil, fmt.Errorf("multi-transfer commit failed: %w", err)
 	}
 
 	return txID, nil

@@ -272,7 +272,11 @@ func (s *Service) CancelForOrder(ctx context.Context, orderTrackingID string) er
 
 // UnfreezeOnRejection reverts disputed holds when a dispute is rejected.
 func (s *Service) UnfreezeOnRejection(ctx context.Context, disputeID uuid.UUID) error {
-	return s.repo.UnfreezeOnDisputeRejection(ctx, disputeID)
+	err := s.repo.UnfreezeOnDisputeRejection(ctx, disputeID)
+	if err == nil {
+		s.reAddHoldsToIndexByDispute(ctx, disputeID)
+	}
+	return err
 }
 
 // removeHoldsFromIndexByOrder removes all holds for an order from the Redis index.
@@ -288,6 +292,24 @@ func (s *Service) removeHoldsFromIndexByOrder(ctx context.Context, orderTracking
 		var id uuid.UUID
 		if rows.Scan(&id) == nil {
 			_ = s.index.Remove(ctx, id.String())
+		}
+	}
+}
+
+// reAddHoldsToIndexByDispute re-adds holds to the Redis index after dispute rejection.
+func (s *Service) reAddHoldsToIndexByDispute(ctx context.Context, disputeID uuid.UUID) {
+	rows, err := s.db.Query(ctx,
+		`SELECT id, hold_until FROM escrow_holds WHERE dispute_id = $1 AND status = 'held'`,
+		disputeID)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id uuid.UUID
+		var holdUntil time.Time
+		if rows.Scan(&id, &holdUntil) == nil {
+			_ = s.index.Add(ctx, id.String(), holdUntil)
 		}
 	}
 }
