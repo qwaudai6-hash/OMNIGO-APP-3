@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/omnigo/backend/internal/ledger"
 )
@@ -30,13 +31,15 @@ type Service struct {
 	repo   *Repository
 	ledger *ledger.Service
 	db     *pgxpool.Pool
+	index  *HoldIndex
 }
 
-func NewService(db *pgxpool.Pool, ledgerSvc *ledger.Service) *Service {
+func NewService(db *pgxpool.Pool, ledgerSvc *ledger.Service, rdb redis.UniversalClient) *Service {
 	return &Service{
 		repo:   NewRepository(db),
 		ledger: ledgerSvc,
 		db:     db,
+		index:  NewHoldIndex(rdb),
 	}
 }
 
@@ -62,6 +65,11 @@ func (s *Service) CreateHold(ctx context.Context, orderID, vendorID string, amou
 
 	if err := s.repo.CreateHold(ctx, hold); err != nil {
 		return fmt.Errorf("escrow hold creation failed: %w", err)
+	}
+
+	// Index in Redis sorted set for O(log N) expiry lookup
+	if idxErr := s.index.Add(ctx, hold.ID.String(), hold.HoldUntil); idxErr != nil {
+		fmt.Printf("[Escrow] Warning: failed to index hold %s in Redis: %v\n", hold.ID, idxErr)
 	}
 
 	return nil
@@ -232,6 +240,9 @@ func (s *Service) ReleaseExpiredHolds(ctx context.Context) (int, error) {
 			continue
 		}
 
+		// Remove from Redis index after successful release
+		_ = s.index.Remove(ctx, holdID.String())
+
 		released++
 		fmt.Printf("[Escrow] Released %.2f PKR for vendor %s (order %s)\n",
 			amount, vendorID, orderID)
@@ -242,18 +253,43 @@ func (s *Service) ReleaseExpiredHolds(ctx context.Context) (int, error) {
 
 // FreezeForDispute freezes all held escrows for an order when a dispute is filed.
 func (s *Service) FreezeForDispute(ctx context.Context, orderTrackingID string, disputeID uuid.UUID) error {
-	return s.repo.FreezeForDispute(ctx, orderTrackingID, disputeID)
+	err := s.repo.FreezeForDispute(ctx, orderTrackingID, disputeID)
+	if err == nil {
+		s.removeHoldsFromIndexByOrder(ctx, orderTrackingID)
+	}
+	return err
 }
 
 // CancelForOrder cancels all held escrows when an order is cancelled or returned.
 // BUG-06 FIX: Prevents vendor from receiving funds for cancelled/returned orders.
 func (s *Service) CancelForOrder(ctx context.Context, orderTrackingID string) error {
-	return s.repo.CancelHoldForOrder(ctx, orderTrackingID)
+	err := s.repo.CancelHoldForOrder(ctx, orderTrackingID)
+	if err == nil {
+		s.removeHoldsFromIndexByOrder(ctx, orderTrackingID)
+	}
+	return err
 }
 
 // UnfreezeOnRejection reverts disputed holds when a dispute is rejected.
 func (s *Service) UnfreezeOnRejection(ctx context.Context, disputeID uuid.UUID) error {
 	return s.repo.UnfreezeOnDisputeRejection(ctx, disputeID)
+}
+
+// removeHoldsFromIndexByOrder removes all holds for an order from the Redis index.
+func (s *Service) removeHoldsFromIndexByOrder(ctx context.Context, orderTrackingID string) {
+	rows, err := s.db.Query(ctx,
+		`SELECT id FROM escrow_holds WHERE order_tracking_id = $1 AND status IN ('cancelled', 'released', 'refunded', 'disputed')`,
+		orderTrackingID)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id uuid.UUID
+		if rows.Scan(&id) == nil {
+			_ = s.index.Remove(ctx, id.String())
+		}
+	}
 }
 
 // RefundDispute executes a double-entry ledger refund to the customer and marks the escrow hold refunded.
@@ -262,6 +298,9 @@ func (s *Service) RefundDispute(ctx context.Context, disputeID uuid.UUID) error 
 	if err != nil {
 		return fmt.Errorf("failed to mark escrow hold refunded: %w", err)
 	}
+
+	// Remove from Redis index
+	_ = s.index.Remove(ctx, hold.ID.String())
 
 	// Fetch customer tracking ID from orders
 	var customerTrackingID string
@@ -314,4 +353,27 @@ func (s *Service) RefundDispute(ctx context.Context, disputeID uuid.UUID) error 
 // GetHoldsByVendor returns escrow hold history for a vendor.
 func (s *Service) GetHoldsByVendor(ctx context.Context, vendorTrackingID string) ([]EscrowHold, error) {
 	return s.repo.GetHoldsByVendor(ctx, vendorTrackingID)
+}
+
+// RebuildIndex populates the Redis sorted set from Postgres on startup or after Redis restart.
+func (s *Service) RebuildIndex(ctx context.Context) error {
+	rows, err := s.db.Query(ctx, `SELECT id, hold_until FROM escrow_holds WHERE status = 'held'`)
+	if err != nil {
+		return fmt.Errorf("rebuild index query failed: %w", err)
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var id uuid.UUID
+		var holdUntil time.Time
+		if err := rows.Scan(&id, &holdUntil); err != nil {
+			continue
+		}
+		if err := s.index.Add(ctx, id.String(), holdUntil); err != nil {
+			continue
+		}
+		count++
+	}
+	fmt.Printf("[Escrow] Rebuilt Redis hold index with %d entries\n", count)
+	return nil
 }

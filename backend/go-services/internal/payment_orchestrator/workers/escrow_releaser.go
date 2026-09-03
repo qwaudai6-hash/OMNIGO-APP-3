@@ -27,6 +27,11 @@ func (w *EscrowReleaserWorker) Start(ctx context.Context) {
 
 	fmt.Println("[EscrowReleaser] Started — checking every hour for expired holds")
 
+	// Rebuild Redis index on startup (handles Redis restart or first boot)
+	if err := w.escrow.RebuildIndex(ctx); err != nil {
+		fmt.Printf("[EscrowReleaser] Warning: failed to rebuild Redis index: %v\n", err)
+	}
+
 	// Run immediately on start
 	w.releaseExpired(ctx)
 

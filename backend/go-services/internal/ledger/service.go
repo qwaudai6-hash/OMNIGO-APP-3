@@ -155,29 +155,25 @@ func (s *Service) Transfer(ctx context.Context, req TransferRequest) (uuid.UUID,
 		return uuid.Nil, fmt.Errorf("ledger commit failed: %w", err)
 	}
 
-	// TigerBeetle Dual-Write (Fire and forget or sync, depending on strictness)
-	// For OMNIGO billion-dollar scale, we eventually migrate fully to TB.
-	// Here we mirror the transfer for analytics/ledger sync.
+	// TigerBeetle Dual-Write via Transactional Outbox
+	// The outbox row commits atomically with ledger_entries, then a background
+	// worker relays to TigerBeetle. This replaces the old fire-and-forget goroutine.
 	if s.tbService != nil {
-		go func(tId uuid.UUID, req TransferRequest) {
-			tbID, err := UUIDToUint128(tId.String())
-			if err != nil {
-				return
-			}
-			transfer := tb.Transfer{
-				ID:              tbID,
-				DebitAccountID:  AccountToUint128(req.DebitAccount),
-				CreditAccountID: AccountToUint128(req.CreditAccount),
-				Amount:          tb.ToUint128(uint64(math.Round(req.Amount * 100))), // Store as cents
-				Ledger:          1,
-				Code:            1,
-			}
-			err = s.tbService.CreateTransfers([]tb.Transfer{transfer})
-			if err != nil {
-				// Log the error. Since dual-write is eventual/analytics consistency, we don't fail the primary tx.
-				fmt.Printf("[Ledger] TigerBeetle dual-write failed for tx %s: %v\n", tId, err)
-			}
-		}(txID, req)
+		tbID, err := UUIDToUint128(txID.String())
+		if err != nil {
+			return uuid.Nil, fmt.Errorf("failed to convert tx ID for TB: %w", err)
+		}
+		transfer := tb.Transfer{
+			ID:              tbID,
+			DebitAccountID:  AccountToUint128(req.DebitAccount),
+			CreditAccountID: AccountToUint128(req.CreditAccount),
+			Amount:          tb.ToUint128(uint64(math.Round(req.Amount * 100))), // Store as cents
+			Ledger:          1,
+			Code:            1,
+		}
+		if err := InsertTBOutboxEntry(ctx, tx, txID, []tb.Transfer{transfer}); err != nil {
+			return uuid.Nil, fmt.Errorf("failed to enqueue TB transfer: %w", err)
+		}
 	}
 
 	return txID, nil
@@ -272,28 +268,24 @@ func (s *Service) MultiTransfer(ctx context.Context, reqs []TransferRequest) (uu
 		return uuid.Nil, fmt.Errorf("multi-transfer commit failed: %w", err)
 	}
 
+	// TigerBeetle Dual-Write via Transactional Outbox
 	if s.tbService != nil {
-		go func(tId uuid.UUID, requests []TransferRequest) {
-			var tbTransfers []tb.Transfer
-			for i, r := range requests {
-				// Deterministically map each request ID to a unique tb ID. We use txID + index so it's stable.
-				// For simplicity, generate a new ID based on tId and index.
-				tbIDStr := fmt.Sprintf("%s-%d", tId.String(), i)
-				u := uuid.NewMD5(uuid.NameSpaceOID, []byte(tbIDStr))
-				tbTransfers = append(tbTransfers, tb.Transfer{
-					ID:              tb.BytesToUint128(u),
-					DebitAccountID:  AccountToUint128(r.DebitAccount),
-					CreditAccountID: AccountToUint128(r.CreditAccount),
-					Amount:          tb.ToUint128(uint64(math.Round(r.Amount * 100))),
-					Ledger:          1,
-					Code:            1,
-				})
-			}
-			err = s.tbService.CreateTransfers(tbTransfers)
-			if err != nil {
-				fmt.Printf("[Ledger] TigerBeetle dual-write failed for multi-tx %s: %v\n", tId, err)
-			}
-		}(txID, reqs)
+		var tbTransfers []tb.Transfer
+		for i, r := range reqs {
+			tbIDStr := fmt.Sprintf("%s-%d", txID.String(), i)
+			u := uuid.NewMD5(uuid.NameSpaceOID, []byte(tbIDStr))
+			tbTransfers = append(tbTransfers, tb.Transfer{
+				ID:              tb.BytesToUint128(u),
+				DebitAccountID:  AccountToUint128(r.DebitAccount),
+				CreditAccountID: AccountToUint128(r.CreditAccount),
+				Amount:          tb.ToUint128(uint64(math.Round(r.Amount * 100))),
+				Ledger:          1,
+				Code:            1,
+			})
+		}
+		if err := InsertTBOutboxEntry(ctx, tx, txID, tbTransfers); err != nil {
+			return uuid.Nil, fmt.Errorf("failed to enqueue TB multi-transfer: %w", err)
+		}
 	}
 
 	return txID, nil

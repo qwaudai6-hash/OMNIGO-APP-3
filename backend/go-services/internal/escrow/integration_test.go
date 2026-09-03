@@ -71,7 +71,7 @@ func TestE2E_EscrowReleaseFlow(t *testing.T) {
 	// Build the escrow service. We use a no-op ledger stub to avoid
 	// needing the full ledger schema for the double-entry transfer.
 	ledgerSvc := ledger.NewService(pool, nil)
-	svc := NewService(pool, ledgerSvc)
+	svc := NewService(pool, ledgerSvc, nil)
 
 	// Capture vendor_wallet balance before
 	var balanceBefore float64
@@ -203,7 +203,7 @@ func TestE2E_EscrowReleaseConcurrentSimulated(t *testing.T) {
 	}
 
 	ledgerSvc := ledger.NewService(pool, nil)
-	svc := NewService(pool, ledgerSvc)
+	svc := NewService(pool, ledgerSvc, nil)
 
 	var balanceBefore float64
 	_ = pool.QueryRow(ctx,

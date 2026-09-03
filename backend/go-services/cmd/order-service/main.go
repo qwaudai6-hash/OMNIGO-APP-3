@@ -119,7 +119,11 @@ func main() {
 	svc := service.NewOrderService(repo, kafkaClient, redisClient, productGRPCClient, productServiceURL, internalSigner)
 
 	// Escrow service for COD vendor holds
-	escrowSvc := escrow.NewService(db.Writer, ledgerSvc)
+	var rdbForEscrow redis.UniversalClient
+	if redisClient != nil {
+		rdbForEscrow = redisClient.Client
+	}
+	escrowSvc := escrow.NewService(db.Writer, ledgerSvc, rdbForEscrow)
 
 	// COD accounting depends on the ledger and the new payment transaction table.
 	paymentTxnRepo := paymentRepo.NewRepository(db.Writer)

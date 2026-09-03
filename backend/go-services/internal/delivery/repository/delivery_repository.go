@@ -848,3 +848,80 @@ func (r *DeliveryRepository) SettleCODVendorAndDebt(ctx context.Context, orderTr
 
 	return tx.Commit(ctx)
 }
+
+// SaveBid persists a delivery bid to PostgreSQL (best-effort, Redis remains primary).
+func (r *DeliveryRepository) SaveBid(ctx context.Context, bid *models.RideBid) error {
+	query := `
+		INSERT INTO delivery_bids (bid_id, customer_tracking_id, vehicle_type, service_type,
+		    pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, negotiated_fare, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		ON CONFLICT (bid_id) DO NOTHING
+	`
+	_, err := r.writer.Exec(ctx, query,
+		bid.BidID, bid.CustomerTrackID, bid.VehicleType, bid.ServiceType,
+		bid.PickupLat, bid.PickupLng, bid.DropoffLat, bid.DropoffLng,
+		bid.NegotiatedFare, bid.Status,
+	)
+	return err
+}
+
+// SaveCounterBid persists a rider's counter-offer to PostgreSQL.
+func (r *DeliveryRepository) SaveCounterBid(ctx context.Context, c *models.DeliveryCounterBid) error {
+	query := `
+		INSERT INTO delivery_bid_counters (bid_id, rider_tracking_id, rider_name, rating,
+		    vehicle_plate, proposed_fare, eta, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+		RETURNING id, created_at
+	`
+	return r.writer.QueryRow(ctx, query,
+		c.BidID, c.RiderTrackID, c.RiderName, c.Rating,
+		c.VehiclePlate, c.ProposedFare, c.ETA,
+	).Scan(&c.ID, &c.CreatedAt)
+}
+
+// AcceptCounterBid accepts a counter-offer within a transaction.
+func (r *DeliveryRepository) AcceptCounterBid(ctx context.Context, bidID string, counterID int64) (*models.DeliveryCounterBid, error) {
+	tx, err := r.writer.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	// Lock the bid row
+	var bidStatus string
+	err = tx.QueryRow(ctx, `SELECT status FROM delivery_bids WHERE bid_id = $1 FOR UPDATE`, bidID).Scan(&bidStatus)
+	if err != nil {
+		return nil, fmt.Errorf("bid not found: %w", err)
+	}
+	if bidStatus == "accepted" || bidStatus == "cancelled" {
+		return nil, fmt.Errorf("bid is already %s", bidStatus)
+	}
+
+	// Accept the chosen counter
+	var counter models.DeliveryCounterBid
+	err = tx.QueryRow(ctx, `
+		UPDATE delivery_bid_counters SET status = 'accepted'
+		WHERE id = $1 AND bid_id = $2 AND status = 'pending'
+		RETURNING id, bid_id, rider_tracking_id, rider_name, rating,
+		          vehicle_plate, proposed_fare, eta, status, created_at
+	`, counterID, bidID).Scan(&counter.ID, &counter.BidID, &counter.RiderTrackID,
+		&counter.RiderName, &counter.Rating, &counter.VehiclePlate,
+		&counter.ProposedFare, &counter.ETA, &counter.Status, &counter.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("counter not found or already resolved: %w", err)
+	}
+
+	// Reject all other pending counters
+	_, _ = tx.Exec(ctx, `UPDATE delivery_bid_counters SET status = 'rejected' WHERE bid_id = $1 AND id != $2 AND status = 'pending'`, bidID, counterID)
+
+	// Update bid status
+	tag, err := tx.Exec(ctx, `UPDATE delivery_bids SET status = 'accepted', updated_at = NOW() WHERE bid_id = $1 AND status IN ('searching', 'offers_received')`, bidID)
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, fmt.Errorf("bid transition failed")
+	}
+
+	return &counter, tx.Commit(ctx)
+}

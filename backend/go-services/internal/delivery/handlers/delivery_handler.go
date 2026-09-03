@@ -177,6 +177,7 @@ func (h *DeliveryHandler) RegisterRoutes(router *gin.Engine) {
 		ride.POST("/estimate", h.EstimateRide)
 		ride.POST("/bid", middleware.RoleRequired("customer"), h.CreateRideBid)
 		ride.POST("/bid/counter", middleware.RoleRequired("rider"), h.SubmitCounterBid)
+		ride.POST("/bid/accept", middleware.RoleRequired("customer"), h.AcceptCounterBid)
 	}
 }
 
@@ -211,6 +212,26 @@ func (h *DeliveryHandler) SubmitCounterBid(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "counter bid published"})
+}
+
+// AcceptCounterBid handles customer accepting a rider's counter-offer
+func (h *DeliveryHandler) AcceptCounterBid(c *gin.Context) {
+	var req struct {
+		BidID     string `json:"bid_id" binding:"required"`
+		CounterID int64  `json:"counter_id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	counter, err := h.svc.AcceptCounterBid(c.Request.Context(), req.BidID, req.CounterID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, counter)
 }
 
 var allowedProofExtensions = map[string]bool{

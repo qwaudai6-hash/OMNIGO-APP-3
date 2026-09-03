@@ -1059,6 +1059,11 @@ func (s *DeliveryService) CreateRideBid(ctx context.Context, req *models.CreateB
 		CreatedAt:       time.Now(),
 	}
 
+	// Persist to Postgres (best-effort, Redis remains primary for real-time)
+	if err := s.repo.SaveBid(ctx, bid); err != nil {
+		log.Printf("WARNING: delivery bid %s not persisted: %v", bid.BidID, err)
+	}
+
 	// Publish RIDE_BID_BROADCAST to Redis/NATS pub/sub for WebSocket gateway distribution
 	if s.redis != nil {
 		broadcastPayload := map[string]interface{}{
@@ -1082,6 +1087,20 @@ func (s *DeliveryService) CreateRideBid(ctx context.Context, req *models.CreateB
 
 // SubmitCounterBid processes a rider's counter-offer and pushes it to the customer via WebSocket.
 func (s *DeliveryService) SubmitCounterBid(ctx context.Context, req *models.CounterBidRequest) error {
+	// Persist to Postgres (best-effort)
+	counter := &models.DeliveryCounterBid{
+		BidID:        req.BidID,
+		RiderTrackID: req.RiderTrackID,
+		RiderName:    req.RiderName,
+		Rating:       req.Rating,
+		VehiclePlate: req.VehiclePlate,
+		ProposedFare: req.ProposedFare,
+		ETA:          req.ETA,
+	}
+	if err := s.repo.SaveCounterBid(ctx, counter); err != nil {
+		log.Printf("WARNING: counter-bid not persisted: %v", err)
+	}
+
 	if s.redis == nil {
 		return fmt.Errorf("redis unavailable: counter-bid cannot be published")
 	}
@@ -1104,4 +1123,28 @@ func (s *DeliveryService) SubmitCounterBid(ctx context.Context, req *models.Coun
 
 	// Broadcast counter offer to the customer session channel
 	return s.redis.Publish(ctx, "customer:events", string(bytes)).Err()
+}
+
+// AcceptCounterBid accepts a rider's counter-offer, updating DB and notifying riders.
+func (s *DeliveryService) AcceptCounterBid(ctx context.Context, bidID string, counterID int64) (*models.DeliveryCounterBid, error) {
+	counter, err := s.repo.AcceptCounterBid(ctx, bidID, counterID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Broadcast acceptance to riders
+	if s.redis != nil {
+		payload := map[string]interface{}{
+			"action":      "DELIVERY_BID_ACCEPTED",
+			"bid_id":      bidID,
+			"counter_id":  counterID,
+			"rider_id":    counter.RiderTrackID,
+			"fare":        counter.ProposedFare,
+			"timestamp":   time.Now().UnixMilli(),
+		}
+		bytes, _ := json.Marshal(payload)
+		s.redis.Publish(ctx, "rider:events", string(bytes))
+	}
+
+	return counter, nil
 }

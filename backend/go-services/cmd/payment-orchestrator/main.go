@@ -89,7 +89,11 @@ func main() {
 
 	// 3. Initialize Domain Services
 	ledgerSvc := ledger.NewService(db.Writer, tbService)
-	escrowSvc := escrow.NewService(db.Writer, ledgerSvc)
+	var rdbForEscrow redis.UniversalClient
+	if redisClient != nil {
+		rdbForEscrow = redisClient.Client
+	}
+	escrowSvc := escrow.NewService(db.Writer, ledgerSvc, rdbForEscrow)
 	calculator := payment_orchestrator.NewCommissionCalculator(db.Writer)
 
 	// 4. Initialize Handlers
@@ -264,11 +268,16 @@ func main() {
 
 	// 6. Start Background Workers
 	workerCtx, workerCancel := context.WithCancel(context.Background())
-	go workers.NewEscrowReleaserWorker(escrowSvc, rdb).Start(workerCtx)
+	go workers.NewEscrowReleaserWorker(escrowSvc, rdbForEscrow).Start(workerCtx)
 	go workers.NewPayoutWorker(db.Writer, ledgerSvc, rdb).Start(workerCtx)
 	go workers.NewSettlementWorker(db.Writer, ledgerSvc, escrowSvc, calculator, payfastClient, rdb).Start(workerCtx)
 	go workers.NewStripeReplayWorker(db.Writer, stripeClient).Start(workerCtx)
 	go reconWorker.Start(workerCtx)
+
+	// TigerBeetle Outbox Worker — relays pending transfers to TB
+	if tbService != nil {
+		go ledger.NewTBOutboxWorker(db.Writer, tbService).Start(workerCtx)
+	}
 
 	// 7. Start Server
 	srv := &http.Server{

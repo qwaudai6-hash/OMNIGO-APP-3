@@ -15,6 +15,15 @@ const (
 	StatusDisputed     = "disputed"
 )
 
+// Delivery bid statuses
+const (
+	BidStatusSearching      = "searching"
+	BidStatusOffersReceived = "offers_received"
+	BidStatusAccepted       = "accepted"
+	BidStatusCancelled      = "cancelled"
+	BidStatusCompleted      = "completed"
+)
+
 // DeliveryGig represents a delivery task broadcasted to riders
 type DeliveryGig struct {
 	ID                      int       `json:"id"`
@@ -177,4 +186,18 @@ type RideBid struct {
 	NegotiatedFare  float64   `json:"negotiated_fare"`
 	Status          string    `json:"status"` // searching, offers_received, accepted, cancelled
 	CreatedAt       time.Time `json:"created_at"`
+}
+
+// DeliveryCounterBid represents a rider's counter-offer to a delivery bid
+type DeliveryCounterBid struct {
+	ID           int64     `json:"id"`
+	BidID        string    `json:"bid_id"`
+	RiderTrackID string    `json:"rider_tracking_id"`
+	RiderName    string    `json:"rider_name"`
+	Rating       string    `json:"rating"`
+	VehiclePlate string    `json:"vehicle_plate"`
+	ProposedFare float64   `json:"proposed_fare"`
+	ETA          string    `json:"eta"`
+	Status       string    `json:"status"`
+	CreatedAt    time.Time `json:"created_at"`
 }
