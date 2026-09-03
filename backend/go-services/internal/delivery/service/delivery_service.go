@@ -1059,12 +1059,12 @@ func (s *DeliveryService) CreateRideBid(ctx context.Context, req *models.CreateB
 		CreatedAt:       time.Now(),
 	}
 
-	// Persist to Postgres (best-effort, Redis remains primary for real-time)
+	// Persist to Postgres (required — bid must be durable)
 	if err := s.repo.SaveBid(ctx, bid); err != nil {
-		log.Printf("WARNING: delivery bid %s not persisted: %v", bid.BidID, err)
+		return nil, fmt.Errorf("failed to persist bid: %w", err)
 	}
 
-	// Publish RIDE_BID_BROADCAST to Redis/NATS pub/sub for WebSocket gateway distribution
+	// Publish RIDE_BID_BROADCAST to Redis pub/sub (best-effort — non-critical)
 	if s.redis != nil {
 		broadcastPayload := map[string]interface{}{
 			"action":               "RIDE_BID_BROADCAST",
@@ -1087,7 +1087,7 @@ func (s *DeliveryService) CreateRideBid(ctx context.Context, req *models.CreateB
 
 // SubmitCounterBid processes a rider's counter-offer and pushes it to the customer via WebSocket.
 func (s *DeliveryService) SubmitCounterBid(ctx context.Context, req *models.CounterBidRequest) error {
-	// Persist to Postgres (best-effort)
+	// Persist to Postgres (required — counter-bid must be durable)
 	counter := &models.DeliveryCounterBid{
 		BidID:        req.BidID,
 		RiderTrackID: req.RiderTrackID,
@@ -1098,11 +1098,13 @@ func (s *DeliveryService) SubmitCounterBid(ctx context.Context, req *models.Coun
 		ETA:          req.ETA,
 	}
 	if err := s.repo.SaveCounterBid(ctx, counter); err != nil {
-		log.Printf("WARNING: counter-bid not persisted: %v", err)
+		return fmt.Errorf("failed to persist counter-bid: %w", err)
 	}
 
+	// Publish to Redis (best-effort — non-critical for durability)
 	if s.redis == nil {
-		return fmt.Errorf("redis unavailable: counter-bid cannot be published")
+		// Redis down — counter-bid is persisted, real-time delivery degraded
+		return nil
 	}
 
 	offerPayload := map[string]interface{}{

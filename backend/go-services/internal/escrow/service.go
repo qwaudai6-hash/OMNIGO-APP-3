@@ -78,177 +78,200 @@ func (s *Service) CreateHold(ctx context.Context, orderID, vendorID string, amou
 // ReleaseExpiredHolds releases all holds past their hold_until time
 // if no open disputes exist for the order.
 //
-// Concurrency model: this function uses an atomic claim pattern inside a
-// transaction to guarantee that each hold is processed exactly once even
-// across multiple concurrent worker pods.
-//
-//  1. Begin a transaction
-//  2. Atomically claim ONE releasable hold by transitioning its status from
-//     'held' to 'releasing' using UPDATE ... RETURNING. The row-level lock
-//     acquired by UPDATE prevents any concurrent worker from claiming the
-//     same row.
-//  3. Re-verify the order's escrow_released flag INSIDE the same transaction
-//     (fail-closed: if the lookup fails, we roll back and skip the hold).
-//  4. Execute the ledger transfer, hold status update, order flag update,
-//     and vendor wallet credit — all in the same transaction.
-//  5. Commit. If any step fails, the claim UPDATE rolls back, releasing the
-//     row for a future attempt.
+// Hybrid approach: Redis sorted set for fast candidate lookup (O(log N)),
+// Postgres FOR UPDATE SKIP LOCKED for safe concurrent claim.
 func (s *Service) ReleaseExpiredHolds(ctx context.Context) (int, error) {
 	released := 0
 
-	for {
-		tx, err := s.db.Begin(ctx)
-		if err != nil {
-			fmt.Printf("[Escrow] Failed to begin transaction: %v\n", err)
-			return released, err
+	// Try Redis index first for fast candidate lookup
+	var candidateIDs []string
+	if s.index != nil {
+		ids, err := s.index.ClaimExpired(ctx, 50)
+		if err == nil && len(ids) > 0 {
+			candidateIDs = ids
 		}
+	}
 
-		// Atomic claim: transition ONE hold from 'held' to 'releasing' and return
-		// its details. The UPDATE acquires a row-level lock; concurrent workers
-		// running the same statement will SKIP this row (or block on it).
-		var holdID uuid.UUID
-		var orderID, vendorID string
-		var amount float64
-		err = tx.QueryRow(ctx, `
-			UPDATE escrow_holds
-			SET status = 'releasing', updated_at = NOW()
-			WHERE id = (
-				SELECT id FROM escrow_holds
-				WHERE status = 'held' AND hold_until <= NOW()
-				ORDER BY hold_until
-				LIMIT 1
-				FOR UPDATE SKIP LOCKED
-			)
-			RETURNING id, order_tracking_id, vendor_tracking_id, amount
-		`).Scan(&holdID, &orderID, &vendorID, &amount)
-		if err != nil {
-			_ = tx.Rollback(ctx)
-			// pgx.ErrNoRows means no eligible holds remain — normal exit
-			if errors.Is(err, pgx.ErrNoRows) {
-				break
-			}
-			fmt.Printf("[Escrow] Failed to claim hold: %v\n", err)
-			return released, err
-		}
-
-		// Fail-closed check: re-verify the order's escrow_released flag INSIDE
-		// the same transaction. If the lookup fails, we roll back the claim
-		// (status reverts to 'held') and skip — never proceed on a failed safety check.
-		var alreadyReleased bool
-		err = tx.QueryRow(ctx,
-			`SELECT COALESCE(escrow_released, FALSE) FROM orders WHERE order_tracking_id = $1`,
-			orderID,
-		).Scan(&alreadyReleased)
-		if err != nil {
-			_ = tx.Rollback(ctx)
-			fmt.Printf("[Escrow] Failed to check alreadyReleased for order %s: %v — skipping\n", orderID, err)
-			continue
-		}
-		if alreadyReleased {
-			// Order already released — mark the hold as released and move on
-			_, _ = s.db.Exec(ctx, `UPDATE escrow_holds SET status = 'released', released_at = NOW() WHERE id = $1`, holdID)
-			_ = tx.Rollback(ctx)
-			continue
-		}
-
-		// Check for open disputes (read-only, can be outside tx but kept here for atomicity)
-		var hasDispute bool
-		err = tx.QueryRow(ctx,
-			`SELECT EXISTS(SELECT 1 FROM disputes WHERE order_tracking_id = $1 AND status IN ('open', 'investigating'))`,
-			orderID,
-		).Scan(&hasDispute)
-		if err != nil {
-			_ = tx.Rollback(ctx)
-			fmt.Printf("[Escrow] Failed to check disputes for order %s: %v\n", orderID, err)
-			continue
-		}
-		if hasDispute {
-			// Release our claim — let the hold go back to 'held' for a future attempt
-			_, err := tx.Exec(ctx, `UPDATE escrow_holds SET status = 'held', updated_at = NOW() WHERE id = $1`, holdID)
+	// If Redis has candidates, use them; otherwise fall back to full PG scan
+	if len(candidateIDs) > 0 {
+		for _, idStr := range candidateIDs {
+			holdID, err := uuid.Parse(idStr)
 			if err != nil {
-				_ = tx.Rollback(ctx)
-				fmt.Printf("[Escrow] Failed to revert claim for disputed order %s: %v\n", orderID, err)
 				continue
 			}
-			if err := tx.Commit(ctx); err != nil {
-				fmt.Printf("[Escrow] Failed to commit dispute-skip for order %s: %v\n", orderID, err)
+			if err := s.releaseOneHold(ctx, holdID); err != nil {
+				fmt.Printf("[Escrow] Failed to release hold %s: %v\n", holdID, err)
+				continue
 			}
-			fmt.Printf("[Escrow] Skipping release for order %s — open dispute exists\n", orderID)
-			continue
+			released++
 		}
+	} else {
+		// Fallback: direct Postgres scan (handles Redis down or empty index)
+		for {
+			tx, err := s.db.Begin(ctx)
+			if err != nil {
+				fmt.Printf("[Escrow] Failed to begin transaction: %v\n", err)
+				return released, err
+			}
 
-		// Execute ledger transfer: vendor_locked_escrow → vendor_withdrawable.
-		// The idempotency key is per-hold, so retries across cron cycles are safe.
-		idempotencyKey := fmt.Sprintf("escrow:release:%s", holdID.String())
-		_, err = s.ledger.Transfer(ctx, ledger.TransferRequest{
-			DebitAccount:   ledger.AccountVendorLockedEscrow,
-			CreditAccount:  ledger.AccountVendorWithdrawable,
-			Amount:         amount,
-			ReferenceType:  "escrow_release",
-			ReferenceID:    orderID,
-			Description:    fmt.Sprintf("Escrow released for order %s after %dh hold", orderID, int(getHoldDuration().Hours())),
-			IdempotencyKey: idempotencyKey,
-		})
-		if err != nil {
-			_ = tx.Rollback(ctx)
-			fmt.Printf("[Escrow] Ledger transfer failed for hold %s: %v\n", holdID, err)
-			continue
+			var holdID uuid.UUID
+			var orderID, vendorID string
+			var amount float64
+			err = tx.QueryRow(ctx, `
+				UPDATE escrow_holds
+				SET status = 'releasing', updated_at = NOW()
+				WHERE id = (
+					SELECT id FROM escrow_holds
+					WHERE status = 'held' AND hold_until <= NOW()
+					ORDER BY hold_until
+					LIMIT 1
+					FOR UPDATE SKIP LOCKED
+				)
+				RETURNING id, order_tracking_id, vendor_tracking_id, amount
+			`).Scan(&holdID, &orderID, &vendorID, &amount)
+			if err != nil {
+				_ = tx.Rollback(ctx)
+				if errors.Is(err, pgx.ErrNoRows) {
+					break
+				}
+				fmt.Printf("[Escrow] Failed to claim hold: %v\n", err)
+				return released, err
+			}
+
+			if err := s.processHoldTx(ctx, tx, holdID, orderID, vendorID, amount); err != nil {
+				fmt.Printf("[Escrow] Failed to process hold %s: %v\n", holdID, err)
+				continue
+			}
+			released++
 		}
-
-		// Mark hold as 'released' (final status) — atomically with the wallet credit
-		_, err = tx.Exec(ctx, `UPDATE escrow_holds SET status = 'released', released_at = NOW() WHERE id = $1`, holdID)
-		if err != nil {
-			_ = tx.Rollback(ctx)
-			fmt.Printf("[Escrow] Failed to mark hold %s as released: %v\n", holdID, err)
-			continue
-		}
-
-		// Mark order as released — only if not already released (prevents double-flag)
-		tag, err := tx.Exec(ctx,
-			`UPDATE orders SET escrow_released = TRUE WHERE order_tracking_id = $1 AND escrow_released = FALSE`,
-			orderID,
-		)
-		if err != nil {
-			_ = tx.Rollback(ctx)
-			fmt.Printf("[Escrow] Failed to mark escrow_released for order %s: %v\n", orderID, err)
-			continue
-		}
-		_ = tag // rows affected is informational; the WHERE guard prevents double-set
-
-		// Credit vendor wallet — idempotency note: since the hold was atomically
-		// claimed (status 'held' → 'releasing'), only THIS transaction can reach
-		// this point for this hold. The next iteration will see 'releasing' and
-		// skip it.
-		_, err = tx.Exec(ctx, `
-			INSERT INTO vendor_wallet (vendor_tracking_id, balance, lifetime_earnings, updated_at)
-			VALUES ($1, $2, $2, NOW())
-			ON CONFLICT (vendor_tracking_id)
-			DO UPDATE SET
-				balance = vendor_wallet.balance + $2,
-				lifetime_earnings = vendor_wallet.lifetime_earnings + $2,
-				updated_at = NOW()
-		`, vendorID, amount)
-		if err != nil {
-			_ = tx.Rollback(ctx)
-			fmt.Printf("[Escrow] Failed to credit vendor_wallet for hold %s: %v\n", holdID, err)
-			continue
-		}
-
-		// Commit — all-or-nothing
-		if err := tx.Commit(ctx); err != nil {
-			fmt.Printf("[Escrow] Transaction commit failed for hold %s: %v\n", holdID, err)
-			continue
-		}
-
-		// Remove from Redis index after successful release
-		_ = s.index.Remove(ctx, holdID.String())
-
-		released++
-		fmt.Printf("[Escrow] Released %.2f PKR for vendor %s (order %s)\n",
-			amount, vendorID, orderID)
 	}
 
 	return released, nil
+}
+
+// releaseOneHold releases a single hold by ID (used with Redis index candidates).
+func (s *Service) releaseOneHold(ctx context.Context, holdID uuid.UUID) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var orderID, vendorID string
+	var amount float64
+	err = tx.QueryRow(ctx, `
+		UPDATE escrow_holds
+		SET status = 'releasing', updated_at = NOW()
+		WHERE id = $1 AND status = 'held' AND hold_until <= NOW()
+		RETURNING order_tracking_id, vendor_tracking_id, amount
+	`, holdID).Scan(&orderID, &vendorID, &amount)
+	if err != nil {
+		return err
+	}
+
+	return s.processHoldTx(ctx, tx, holdID, orderID, vendorID, amount)
+}
+
+// processHoldTx handles the common hold processing logic (checks + transfer + commit).
+func (s *Service) processHoldTx(ctx context.Context, tx pgx.Tx, holdID uuid.UUID, orderID, vendorID string, amount float64) error {
+	// Fail-closed check: re-verify escrow_released flag
+	var alreadyReleased bool
+	err := tx.QueryRow(ctx,
+		`SELECT COALESCE(escrow_released, FALSE) FROM orders WHERE order_tracking_id = $1`,
+		orderID,
+	).Scan(&alreadyReleased)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		fmt.Printf("[Escrow] Failed to check alreadyReleased for order %s: %v — skipping\n", orderID, err)
+		return nil
+	}
+	if alreadyReleased {
+		_, _ = s.db.Exec(ctx, `UPDATE escrow_holds SET status = 'released', released_at = NOW() WHERE id = $1`, holdID)
+		_ = tx.Rollback(ctx)
+		return nil
+	}
+
+	// Check for open disputes
+	var hasDispute bool
+	err = tx.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM disputes WHERE order_tracking_id = $1 AND status IN ('open', 'investigating'))`,
+		orderID,
+	).Scan(&hasDispute)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return nil
+	}
+	if hasDispute {
+		_, err := tx.Exec(ctx, `UPDATE escrow_holds SET status = 'held', updated_at = NOW() WHERE id = $1`, holdID)
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			return nil
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil
+		}
+		fmt.Printf("[Escrow] Skipping release for order %s — open dispute exists\n", orderID)
+		return nil
+	}
+
+	// Execute ledger transfer: vendor_locked_escrow → vendor_withdrawable
+	idempotencyKey := fmt.Sprintf("escrow:release:%s", holdID.String())
+	_, err = s.ledger.Transfer(ctx, ledger.TransferRequest{
+		DebitAccount:   ledger.AccountVendorLockedEscrow,
+		CreditAccount:  ledger.AccountVendorWithdrawable,
+		Amount:         amount,
+		ReferenceType:  "escrow_release",
+		ReferenceID:    orderID,
+		Description:    fmt.Sprintf("Escrow released for order %s after %dh hold", orderID, int(getHoldDuration().Hours())),
+		IdempotencyKey: idempotencyKey,
+	})
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return fmt.Errorf("ledger transfer failed: %w", err)
+	}
+
+	// Mark hold as released
+	_, err = tx.Exec(ctx, `UPDATE escrow_holds SET status = 'released', released_at = NOW() WHERE id = $1`, holdID)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return fmt.Errorf("failed to mark hold released: %w", err)
+	}
+
+	// Mark order as released
+	_, err = tx.Exec(ctx,
+		`UPDATE orders SET escrow_released = TRUE WHERE order_tracking_id = $1 AND escrow_released = FALSE`,
+		orderID,
+	)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return fmt.Errorf("failed to mark escrow_released: %w", err)
+	}
+
+	// Credit vendor wallet
+	_, err = tx.Exec(ctx, `
+		INSERT INTO vendor_wallet (vendor_tracking_id, balance, lifetime_earnings, updated_at)
+		VALUES ($1, $2, $2, NOW())
+		ON CONFLICT (vendor_tracking_id)
+		DO UPDATE SET
+			balance = vendor_wallet.balance + $2,
+			lifetime_earnings = vendor_wallet.lifetime_earnings + $2,
+			updated_at = NOW()
+	`, vendorID, amount)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return fmt.Errorf("failed to credit vendor_wallet: %w", err)
+	}
+
+	// Commit
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("transaction commit failed: %w", err)
+	}
+
+	// Remove from Redis index after successful release
+	_ = s.index.Remove(ctx, holdID.String())
+
+	fmt.Printf("[Escrow] Released %.2f PKR for vendor %s (order %s)\n", amount, vendorID, orderID)
+	return nil
 }
 
 // FreezeForDispute freezes all held escrows for an order when a dispute is filed.
