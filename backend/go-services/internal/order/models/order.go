@@ -25,6 +25,11 @@ type Order struct {
 	VendorEscrowRupees    float64     `json:"vendor_escrow_rupees"`
 	DeliveryEscrowPaisa   int64       `json:"delivery_escrow_paisa"`
 	DeliveryEscrowRupees  float64     `json:"delivery_escrow_rupees"`
+	// H4: Uber-style explicit billing columns (customer pays everything)
+	BaseProductAmountPaisa int64  `json:"base_product_amount_paisa"`
+	DeliveryFeeAmountPaisa int64  `json:"delivery_fee_amount_paisa"`
+	TotalBilledAmountPaisa int64  `json:"total_billed_amount_paisa"`
+	RoutingStatus          string `json:"routing_status"` // DYNAMIC_CALCULATED | FALLBACK_HAVERSINE | FAILED_CALCULATION
 	// Legacy fields (kept for backward compat — prefer *_paisa versions)
 	TotalAmount         float64    `json:"total_amount,omitempty"`
 	AdminCommission     float64    `json:"admin_commission,omitempty"`
@@ -54,11 +59,14 @@ type Order struct {
 // CreateOrderRequest is the payload for creating a new order.
 // TotalAmount is accepted in rupees (float64) for backward compat with
 // existing frontend code, but is converted to paisa internally.
+// DeliveryFeePaisa is the Uber-style delivery fee in paisa charged to customer.
 type CreateOrderRequest struct {
 	UserTrackID        string               `json:"user_tracking_id"`
 	VendorStoreTrackID string               `json:"store_tracking_id" binding:"required"`
 	Items              []CreateOrderItemReq `json:"items" binding:"required,dive"`
 	TotalAmount        float64              `json:"total_amount" binding:"required"` // rupees; converted to paisa internally
+	DeliveryFeePaisa   int64                `json:"delivery_fee_paisa"`             // H4: Uber-style delivery fee in paisa (customer pays)
+	RoutingStatus      string               `json:"routing_status"`                 // H3: DYNAMIC_CALCULATED | FALLBACK_HAVERSINE | FAILED_CALCULATION
 	Currency           string               `json:"currency" binding:"required"`
 	PaymentGateway     string               `json:"payment_gateway"`
 	PaymentMethod      string               `json:"payment_method"` // alias: frontend sends payment_method

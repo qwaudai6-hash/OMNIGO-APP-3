@@ -38,8 +38,8 @@ func (r *OrderRepository) CreateOrder(ctx context.Context, order *models.Order, 
 	defer tx.Rollback(ctx)
 
 	query := `
-		INSERT INTO orders (order_tracking_id, customer_tracking_id, store_tracking_id, vendor_tracking_id, status, total_amount, currency, payment_gateway, payment_status, customer_lat, customer_lng, device_session_nonce, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, 'pending', $8, $9, $10, NOW(), NOW())
+		INSERT INTO orders (order_tracking_id, customer_tracking_id, store_tracking_id, vendor_tracking_id, status, total_amount, currency, payment_gateway, payment_status, customer_lat, customer_lng, device_session_nonce, base_product_amount, delivery_fee_amount, total_billed_amount, routing_status, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, 'pending', $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
 		RETURNING id, created_at, updated_at
 	`
 	err = tx.QueryRow(ctx, query,
@@ -53,6 +53,10 @@ func (r *OrderRepository) CreateOrder(ctx context.Context, order *models.Order, 
 		order.CustomerLat,
 		order.CustomerLng,
 		order.DeviceSessionNonce,
+		order.BaseProductAmountPaisa,
+		order.DeliveryFeeAmountPaisa,
+		order.TotalBilledAmountPaisa,
+		order.RoutingStatus,
 	).Scan(&order.ID, &order.CreatedAt, &order.UpdatedAt)
 	if err != nil {
 		return err
@@ -130,8 +134,8 @@ func (r *OrderRepository) CreateOrderWithReservations(ctx context.Context, order
 	defer tx.Rollback(ctx)
 
 	query := `
-		INSERT INTO orders (order_tracking_id, customer_tracking_id, store_tracking_id, vendor_tracking_id, status, total_amount, currency, payment_gateway, payment_status, customer_lat, customer_lng, device_session_nonce, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, 'pending', $8, $9, $10, NOW(), NOW())
+		INSERT INTO orders (order_tracking_id, customer_tracking_id, store_tracking_id, vendor_tracking_id, status, total_amount, currency, payment_gateway, payment_status, customer_lat, customer_lng, device_session_nonce, base_product_amount, delivery_fee_amount, total_billed_amount, routing_status, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, 'pending', $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
 		RETURNING id, created_at, updated_at
 	`
 	err = tx.QueryRow(ctx, query,
@@ -145,6 +149,10 @@ func (r *OrderRepository) CreateOrderWithReservations(ctx context.Context, order
 		order.CustomerLat,
 		order.CustomerLng,
 		order.DeviceSessionNonce,
+		order.BaseProductAmountPaisa,
+		order.DeliveryFeeAmountPaisa,
+		order.TotalBilledAmountPaisa,
+		order.RoutingStatus,
 	).Scan(&order.ID, &order.CreatedAt, &order.UpdatedAt)
 	if err != nil {
 		return err
@@ -268,7 +276,8 @@ func (r *OrderRepository) GetOrderByTrackingID(ctx context.Context, trackingID s
 			status, delivery_type, payment_gateway, total_amount, admin_commission, vendor_escrow, delivery_escrow,
 			currency, payment_status, customer_lat, customer_lng, otp_code, device_session_nonce,
 			escrow_released, dispute_status, delivered_at, created_at, updated_at,
-			COALESCE(handover_photo_url, ''), handover_at, COALESCE(handover_notes, ''), COALESCE(handed_over_by_tracking_id, '')
+			COALESCE(handover_photo_url, ''), handover_at, COALESCE(handover_notes, ''), COALESCE(handed_over_by_tracking_id, ''),
+			base_product_amount, delivery_fee_amount, total_billed_amount, routing_status
 		FROM orders
 		WHERE order_tracking_id = $1
 	`
@@ -291,6 +300,7 @@ func (r *OrderRepository) GetOrderByTrackingID(ctx context.Context, trackingID s
 		&order.EscrowReleased, &order.DisputeStatus, &order.DeliveredAt,
 		&createdAt, &updatedAt,
 		&order.HandoverPhotoURL, &order.HandoverAt, &order.HandoverNotes, &order.HandedByTrackingID,
+		&order.BaseProductAmountPaisa, &order.DeliveryFeeAmountPaisa, &order.TotalBilledAmountPaisa, &order.RoutingStatus,
 	)
 	if err != nil {
 		return nil, err
@@ -353,7 +363,8 @@ func (r *OrderRepository) GetOrdersByCustomerID(ctx context.Context, customerID 
 			status, delivery_type, payment_gateway, total_amount, admin_commission, vendor_escrow, delivery_escrow,
 			currency, payment_status, customer_lat, customer_lng, otp_code, device_session_nonce,
 			escrow_released, dispute_status, delivered_at, created_at, updated_at,
-			COALESCE(handover_photo_url, ''), handover_at, COALESCE(handover_notes, ''), COALESCE(handed_over_by_tracking_id, '')
+			COALESCE(handover_photo_url, ''), handover_at, COALESCE(handover_notes, ''), COALESCE(handed_over_by_tracking_id, ''),
+			base_product_amount, delivery_fee_amount, total_billed_amount, routing_status
 		FROM orders
 		` + where + `
 		ORDER BY created_at DESC
@@ -385,6 +396,7 @@ func (r *OrderRepository) GetOrdersByCustomerID(ctx context.Context, customerID 
 			&order.EscrowReleased, &order.DisputeStatus, &order.DeliveredAt,
 			&createdAt, &updatedAt,
 			&order.HandoverPhotoURL, &order.HandoverAt, &order.HandoverNotes, &order.HandedByTrackingID,
+			&order.BaseProductAmountPaisa, &order.DeliveryFeeAmountPaisa, &order.TotalBilledAmountPaisa, &order.RoutingStatus,
 		)
 		if err != nil {
 			return nil, err
@@ -458,6 +470,7 @@ func (r *OrderRepository) GetOrdersByVendorID(ctx context.Context, vendorID stri
 			o.currency, o.payment_status, o.customer_lat, o.customer_lng, o.otp_code, o.device_session_nonce,
 			o.escrow_released, o.dispute_status, o.delivered_at, o.created_at, o.updated_at,
 			COALESCE(o.handover_photo_url, ''), o.handover_at, COALESCE(o.handover_notes, ''), COALESCE(o.handed_over_by_tracking_id, ''),
+			o.base_product_amount, o.delivery_fee_amount, o.total_billed_amount, o.routing_status,
 			COALESCE(c.full_name, 'Unknown Customer'),
 			COALESCE(c.phone, ''),
 			COALESCE(rd.full_name, 'Unassigned Rider'),
@@ -501,6 +514,7 @@ func (r *OrderRepository) GetOrdersByVendorID(ctx context.Context, vendorID stri
 			&order.EscrowReleased, &order.DisputeStatus, &order.DeliveredAt,
 			&createdAt, &updatedAt,
 			&order.HandoverPhotoURL, &order.HandoverAt, &order.HandoverNotes, &order.HandedByTrackingID,
+			&order.BaseProductAmountPaisa, &order.DeliveryFeeAmountPaisa, &order.TotalBilledAmountPaisa, &order.RoutingStatus,
 			&custName, &custPhone, &riderName, &riderPhone,
 		)
 		if err != nil {

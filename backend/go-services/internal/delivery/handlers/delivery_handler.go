@@ -162,13 +162,14 @@ func (h *DeliveryHandler) EstimateDeliveryFee(c *gin.Context) {
 		return
 	}
 
-	fee, adminComm, riderEarning, err := h.svc.EstimateDeliveryFee(c.Request.Context(), req.VendorStoreTrackID, req.DropoffLat, req.DropoffLng)
+	fee, adminComm, riderEarning, routingStatus, err := h.svc.EstimateDeliveryFee(c.Request.Context(), req.VendorStoreTrackID, req.DropoffLat, req.DropoffLng)
 	if err != nil {
 		// Return default estimate on failure rather than blocking checkout
 		c.JSON(http.StatusOK, gin.H{
 			"delivery_fee":    50.0,
 			"admin_commission": 2.5,
 			"rider_earning":    47.5,
+			"routing_status":  "FAILED_CALCULATION",
 			"estimated":       false,
 		})
 		return
@@ -178,6 +179,7 @@ func (h *DeliveryHandler) EstimateDeliveryFee(c *gin.Context) {
 		"delivery_fee":    fmt.Sprintf("%.0f", fee),
 		"admin_commission": fmt.Sprintf("%.0f", adminComm),
 		"rider_earning":    fmt.Sprintf("%.0f", riderEarning),
+		"routing_status":   routingStatus,
 		"estimated":       true,
 	})
 }

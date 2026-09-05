@@ -82,9 +82,21 @@ func (h *CheckoutHandler) CreateCheckout(c *gin.Context) {
 	}
 
 	const amountEpsilon = 0.01
-	if diff := req.Amount - order.TotalAmount; diff > amountEpsilon || diff < -amountEpsilon {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "amount mismatch: provided amount does not match order total"})
-		return
+
+	// H4: Uber-style — customer pays total_billed = product + delivery fee
+	// If TotalBilledAmountPaisa > 0, use it as the authoritative total.
+	// Otherwise fall back to legacy TotalAmount (backward compat with old orders).
+	customerTotalPaisa := order.TotalBilledAmountPaisa
+	if customerTotalPaisa == 0 {
+		customerTotalPaisa = order.TotalAmountPaisa
+	}
+	customerTotalRupees := float64(customerTotalPaisa) / 100.0
+
+	if customerTotalPaisa > 0 {
+		if diff := req.Amount - customerTotalRupees; diff > amountEpsilon || diff < -amountEpsilon {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "amount mismatch: provided amount does not match order total (expected total including delivery fee)"})
+			return
+		}
 	}
 
 	if order.Status == "paid" || order.PaymentStatus == "paid" {
@@ -92,8 +104,8 @@ func (h *CheckoutHandler) CreateCheckout(c *gin.Context) {
 		return
 	}
 
-	req.Amount = order.TotalAmount
-	amountPaisa := order.TotalAmountPaisa
+	req.Amount = customerTotalRupees
+	amountPaisa := customerTotalPaisa
 
 	if req.Gateway == "wallet" {
 		if h.walletSvc == nil {

@@ -27,6 +27,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   String? _createdOrderTrackingId;
   double _deliveryFee = 0.0;
   bool _deliveryFeeLoading = false;
+  String _routingStatus = 'DYNAMIC_CALCULATED'; // H3: tracks how delivery fee was calculated
 
   // Real delivery location — fetched from GPS
   String _deliveryAddress = 'Fetching your location...';
@@ -187,8 +188,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       );
       if (mounted && resp != null) {
         final fee = (resp['delivery_fee'] is num) ? (resp['delivery_fee'] as num).toDouble() : 50.0;
+        final routing = (resp['routing_status'] as String?) ?? 'DYNAMIC_CALCULATED';
         setState(() {
           _deliveryFee = fee;
+          _routingStatus = routing;
           _deliveryFeeLoading = false;
         });
         cart.setDeliveryFee(fee);
@@ -197,6 +200,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       if (mounted) {
         setState(() {
           _deliveryFee = 50.0;
+          _routingStatus = 'FAILED_CALCULATION';
           _deliveryFeeLoading = false;
         });
         cart.setDeliveryFee(50.0);
@@ -241,6 +245,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         'device_session_nonce': _checkoutSessionNonce,
         'items': items,
         'total_amount': cart.totalAmount,
+        // H4: Uber-style — customer pays product + delivery fee
+        'delivery_fee_paisa': (_deliveryFee * 100).round(),
+        // H3: routing audit trail
+        'routing_status': _routingStatus,
       };
 
       final response = await apiClient.post(ApiEndpoints.orderCheckout(), payload);

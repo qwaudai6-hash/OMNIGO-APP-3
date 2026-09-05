@@ -705,7 +705,9 @@ func (s *DeliveryService) EstimateRide(ctx context.Context, req *models.RideEsti
 
 // EstimateDeliveryFee returns the estimated delivery fee for a store → dropoff pair.
 // Used by the checkout screen to show the real delivery fee before order creation.
-func (s *DeliveryService) EstimateDeliveryFee(ctx context.Context, storeTrackID string, dropoffLat, dropoffLng float64) (float64, float64, float64, error) {
+// H3: Also returns routing_status for DB audit trail.
+// Returns: (totalFare, adminCommission, riderEarning, routingStatus, error)
+func (s *DeliveryService) EstimateDeliveryFee(ctx context.Context, storeTrackID string, dropoffLat, dropoffLng float64) (float64, float64, float64, string, error) {
 	// Get store coordinates
 	lat, lng, err := s.repo.GetStoreCoordinates(ctx, storeTrackID)
 	if err != nil || (lat == 0 && lng == 0) {
@@ -717,7 +719,8 @@ func (s *DeliveryService) EstimateDeliveryFee(ctx context.Context, storeTrackID 
 		perKmRate := envFloat("DELIVERY_PER_KM_RATE", 15.0)
 		totalFare := baseFare + (perKmRate * fallbackKm)
 		adminComm := totalFare * (envFloat("DELIVERY_COMMISSION_PERCENT", 5.0) / 100.0)
-		return totalFare, adminComm, totalFare - adminComm, nil
+		log.Printf("[Delivery] H3 FALLBACK: store %s coords unavailable, using haversine fallback %.1fkm → PKR %.2f", storeTrackID, fallbackKm, totalFare)
+		return totalFare, adminComm, totalFare - adminComm, "FALLBACK_HAVERSINE", nil
 	}
 
 	km, _, _, _ := s.estimateDistanceAndETA(ctx, lng, lat, dropoffLng, dropoffLat)
@@ -734,7 +737,7 @@ func (s *DeliveryService) EstimateDeliveryFee(ctx context.Context, storeTrackID 
 	adminComm := totalFare * (envFloat("DELIVERY_COMMISSION_PERCENT", 5.0) / 100.0)
 	riderEarning := totalFare - adminComm
 
-	return totalFare, adminComm, riderEarning, nil
+	return totalFare, adminComm, riderEarning, "DYNAMIC_CALCULATED", nil
 }
 
 func (s *DeliveryService) estimateDistanceAndETA(ctx context.Context, pickupLng, pickupLat, dropoffLng, dropoffLat float64) (km, seconds float64, coords [][]float64, err error) {

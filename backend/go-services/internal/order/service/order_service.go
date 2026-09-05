@@ -126,18 +126,25 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *models.CreateOrderR
 	// NOTE: We don't have product prices yet (no gRPC call).
 	// The frontend sends TotalAmount which we trust for now.
 	// The background worker will reconcile prices via product service.
+	// H4: Uber-style — customer pays product total + delivery fee.
+	productTotalPaisa := int64(req.TotalAmount * 100)
 	order := &models.Order{
-		UserTrackID:        req.UserTrackID,
-		VendorStoreTrackID: req.VendorStoreTrackID, // frontend must provide this
-		VendorTrackID:      req.VendorStoreTrackID, // placeholder; worker will resolve
-		Currency:           req.Currency,
-		PaymentGateway:     paymentGW,
-		Status:             "pending",
-		CustomerLat:        req.DropoffLat,
-		CustomerLng:        req.DropoffLng,
-		DeviceSessionNonce: req.DeviceSessionNonce,
-		TrackingID:         utid,
-		TotalAmount:        req.TotalAmount,
+		UserTrackID:           req.UserTrackID,
+		VendorStoreTrackID:    req.VendorStoreTrackID, // frontend must provide this
+		VendorTrackID:         req.VendorStoreTrackID, // placeholder; worker will resolve
+		Currency:              req.Currency,
+		PaymentGateway:        paymentGW,
+		Status:                "pending",
+		CustomerLat:           req.DropoffLat,
+		CustomerLng:           req.DropoffLng,
+		DeviceSessionNonce:    req.DeviceSessionNonce,
+		TrackingID:            utid,
+		TotalAmount:           req.TotalAmount,
+		TotalAmountPaisa:      productTotalPaisa,
+		BaseProductAmountPaisa: productTotalPaisa,       // H4: product portion in paisa
+		DeliveryFeeAmountPaisa: req.DeliveryFeePaisa,   // H4: delivery fee in paisa
+		TotalBilledAmountPaisa: productTotalPaisa + req.DeliveryFeePaisa, // H4: customer pays this
+		RoutingStatus:         req.RoutingStatus,        // H3: DYNAMIC_CALCULATED | FALLBACK_HAVERSINE | FAILED_CALCULATION
 	}
 
 	// Build order items from request (prices will be reconciled by worker)
