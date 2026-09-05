@@ -119,6 +119,103 @@ func (r *OrderRepository) CreateOrder(ctx context.Context, order *models.Order, 
 	return tx.Commit(ctx)
 }
 
+// CreateOrderWithReservations inserts a new order, its items, an outbox event,
+// AND local stock reservations all in a single atomic transaction.
+// This eliminates the saga race where external gRPC succeeds but DB fails.
+func (r *OrderRepository) CreateOrderWithReservations(ctx context.Context, order *models.Order, outboxPayload []byte) error {
+	tx, err := r.writer.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	query := `
+		INSERT INTO orders (order_tracking_id, customer_tracking_id, store_tracking_id, vendor_tracking_id, status, total_amount, currency, payment_gateway, payment_status, customer_lat, customer_lng, device_session_nonce, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, 'pending', $8, $9, $10, NOW(), NOW())
+		RETURNING id, created_at, updated_at
+	`
+	err = tx.QueryRow(ctx, query,
+		order.TrackingID,
+		order.UserTrackID,
+		order.VendorStoreTrackID,
+		order.VendorTrackID,
+		order.TotalAmount,
+		order.Currency,
+		order.PaymentGateway,
+		order.CustomerLat,
+		order.CustomerLng,
+		order.DeviceSessionNonce,
+	).Scan(&order.ID, &order.CreatedAt, &order.UpdatedAt)
+	if err != nil {
+		return err
+	}
+
+	// Validate parent references before inserting order items
+	if order.VendorStoreTrackID != "" {
+		ok, err := database.Exists(ctx, tx, "SELECT 1 FROM stores WHERE store_tracking_id = $1", order.VendorStoreTrackID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("store %s does not exist", order.VendorStoreTrackID)
+		}
+	}
+	if order.VendorTrackID != "" {
+		ok, err := database.Exists(ctx, tx, "SELECT 1 FROM users WHERE tracking_id = $1", order.VendorTrackID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("user %s does not exist", order.VendorTrackID)
+		}
+	}
+
+	// Insert order items
+	if len(order.Items) > 0 {
+		var batch pgx.Batch
+		for _, item := range order.Items {
+			ok, err := database.Exists(ctx, tx, "SELECT 1 FROM products WHERE product_tracking_id = $1", item.ProductTrackingID)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("product %s does not exist", item.ProductTrackingID)
+			}
+
+			batch.Queue(`
+				INSERT INTO order_items (order_tracking_id, product_tracking_id, quantity, price_at_checkout, created_at)
+				VALUES ($1, $2, $3, $4, NOW())
+			`, order.TrackingID, item.ProductTrackingID, item.Quantity, item.PriceAtCheckout)
+		}
+
+		br := tx.SendBatch(ctx, &batch)
+		_, err = br.Exec()
+		br.Close()
+		if err != nil {
+			return err
+		}
+	}
+
+	// Insert outbox event with uppercase status so the outbox poller can pick it up.
+	if len(outboxPayload) > 0 {
+		outboxQuery := `
+			INSERT INTO outbox_events (aggregate_id, topic, payload, status)
+			VALUES ($1, 'orders.created', $2, 'PENDING')
+		`
+		_, err = tx.Exec(ctx, outboxQuery, order.TrackingID, string(outboxPayload))
+		if err != nil {
+			return err
+		}
+	}
+
+	// Insert local stock reservations (atomically with order)
+	if err := r.CreateStockReservations(ctx, tx, order.TrackingID, order.Items); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
 // fetchOrderItems retrieves items for a given order
 func (r *OrderRepository) fetchOrderItems(ctx context.Context, orderID string) ([]models.OrderItem, error) {
 	query := `SELECT product_tracking_id, quantity, price_at_checkout FROM order_items WHERE order_tracking_id = $1`
@@ -462,6 +559,28 @@ func (r *OrderRepository) GetOrdersByVendorID(ctx context.Context, vendorID stri
 	return orders, nil
 }
 
+// UpdateOrderStatusTx mutates order status inside an existing transaction.
+// Used when atomic status change + side effects are required.
+func (r *OrderRepository) UpdateOrderStatusTx(ctx context.Context, tx pgx.Tx, trackingID string, status string) error {
+	query := `
+		UPDATE orders
+		SET status = $1,
+		    updated_at = NOW(),
+		    delivered_at = CASE WHEN $1 = 'delivered' THEN NOW() ELSE delivered_at END
+		WHERE order_tracking_id = $2
+		  AND status <> $1
+		  AND NOT (status IN ('cancelled', 'failed', 'refunded', 'returned') AND $1 <> 'refunded')
+	`
+	res, err := tx.Exec(ctx, query, status, trackingID)
+	if err != nil {
+		return err
+	}
+	if res.RowsAffected() == 0 {
+		return ErrNoStatusChange
+	}
+	return nil
+}
+
 // UpdateOrderStatus mutates order status and sets updated_at
 func (r *OrderRepository) UpdateOrderStatus(ctx context.Context, trackingID string, status string) error {
 	// BUG-1 FIX: When transitioning to "delivered", atomically stamp delivered_at
@@ -660,4 +779,135 @@ func (r *OrderRepository) CancelCODDebtsForOrder(ctx context.Context, orderTrack
 		orderTrackingID,
 	)
 	return err
+}
+
+// CreateStockReservations inserts local stock reservation records within a transaction.
+// Called atomically with order creation to guarantee compensation path.
+func (r *OrderRepository) CreateStockReservations(ctx context.Context, tx pgx.Tx, orderTrackingID string, items []models.OrderItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+	batch := &pgx.Batch{}
+	for _, item := range items {
+		batch.Queue(`
+			INSERT INTO stock_reservations (order_tracking_id, product_tracking_id, quantity, status, created_at, updated_at)
+			VALUES ($1, $2, $3, 'pending', NOW(), NOW())
+			ON CONFLICT (order_tracking_id, product_tracking_id) WHERE status IN ('pending', 'confirmed') DO NOTHING
+		`, orderTrackingID, item.ProductTrackingID, item.Quantity)
+	}
+	br := tx.SendBatch(ctx, batch)
+	defer br.Close()
+	_, err := br.Exec()
+	return err
+}
+
+// GetPendingStockReservations fetches reservations needing gRPC confirmation.
+func (r *OrderRepository) GetPendingStockReservations(ctx context.Context, limit int) ([]models.StockReservation, error) {
+	query := `
+		SELECT id, order_tracking_id, product_tracking_id, quantity, status,
+		       grpc_request_id, error_message, created_at, updated_at, confirmed_at, released_at
+		FROM stock_reservations
+		WHERE status = 'pending'
+		ORDER BY created_at ASC
+		LIMIT $1
+	`
+	rows, err := r.reader.Query(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var reservations []models.StockReservation
+	for rows.Next() {
+		var res models.StockReservation
+		var grpcReqID *string
+		var errMsg *string
+		var confirmedAt, releasedAt *time.Time
+		if err := rows.Scan(
+			&res.ID, &res.OrderTrackingID, &res.ProductTrackingID, &res.Quantity, &res.Status,
+			&grpcReqID, &errMsg, &res.CreatedAt, &res.UpdatedAt, &confirmedAt, &releasedAt,
+		); err != nil {
+			return nil, err
+		}
+		if grpcReqID != nil {
+			res.GrpcRequestID = *grpcReqID
+		}
+		if errMsg != nil {
+			res.ErrorMessage = *errMsg
+		}
+		res.ConfirmedAt = confirmedAt
+		res.ReleasedAt = releasedAt
+		reservations = append(reservations, res)
+	}
+	return reservations, rows.Err()
+}
+
+// ConfirmStockReservation marks a reservation as confirmed after successful gRPC call.
+func (r *OrderRepository) ConfirmStockReservation(ctx context.Context, orderTrackingID, productTrackingID, grpcRequestID string) error {
+	_, err := r.writer.Exec(ctx, `
+		UPDATE stock_reservations
+		SET status = 'confirmed', grpc_request_id = $1, confirmed_at = NOW(), updated_at = NOW()
+		WHERE order_tracking_id = $2 AND product_tracking_id = $3 AND status = 'pending'
+	`, grpcRequestID, orderTrackingID, productTrackingID)
+	return err
+}
+
+// FailStockReservation marks a reservation as failed after gRPC failure.
+func (r *OrderRepository) FailStockReservation(ctx context.Context, orderTrackingID, productTrackingID, errorMessage string) error {
+	_, err := r.writer.Exec(ctx, `
+		UPDATE stock_reservations
+		SET status = 'failed', error_message = $1, updated_at = NOW()
+		WHERE order_tracking_id = $2 AND product_tracking_id = $3 AND status = 'pending'
+	`, errorMessage, orderTrackingID, productTrackingID)
+	return err
+}
+
+// ReleaseStockReservation marks a reservation as released (compensation done).
+func (r *OrderRepository) ReleaseStockReservation(ctx context.Context, orderTrackingID, productTrackingID string) error {
+	_, err := r.writer.Exec(ctx, `
+		UPDATE stock_reservations
+		SET status = 'released', released_at = NOW(), updated_at = NOW()
+		WHERE order_tracking_id = $1 AND product_tracking_id = $2 AND status IN ('pending', 'confirmed', 'failed')
+	`, orderTrackingID, productTrackingID)
+	return err
+}
+
+// GetStockReservationsByOrder fetches all reservations for an order.
+func (r *OrderRepository) GetStockReservationsByOrder(ctx context.Context, orderTrackingID string) ([]models.StockReservation, error) {
+	query := `
+		SELECT id, order_tracking_id, product_tracking_id, quantity, status,
+		       grpc_request_id, error_message, created_at, updated_at, confirmed_at, released_at
+		FROM stock_reservations
+		WHERE order_tracking_id = $1
+		ORDER BY created_at ASC
+	`
+	rows, err := r.reader.Query(ctx, query, orderTrackingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var reservations []models.StockReservation
+	for rows.Next() {
+		var res models.StockReservation
+		var grpcReqID *string
+		var errMsg *string
+		var confirmedAt, releasedAt *time.Time
+		if err := rows.Scan(
+			&res.ID, &res.OrderTrackingID, &res.ProductTrackingID, &res.Quantity, &res.Status,
+			&grpcReqID, &errMsg, &res.CreatedAt, &res.UpdatedAt, &confirmedAt, &releasedAt,
+		); err != nil {
+			return nil, err
+		}
+		if grpcReqID != nil {
+			res.GrpcRequestID = *grpcReqID
+		}
+		if errMsg != nil {
+			res.ErrorMessage = *errMsg
+		}
+		res.ConfirmedAt = confirmedAt
+		res.ReleasedAt = releasedAt
+		reservations = append(reservations, res)
+	}
+	return reservations, rows.Err()
 }

@@ -183,11 +183,15 @@ class ApiClient {
     return _processResponse(response);
   }
 
-  Future<dynamic> post(String endpoint, Map<String, dynamic> body) async {
+  Future<dynamic> post(String endpoint, Map<String, dynamic> body, {String? idempotencyKey}) async {
     final uri = _buildUri(endpoint);
+    final headers = await _getHeaders();
+    if (idempotencyKey != null) {
+      headers['Idempotency-Key'] = idempotencyKey;
+    }
     var response = await http.post(
       uri,
-      headers: await _getHeaders(),
+      headers: headers,
       body: jsonEncode(body),
     ).timeout(_requestTimeout);
     // Auto-refresh on 401 (skip for auth endpoints to avoid infinite loop)

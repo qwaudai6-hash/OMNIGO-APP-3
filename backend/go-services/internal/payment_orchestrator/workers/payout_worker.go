@@ -61,7 +61,7 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 	}
 	// 1. Find all vendors with released escrow holds
 	rows, err := w.db.Query(ctx,
-		`SELECT vendor_tracking_id, COALESCE(SUM(amount), 0)::float8 as total_released
+		`SELECT vendor_tracking_id, COALESCE(SUM(amount_paisa), 0) as total_released
 		 FROM escrow_holds
 		 WHERE status = 'released'
 		 GROUP BY vendor_tracking_id`,
@@ -77,7 +77,7 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 
 	for rows.Next() {
 		var vendorID string
-		var totalReleased float64
+		var totalReleased int64
 		if err := rows.Scan(&vendorID, &totalReleased); err != nil {
 			fmt.Printf("[PayoutWorker] Error scanning vendor row: %v\n", err)
 			continue
@@ -124,9 +124,9 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 		}
 
 		// Calculate the exact amount to be paid out inside transaction and lock the escrow holds
-		var totalReleasedInTx float64
+		var totalReleasedInTx int64
 		err = tx.QueryRow(ctx,
-			`SELECT COALESCE(SUM(amount), 0)::float8
+			`SELECT COALESCE(SUM(amount_paisa), 0)
 			 FROM escrow_holds
 			 WHERE vendor_tracking_id = $1 AND status = 'released'
 			 FOR UPDATE`,
@@ -148,9 +148,9 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 		// implementation marked ALL released holds as paid_out regardless
 		// of how much was actually paid — creating an audit mismatch where
 		// vendor_wallet.total_payouts disagreed with the sum of paid_out holds.
-		var walletBalance float64
+		var walletBalance int64
 		err = tx.QueryRow(ctx,
-			`SELECT COALESCE(balance, 0)::float8 FROM vendor_wallet WHERE vendor_tracking_id = $1 FOR UPDATE`,
+			`SELECT COALESCE(balance_paisa, 0) FROM vendor_wallet WHERE vendor_tracking_id = $1 FOR UPDATE`,
 			vendorID,
 		).Scan(&walletBalance)
 		if err != nil {
@@ -162,7 +162,7 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 			if sweepAmount < 0 {
 				sweepAmount = 0
 			}
-			fmt.Printf("[PayoutWorker] Vendor %s: released %.2f but wallet only has %.2f (manual withdrawal already debited) — sweeping %.2f\n",
+			fmt.Printf("[PayoutWorker] Vendor %s: released %d paisa but wallet only has %d paisa (manual withdrawal already debited) — sweeping %d paisa\n",
 				vendorID, totalReleasedInTx, walletBalance, sweepAmount)
 		}
 
@@ -171,13 +171,13 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 		// Unused holds revert to 'held' status for a future tick.
 		type holdRow struct {
 			ID     uuid.UUID
-			Amount float64
+			Amount int64
 		}
 		var sweptHolds []holdRow
-		var sweptTotal float64
+		var sweptTotal int64
 		if sweepAmount > 0 {
 			rows, err := tx.Query(ctx, `
-				SELECT id, amount
+				SELECT id, amount_paisa
 				FROM escrow_holds
 				WHERE vendor_tracking_id = $1 AND status = 'released'
 				ORDER BY hold_until ASC, created_at ASC, id ASC
@@ -196,7 +196,7 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 					fmt.Printf("[PayoutWorker] Error scanning hold row for %s: %v\n", vendorID, err)
 					continue
 				}
-				if sweptTotal+h.Amount <= sweepAmount+0.0001 {
+				if sweptTotal+h.Amount <= sweepAmount {
 					sweptHolds = append(sweptHolds, h)
 					sweptTotal += h.Amount
 				} else {
@@ -221,7 +221,7 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 		if finalSweepAmount > 0 {
 			_, err = tx.Exec(ctx,
 				`INSERT INTO vendor_payouts (id, vendor_tracking_id, amount, status, batch_id)
-				 VALUES ($1, $2, $3, 'pending_disbursement', $4)`,
+				 VALUES ($1, $2, $3/100.0, 'pending_disbursement', $4)`,
 				payoutID, vendorID, finalSweepAmount, batchID,
 			)
 			if err != nil {
@@ -253,13 +253,13 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 		}
 
 		// 4. Update vendor_wallet in the same transaction (only the swept amount).
-		// VW-2 FIX: AND balance >= $2 prevents negative balance if a refactor
+		// VW-2 FIX: AND balance_paisa >= $2 prevents negative balance if a refactor
 		// changes the transaction boundaries.
 		if finalSweepAmount > 0 {
 			_, err = tx.Exec(ctx,
 				`UPDATE vendor_wallet
-				 SET total_payouts = total_payouts + $2, balance = balance - $2, updated_at = NOW()
-				 WHERE vendor_tracking_id = $1 AND balance >= $2`,
+				 SET total_payouts_paisa = total_payouts_paisa + $2, balance_paisa = balance_paisa - $2, updated_at = NOW()
+				 WHERE vendor_tracking_id = $1 AND balance_paisa >= $2`,
 				vendorID, finalSweepAmount,
 			)
 			if err != nil {
@@ -275,7 +275,7 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 		}
 
 		if finalSweepAmount == 0 {
-			fmt.Printf("[PayoutWorker] Vendor %s: %.2f released escrow reconciled (already paid out via manual withdrawal)\n",
+			fmt.Printf("[PayoutWorker] Vendor %s: %d paisa released escrow reconciled (already paid out via manual withdrawal)\n",
 				vendorID, totalReleasedInTx)
 			continue
 		}
@@ -312,7 +312,7 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 			currency = "PKR"
 		}
 
-		fmt.Printf("[PayoutWorker] Paid out %.2f %s to vendor %s (batch %s, swept %d holds)\n",
+		fmt.Printf("[PayoutWorker] Paid out %d paisa %s to vendor %s (batch %s, swept %d holds)\n",
 			finalSweepAmount, currency, vendorID, batchID, len(sweptHolds))
 	}
 

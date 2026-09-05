@@ -44,13 +44,15 @@ func NewCODHandler(db *pgxpool.Pool, ledgerSvc *ledger.Service, escrowSvc *escro
 type CODConfirmRequest struct {
 	OrderTrackingID string  `json:"order_tracking_id" binding:"required"`
 	RiderTrackingID string  `json:"rider_tracking_id" binding:"required"`
-	Amount          float64 `json:"amount" binding:"required"`
+	Amount          float64 `json:"amount" binding:"required"` // rupees, will convert to paisa
 	StoreTrackingID string  `json:"store_tracking_id" binding:"required"`
 }
 
 // Confirm handles POST /api/v1/payments/cod/confirm
-// Creates a ledger-only entry: rider_cod_debt goes NEGATIVE (rider owes platform).
-// No real money moves at this point.
+// Creates the cod_debts row (rider confirms they will collect cash).
+// The actual ledger entry is created by the delivery service at delivery time
+// (CreateCODDebtLedger) to ensure rider_cod_debt is always credited before
+// SettleWebhook debits it. This endpoint just signals intent to collect.
 func (h *CODHandler) Confirm(c *gin.Context) {
 	var req CODConfirmRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -95,53 +97,40 @@ func (h *CODHandler) Confirm(c *gin.Context) {
 		return
 	}
 
-	// Calculate COD split
-	split, err := h.calculator.CalculateCODSplit(ctx, req.Amount, req.StoreTrackingID, req.OrderTrackingID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to calculate split: " + err.Error()})
-		return
-	}
+	// Convert rupees to paisa
+	amountPaisa := int64(req.Amount * 100)
 
-	// Create ledger entries: cash_receivable debited (rider owes platform), rider_cod_debt credited
-	// NOTE: We do NOT debit central_escrow here because COD has no online payment.
-	// central_escrow holds real money from online payments; cash_receivable is a receivable asset.
-	idempotencyKey := fmt.Sprintf("cod:confirm:%s", req.OrderTrackingID)
-	txID, err := h.ledger.Transfer(ctx, ledger.TransferRequest{
-		DebitAccount:   ledger.AccountCashReceivable,
-		CreditAccount:  ledger.AccountRiderCODDebt,
-		Amount:         req.Amount,
-		ReferenceType:  "cod_debt",
-		ReferenceID:    req.OrderTrackingID,
-		Description:    fmt.Sprintf("COD debt created: rider %s collected %.2f PKR for order %s", req.RiderTrackingID, req.Amount, req.OrderTrackingID),
-		IdempotencyKey: idempotencyKey,
-	})
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "ledger transfer failed: " + err.Error()})
-		return
-	}
-
-	// Insert cod_debts record
+	// Insert cod_debts record — the actual ledger entry is created by the delivery
+	// service at delivery completion (CreateCODDebtLedger) to ensure the rider_cod_debt
+	// account is always credited before SettleWebhook debits it.
 	codDebtID := uuid.New()
 	_, err = h.db.Exec(ctx,
 		`INSERT INTO cod_debts (id, order_tracking_id, rider_tracking_id, amount_owed, status)
 		 VALUES ($1, $2, $3, $4, 'pending')`,
-		codDebtID, req.OrderTrackingID, req.RiderTrackingID, req.Amount,
+		codDebtID, req.OrderTrackingID, req.RiderTrackingID, amountPaisa,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create COD debt record: " + err.Error()})
 		return
 	}
 
+	// Calculate split for display (ledger entry is NOT created here — see comment above)
+	split, err := h.calculator.CalculateCODSplit(ctx, amountPaisa, req.StoreTrackingID, req.OrderTrackingID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to calculate split: " + err.Error()})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"status":         "cod_debt_created",
-		"cod_debt_id":    codDebtID.String(),
-		"transaction_id": txID.String(),
-		"amount_owed":    req.Amount,
+		"status":          "cod_debt_created",
+		"cod_debt_id":     codDebtID.String(),
+		"amount_owed":     req.Amount,
+		"amount_owed_paisa": amountPaisa,
 		"split": gin.H{
-			"admin_revenue":   split.AdminRevenue,
-			"vendor_escrow":   split.VendorEscrow,
-			"delivery_fee":    split.DeliveryFee,
-			"commission_rate": split.CommissionRate,
+			"admin_revenue_paisa":   split.AdminRevenue,
+			"vendor_escrow_paisa":   split.VendorEscrow,
+			"delivery_fee_paisa":    split.DeliveryFee,
+			"commission_rate":       split.CommissionRate,
 		},
 	})
 }
@@ -169,13 +158,14 @@ func (h *CODHandler) PayNow(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	// Read COD debt
-	var amountOwed float64
+	var amountOwedPaisa int64
 	var riderID string
 	var status string
 	err := h.db.QueryRow(ctx,
 		`SELECT amount_owed, rider_tracking_id, status FROM cod_debts WHERE id = $1`,
 		req.CodDebtID,
-	).Scan(&amountOwed, &riderID, &status)
+	).Scan(&amountOwedPaisa, &riderID, &status)
+	amountOwed := float64(amountOwedPaisa) / 100.0
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "COD debt not found"})
 		return
@@ -205,6 +195,7 @@ func (h *CODHandler) PayNow(c *gin.Context) {
 		returnURL += "/api/v1/payments/cod/settlement"
 
 		basketID := fmt.Sprintf("COD%s", req.CodDebtID[:min(len(req.CodDebtID), 20)])
+		amountStr := fmt.Sprintf("%.2f", amountOwed)
 
 		var redirectURL string
 		if strings.Contains(baseURL, "apps.net.pk") {
@@ -217,33 +208,34 @@ func (h *CODHandler) PayNow(c *gin.Context) {
 				}
 			}
 			redirectURL = fmt.Sprintf(
-				"%s?merchant_id=%s&basket_id=%s&txnamt=%.2f&currency_code=PKR&success_url=%s&checkout_url=%s",
+				"%s?merchant_id=%s&basket_id=%s&txnamt=%s&currency_code=PKR&success_url=%s&checkout_url=%s",
 				formEndpoint,
 				url.QueryEscape(merchantID),
 				url.QueryEscape(basketID),
-				amountOwed,
+				amountStr,
 				url.QueryEscape(returnURL),
 				url.QueryEscape(returnURL),
 			)
 		} else {
 			redirectURL = fmt.Sprintf(
-				"%s/hosted?merchant_id=%s&basket_id=%s&txnamt=%.2f&currency_code=PKR&success_url=%s&checkout_url=%s",
+				"%s/hosted?merchant_id=%s&basket_id=%s&txnamt=%s&currency_code=PKR&success_url=%s&checkout_url=%s",
 				strings.TrimRight(baseURL, "/"),
 				url.QueryEscape(merchantID),
 				url.QueryEscape(basketID),
-				amountOwed,
+				amountStr,
 				url.QueryEscape(returnURL),
 				url.QueryEscape(returnURL),
 			)
 		}
 
 		c.JSON(http.StatusOK, gin.H{
-			"status":      "redirect_ready",
-			"gateway":     "payfast",
-			"redirect_url": redirectURL,
-			"basket_id":   basketID,
-			"amount_owed": amountOwed,
-			"rider_id":    riderID,
+			"status":          "redirect_ready",
+			"gateway":         "payfast",
+			"redirect_url":    redirectURL,
+			"basket_id":       basketID,
+			"amount_owed":     amountOwed,
+			"amount_owed_paisa": amountOwedPaisa,
+			"rider_id":        riderID,
 		})
 		return
 	}
@@ -257,20 +249,22 @@ func (h *CODHandler) PayNow(c *gin.Context) {
 		salt = os.Getenv("JAZZCASH_INTEGRITY_SALT")
 	}
 
-	payload := fmt.Sprintf("amount=%.2f&to=OMNIGO_SETTLEMENT&ref=%s", amountOwed, req.CodDebtID)
+	amountStr := fmt.Sprintf("%.2f", amountOwed)
+	payload := fmt.Sprintf("amount=%s&to=OMNIGO_SETTLEMENT&ref=%s", amountStr, req.CodDebtID)
 	mac := hmac.New(sha256.New, []byte(salt))
 	mac.Write([]byte(payload))
 	signature := hex.EncodeToString(mac.Sum(nil))
 
-	deepLink := fmt.Sprintf("%s://transfer?amount=%.2f&to=OMNIGO_SETTLEMENT&ref=%s&hash=%s",
-		req.Gateway, amountOwed, req.CodDebtID, signature)
+	deepLink := fmt.Sprintf("%s://transfer?amount=%s&to=OMNIGO_SETTLEMENT&ref=%s&hash=%s",
+		req.Gateway, amountStr, req.CodDebtID, signature)
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":      "deep_link_ready",
-		"gateway":     req.Gateway,
-		"deep_link":   deepLink,
-		"amount_owed": amountOwed,
-		"rider_id":    riderID,
+		"status":           "deep_link_ready",
+		"gateway":          req.Gateway,
+		"deep_link":        deepLink,
+		"amount_owed":      amountOwed,
+		"amount_owed_paisa": amountOwedPaisa,
+		"rider_id":         riderID,
 	})
 }
 
@@ -278,7 +272,7 @@ func (h *CODHandler) PayNow(c *gin.Context) {
 type CODSettlementRequest struct {
 	CodDebtID      string  `json:"cod_debt_id" binding:"required"`
 	TransactionID  string  `json:"transaction_id" binding:"required"`
-	Amount         float64 `json:"amount" binding:"required"`
+	Amount         float64 `json:"amount" binding:"required"` // rupees from webhook
 	Status         string  `json:"status" binding:"required"` // "success" or "failed"
 	WebhookEventID string  `json:"webhook_event_id" binding:"required"`
 	Gateway        string  `json:"gateway" binding:"required"`
@@ -286,6 +280,8 @@ type CODSettlementRequest struct {
 
 // Settlement handles POST /api/v1/payments/cod/settlement
 // Webhook from JazzCash/EasyPaisa confirming the rider has paid.
+// FIX: All DB operations wrapped in transaction for atomicity.
+// Ledger transfers use idempotency keys for safe retry.
 func (h *CODHandler) Settlement(c *gin.Context) {
 	var req CODSettlementRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -295,7 +291,7 @@ func (h *CODHandler) Settlement(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
-	// Check idempotency on webhook_event_id
+	// Check idempotency on webhook_event_id FIRST
 	var exists bool
 	h.db.QueryRow(ctx,
 		`SELECT EXISTS(SELECT 1 FROM cod_debts WHERE webhook_event_id = $1)`, req.WebhookEventID,
@@ -311,7 +307,7 @@ func (h *CODHandler) Settlement(c *gin.Context) {
 	}
 
 	// Read COD debt
-	var amountOwed float64
+	var amountOwedPaisa int64
 	var riderID string
 	var orderID string
 	var storeID string
@@ -321,7 +317,7 @@ func (h *CODHandler) Settlement(c *gin.Context) {
 		 FROM cod_debts c JOIN orders o ON c.order_tracking_id = o.order_tracking_id
 		 WHERE c.id = $1`,
 		req.CodDebtID,
-	).Scan(&amountOwed, &riderID, &orderID, &storeID, &vendorTrackID)
+	).Scan(&amountOwedPaisa, &riderID, &orderID, &storeID, &vendorTrackID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "COD debt not found"})
 		return
@@ -334,26 +330,27 @@ func (h *CODHandler) Settlement(c *gin.Context) {
 		return
 	}
 
-	// Calculate COD split
-	split, err := h.calculator.CalculateCODSplit(ctx, amountOwed, storeID, orderID)
+	// Calculate COD split (amount in paisa)
+	split, err := h.calculator.CalculateCODSplit(ctx, amountOwedPaisa, storeID, orderID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "split calculation failed"})
 		return
 	}
 
-	// Execute ledger transfers:
-	// 1. Clear rider COD debt: debit rider_cod_debt, credit cash_receivable (receivable settled)
-	// 2. Split the settled funds: debit cash_receivable, credit admin_revenue (DB commission rate + COD surcharge)
-	// 3. Split the settled funds: debit cash_receivable, credit vendor_locked_escrow (product portion)
-	// 4. Split the settled funds: debit cash_receivable, credit central_escrow (delivery fee portion)
-	// NOTE: cash_receivable is a transit account — it goes negative on Confirm, then back to
-	// zero on Settlement (Sum(Debits) == Sum(Credits)).
+	// Resolve vendor ID for escrow hold
+	vendorID := h.resolveVendorID(vendorTrackID, storeID)
+	if vendorID == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "cannot resolve vendor ID for escrow hold"})
+		return
+	}
+
+	// Build ledger transfer requests with idempotency
 	idempotencyKey := fmt.Sprintf("cod:settle:%s", req.WebhookEventID)
 	transferReqs := []ledger.TransferRequest{
 		{
 			DebitAccount:   ledger.AccountRiderCODDebt,
 			CreditAccount:  ledger.AccountCashReceivable,
-			Amount:         amountOwed,
+			Amount:         amountOwedPaisa,
 			ReferenceType:  "cod_settlement",
 			ReferenceID:    orderID,
 			Description:    fmt.Sprintf("COD debt cleared for rider %s, order %s", riderID, orderID),
@@ -391,46 +388,67 @@ func (h *CODHandler) Settlement(c *gin.Context) {
 		})
 	}
 
+	// Execute ledger transfers FIRST (idempotent, safe to retry)
 	txID, err := h.ledger.MultiTransfer(ctx, transferReqs)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "ledger multi-transfer failed: " + err.Error()})
 		return
 	}
 
+	// All DB operations in a single transaction for atomicity
+	tx, txErr := h.db.Begin(ctx)
+	if txErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to begin transaction: " + txErr.Error()})
+		return
+	}
+	defer tx.Rollback(ctx)
+
 	// Update cod_debts record
-	_, err = h.db.Exec(ctx,
+	_, err = tx.Exec(ctx,
 		`UPDATE cod_debts SET status = 'settled', settled_via = $1, settled_at = NOW(), webhook_event_id = $2 WHERE id = $3`,
 		req.Gateway, req.WebhookEventID, req.CodDebtID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update COD debt status"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update COD debt status: " + err.Error()})
 		return
 	}
 
-	// FIX H1: Decrement rider cash_in_hand with proper error handling.
-	// Previously this was silently discarded (_, _) which could mask
-	// balance drift between actual cash and system records.
-	tag, cashErr := h.db.Exec(ctx,
-		`UPDATE rider_wallet SET cash_in_hand = GREATEST(0, cash_in_hand - $1), updated_at = NOW() WHERE rider_tracking_id = $2`,
-		amountOwed, riderID,
+	// Decrement rider cash_in_hand_paisa
+	tag, err := tx.Exec(ctx,
+		`UPDATE rider_wallet SET cash_in_hand_paisa = GREATEST(0, cash_in_hand_paisa - $1), updated_at = NOW() WHERE rider_tracking_id = $2`,
+		amountOwedPaisa, riderID,
 	)
-	if cashErr != nil {
-		log.Printf("[CODSettlement] WARNING: failed to decrement cash_in_hand for rider %s: %v", riderID, cashErr)
-	} else if tag.RowsAffected() == 0 {
-		log.Printf("[CODSettlement] WARNING: no rider_wallet row found for rider %s during cash_in_hand decrement", riderID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update rider cash_in_hand: " + err.Error()})
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "rider wallet not found for cash_in_hand update"})
+		return
 	}
 
 	// Create escrow hold for vendor portion
-	h.escrow.CreateHold(ctx, orderID, vendorFallback(vendorTrackID, storeID), split.VendorEscrow)
+	err = h.escrow.CreateHoldTx(ctx, tx, orderID, vendorID, split.VendorEscrow)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "escrow hold creation failed: " + err.Error()})
+		return
+	}
+
+	// Commit transaction - all DB updates succeed or all fail together
+	if err := tx.Commit(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit transaction: " + err.Error()})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":         "settled",
-		"transaction_id": txID.String(),
-		"order_id":       orderID,
-		"settlement": gin.H{
-			"admin_revenue": split.AdminRevenue,
-			"vendor_escrow": split.VendorEscrow,
-			"total_cleared": amountOwed,
+		"status":            "settled",
+		"transaction_id":    txID.String(),
+		"order_id":          orderID,
+		"settlement_paisa": gin.H{
+			"admin_revenue_paisa":   split.AdminRevenue,
+			"vendor_escrow_paisa":    split.VendorEscrow,
+			"delivery_escrow_paisa": split.DeliveryEscrow,
+			"total_cleared_paisa":   amountOwedPaisa,
 		},
 	})
 }
@@ -490,9 +508,32 @@ func (h *CODHandler) RegisterRoutes(router *gin.Engine) {
 
 // vendorFallback prefers the vendor USER id, falling back to the store id for
 // legacy rows that never carried it.
+// FIX [COD-4]: This function is kept for backward compatibility but should NOT be used
+// for CreateHold - use resolveVendorID instead.
 func vendorFallback(vendorID, storeID string) string {
 	if vendorID != "" {
 		return vendorID
 	}
 	return storeID
+}
+
+// resolveVendorID returns a valid vendor USER tracking ID.
+// FIX [COD-4]: NEVER returns a store ID. If vendorID is empty, attempts to look up
+// the vendor_user_id from the stores table. Returns empty string if resolution fails.
+func (h *CODHandler) resolveVendorID(vendorID, storeID string) string {
+	if vendorID != "" {
+		return vendorID
+	}
+	if storeID == "" {
+		return ""
+	}
+	var resolvedVendorID string
+	err := h.db.QueryRow(context.Background(),
+		`SELECT vendor_user_id FROM stores WHERE store_tracking_id = $1`,
+		storeID,
+	).Scan(&resolvedVendorID)
+	if err != nil || resolvedVendorID == "" {
+		return ""
+	}
+	return resolvedVendorID
 }

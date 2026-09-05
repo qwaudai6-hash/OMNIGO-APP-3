@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/omnigo/backend/internal/ledger"
+	"github.com/omnigo/backend/internal/shared/money"
 )
 
 func envFloat(key string, fallback float64) float64 {
@@ -22,24 +23,32 @@ func envFloat(key string, fallback float64) float64 {
 }
 
 // RiderWalletResponse is the wallet overview returned to the rider/admin.
+// All amounts are in paisa (int64) for internal precision.
+// JSON fields remain float64 for backward compatibility with frontend.
 type RiderWalletResponse struct {
-	RiderTrackingID  string              `json:"rider_tracking_id"`
-	Balance          float64             `json:"balance"`
-	LifetimeEarnings float64             `json:"lifetime_earnings"`
-	CashInHand       float64             `json:"cash_in_hand"`
-	IsCashBlocked    bool                `json:"is_cash_blocked"`
-	RecentCredits    []RiderWalletCredit `json:"recent_credits"`
-	UpdatedAt        string              `json:"updated_at"`
+	RiderTrackingID    string              `json:"rider_tracking_id"`
+	Balance            float64             `json:"balance"`              // rupees for display
+	BalancePaisa       int64               `json:"balance_paisa"`        // internal
+	LifetimeEarnings   float64             `json:"lifetime_earnings"`    // rupees for display
+	LifetimeEarningsPaisa int64            `json:"lifetime_earnings_paisa"` // internal
+	CashInHand         float64             `json:"cash_in_hand"`         // rupees for display
+	CashInHandPaisa    int64               `json:"cash_in_hand_paisa"`   // internal
+	IsCashBlocked      bool                `json:"is_cash_blocked"`
+	RecentCredits      []RiderWalletCredit `json:"recent_credits"`
+	UpdatedAt          string              `json:"updated_at"`
 }
 
 // RiderWalletCredit represents a single completed-delivery credit.
 type RiderWalletCredit struct {
-	DeliveryID  string  `json:"delivery_id"`
-	OrderID     string  `json:"order_id"`
-	DeliveryFee float64 `json:"delivery_fee"`
-	Commission  float64 `json:"admin_commission"`
-	NetCredit   float64 `json:"net_credit"`
-	CreditedAt  string  `json:"credited_at"`
+	DeliveryID       string  `json:"delivery_id"`
+	OrderID          string  `json:"order_id"`
+	DeliveryFee      float64 `json:"delivery_fee"`       // rupees for display
+	DeliveryFeePaisa int64   `json:"delivery_fee_paisa"` // internal
+	Commission       float64 `json:"admin_commission"`   // rupees for display
+	CommissionPaisa  int64   `json:"admin_commission_paisa"` // internal
+	NetCredit        float64 `json:"net_credit"`         // rupees for display
+	NetCreditPaisa   int64   `json:"net_credit_paisa"`   // internal
+	CreditedAt       string  `json:"credited_at"`
 }
 
 type RiderWalletService struct {
@@ -63,29 +72,40 @@ func (s *RiderWalletService) GetWallet(ctx context.Context, riderTrackingID stri
 	resp.RiderTrackingID = riderTrackingID
 
 	walletQuery := `
-		SELECT COALESCE(balance, 0), COALESCE(lifetime_earnings, 0), COALESCE(cash_in_hand, 0), updated_at
+		SELECT COALESCE(balance_paisa, 0), COALESCE(lifetime_earnings_paisa, 0), COALESCE(cash_in_hand_paisa, 0), updated_at
 		FROM rider_wallet
 		WHERE rider_tracking_id = $1
 	`
 	var updatedAt time.Time
+	var balancePaisa, lifetimeEarningsPaisa, cashInHandPaisa int64
 	err := s.db.QueryRow(ctx, walletQuery, riderTrackingID).Scan(
-		&resp.Balance, &resp.LifetimeEarnings, &resp.CashInHand, &updatedAt,
+		&balancePaisa, &lifetimeEarningsPaisa, &cashInHandPaisa, &updatedAt,
 	)
 	if err != nil {
 		// No wallet row yet is valid — return zeros.
 		resp.Balance = 0
+		resp.BalancePaisa = 0
 		resp.LifetimeEarnings = 0
+		resp.LifetimeEarningsPaisa = 0
 		resp.CashInHand = 0
+		resp.CashInHandPaisa = 0
 		resp.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	} else {
+		resp.Balance = money.PaisaToRupees(balancePaisa)
+		resp.BalancePaisa = balancePaisa
+		resp.LifetimeEarnings = money.PaisaToRupees(lifetimeEarningsPaisa)
+		resp.LifetimeEarningsPaisa = lifetimeEarningsPaisa
+		resp.CashInHand = money.PaisaToRupees(cashInHandPaisa)
+		resp.CashInHandPaisa = cashInHandPaisa
 		resp.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
 	}
 
 	// Block if cash >= threshold
-	resp.IsCashBlocked = resp.CashInHand >= envFloat("RIDER_CASH_BLOCK_THRESHOLD", 5000.0)
+	cashThresholdPaisa := int64(envFloat("RIDER_CASH_BLOCK_THRESHOLD", 5000.0) * 100)
+	resp.IsCashBlocked = resp.CashInHandPaisa >= cashThresholdPaisa
 
 	creditQuery := `
-		SELECT d.tracking_id, d.order_tracking_id, COALESCE(d.delivery_fee, 0), COALESCE(d.admin_commission, 0), d.updated_at
+		SELECT d.tracking_id, d.order_tracking_id, COALESCE(d.amount_paisa, 0), COALESCE(d.commission_paisa, 0), d.updated_at
 		FROM deliveries d
 		WHERE d.rider_tracking_id = $1 AND d.status = 'completed'
 		ORDER BY d.updated_at DESC
@@ -100,10 +120,13 @@ func (s *RiderWalletService) GetWallet(ctx context.Context, riderTrackingID stri
 	for rows.Next() {
 		var c RiderWalletCredit
 		var deliveredAt time.Time
-		if err := rows.Scan(&c.DeliveryID, &c.OrderID, &c.DeliveryFee, &c.Commission, &deliveredAt); err != nil {
+		if err := rows.Scan(&c.DeliveryID, &c.OrderID, &c.DeliveryFeePaisa, &c.CommissionPaisa, &deliveredAt); err != nil {
 			return nil, err
 		}
-		c.NetCredit = c.DeliveryFee - c.Commission
+		c.DeliveryFee = money.PaisaToRupees(c.DeliveryFeePaisa)
+		c.Commission = money.PaisaToRupees(c.CommissionPaisa)
+		c.NetCreditPaisa = c.DeliveryFeePaisa - c.CommissionPaisa
+		c.NetCredit = money.PaisaToRupees(c.NetCreditPaisa)
 		c.CreditedAt = deliveredAt.UTC().Format(time.RFC3339)
 		resp.RecentCredits = append(resp.RecentCredits, c)
 	}
@@ -116,13 +139,14 @@ func (s *RiderWalletService) GetWallet(ctx context.Context, riderTrackingID stri
 
 // CreditDelivery creates a double-entry ledger transfer from central_escrow → rider_wallet
 // keeping the ledger in sync with the wallet table.
+// All amounts are in paisa (int64).
 //
 // The transfer source is central_escrow (delivery fee pool funded by online payments).
 // For COD orders, central_escrow is funded by the COD settlement handler.
 // NOTE: The actual Postgres rider_wallet balance update is now handled atomically
 // within the delivery_repository's UpdateGigStatus transaction to prevent race conditions.
-func (s *RiderWalletService) CreditDelivery(ctx context.Context, riderTrackingID, deliveryID string, riderEarning, adminCommission float64) error {
-	netCredit := riderEarning
+func (s *RiderWalletService) CreditDelivery(ctx context.Context, riderTrackingID, deliveryID string, riderEarningPaisa, adminCommissionPaisa int64) error {
+	netCredit := riderEarningPaisa
 	if netCredit < 0 {
 		return fmt.Errorf("net credit cannot be negative")
 	}
@@ -138,7 +162,7 @@ func (s *RiderWalletService) CreditDelivery(ctx context.Context, riderTrackingID
 			Currency:       "PKR",
 			ReferenceType:  "delivery_credit",
 			ReferenceID:    deliveryID,
-			Description:    fmt.Sprintf("Rider delivery earning: %.2f PKR (fee: %.2f, commission: %.2f)", netCredit, riderEarning, adminCommission),
+			Description:    fmt.Sprintf("Rider delivery earning: %d paisa (fee: %d, commission: %d)", netCredit, riderEarningPaisa, adminCommissionPaisa),
 			IdempotencyKey: idempotencyKey,
 		}); err != nil {
 			// Log but don't fail — wallet table is already updated
@@ -150,21 +174,53 @@ func (s *RiderWalletService) CreditDelivery(ctx context.Context, riderTrackingID
 }
 
 // AddCODCollection adds collected cash to the rider's cash_in_hand balance.
-func (s *RiderWalletService) AddCODCollection(ctx context.Context, riderTrackingID string, amount float64) error {
-	if amount <= 0 {
+// amountPaisa is in paisa (int64).
+func (s *RiderWalletService) AddCODCollection(ctx context.Context, riderTrackingID string, amountPaisa int64) error {
+	if amountPaisa <= 0 {
 		return nil
 	}
 	query := `
-		INSERT INTO rider_wallet (rider_tracking_id, cash_in_hand, updated_at)
+		INSERT INTO rider_wallet (rider_tracking_id, cash_in_hand_paisa, updated_at)
 		VALUES ($1, $2, NOW())
 		ON CONFLICT (rider_tracking_id)
 		DO UPDATE SET
-			cash_in_hand = rider_wallet.cash_in_hand + $2,
+			cash_in_hand_paisa = rider_wallet.cash_in_hand_paisa + $2,
 			updated_at = NOW()
 	`
-	_, err := s.db.Exec(ctx, query, riderTrackingID, amount)
+	_, err := s.db.Exec(ctx, query, riderTrackingID, amountPaisa)
 	if err != nil {
 		return fmt.Errorf("failed to add COD collection: %w", err)
+	}
+	return nil
+}
+
+// CreateCODDebtLedger creates the ledger entry for COD debt: cash_receivable → rider_cod_debt.
+// This is the single source of truth for the rider_cod_debt ledger account.
+// It is idempotent via the orderTrackingID in the idempotency key.
+// Called by both:
+//   - Confirm endpoint (rider confirms before delivery)
+//   - Delivery service (when delivery completes — fallback if Confirm was not called)
+func (s *RiderWalletService) CreateCODDebtLedger(ctx context.Context, orderTrackingID string, amountPaisa int64) error {
+	if amountPaisa <= 0 {
+		return nil
+	}
+	if s.ledger == nil {
+		// No ledger configured — skip silently (debt row is still created)
+		return nil
+	}
+	idempotencyKey := fmt.Sprintf("cod:debt:%s", orderTrackingID)
+	_, err := s.ledger.Transfer(ctx, ledger.TransferRequest{
+		DebitAccount:   ledger.AccountCashReceivable,
+		CreditAccount:  ledger.AccountRiderCODDebt,
+		Amount:         amountPaisa,
+		Currency:       "PKR",
+		ReferenceType:  "cod_debt",
+		ReferenceID:    orderTrackingID,
+		Description:    fmt.Sprintf("COD debt: rider collected %d paisa for order %s", amountPaisa, orderTrackingID),
+		IdempotencyKey: idempotencyKey,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create COD debt ledger entry: %w", err)
 	}
 	return nil
 }
@@ -173,7 +229,7 @@ func (s *RiderWalletService) AddCODCollection(ctx context.Context, riderTracking
 func (s *RiderWalletService) ClearCODCollection(ctx context.Context, riderTrackingID string) error {
 	query := `
 		UPDATE rider_wallet
-		SET cash_in_hand = 0, updated_at = NOW()
+		SET cash_in_hand_paisa = 0, updated_at = NOW()
 		WHERE rider_tracking_id = $1
 	`
 	_, err := s.db.Exec(ctx, query, riderTrackingID)
@@ -185,16 +241,17 @@ func (s *RiderWalletService) ClearCODCollection(ctx context.Context, riderTracki
 
 // DecrementCODCollection decrements cash_in_hand when a COD debt is settled.
 // FIX H1: Ensures cash_in_hand accurately reflects actual cash on hand.
-func (s *RiderWalletService) DecrementCODCollection(ctx context.Context, riderTrackingID string, amount float64) error {
-	if amount <= 0 {
+// amountPaisa is in paisa (int64).
+func (s *RiderWalletService) DecrementCODCollection(ctx context.Context, riderTrackingID string, amountPaisa int64) error {
+	if amountPaisa <= 0 {
 		return nil
 	}
 	query := `
 		UPDATE rider_wallet
-		SET cash_in_hand = GREATEST(0, cash_in_hand - $1), updated_at = NOW()
+		SET cash_in_hand_paisa = GREATEST(0, cash_in_hand_paisa - $1), updated_at = NOW()
 		WHERE rider_tracking_id = $2
 	`
-	_, err := s.db.Exec(ctx, query, amount, riderTrackingID)
+	_, err := s.db.Exec(ctx, query, amountPaisa, riderTrackingID)
 	if err != nil {
 		return fmt.Errorf("failed to decrement COD collection: %w", err)
 	}

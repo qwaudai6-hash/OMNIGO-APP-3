@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -63,14 +62,14 @@ func (s *CheckoutService) CreateCheckoutTransaction(
 		defer tx.Rollback(ctx)
 
 		for _, item := range items {
-			// GO-24: products.id is int64 — parse the reference strictly so a
-			// non-numeric ID fails loudly instead of matching nothing.
-			pid, convErr := strconv.ParseInt(strings.TrimSpace(item.ProductID), 10, 64)
-			if convErr != nil {
-				return fmt.Errorf("invalid product id %q: must be numeric", item.ProductID)
+			// H-2 FIX: products use product_tracking_id (VARCHAR) not numeric id.
+			// Frontend sends product_tracking_id consistently everywhere.
+			productTrackingID := strings.TrimSpace(item.ProductID)
+			if productTrackingID == "" {
+				return fmt.Errorf("invalid product id %q: empty", item.ProductID)
 			}
-			query := `UPDATE products SET stock = stock - $1 WHERE id = $2 AND stock >= $1`
-			cmdTag, err := tx.Exec(ctx, query, item.Quantity, pid)
+			query := `UPDATE products SET stock = stock - $1 WHERE product_tracking_id = $2 AND stock >= $1`
+			cmdTag, err := tx.Exec(ctx, query, item.Quantity, productTrackingID)
 			if err != nil {
 				return fmt.Errorf("failed executing stock deduction: %w", err)
 			}
@@ -123,17 +122,15 @@ func (s *CheckoutService) compensateFailedInventory(ctx context.Context, items [
 	defer tx.Rollback(ctx)
 
 	for _, item := range items {
-		// GO-24: cast the caller-supplied product reference safely. The
-		// legacy checkout uses numeric `id`; reject non-numeric refs instead
-		// of letting the UPDATE silently match nothing.
-		pid, convErr := strconv.ParseInt(strings.TrimSpace(item.ProductID), 10, 64)
-		if convErr != nil {
-			fmt.Printf("[Saga Engine Error] non-numeric product id %q skipped in compensation\n", item.ProductID)
+		// H-2 FIX: products use product_tracking_id (VARCHAR) not numeric id.
+		productTrackingID := strings.TrimSpace(item.ProductID)
+		if productTrackingID == "" {
+			fmt.Printf("[Saga Engine Error] empty product id skipped in compensation\n")
 			continue
 		}
-		query := `UPDATE products SET stock = stock + $1 WHERE id = $2`
-		if _, err := tx.Exec(ctx, query, item.Quantity, pid); err != nil {
-			fmt.Printf("[Saga Engine Error] Failed to compensate inventory for product %d: %v\n", pid, err)
+		query := `UPDATE products SET stock = stock + $1 WHERE product_tracking_id = $2`
+		if _, err := tx.Exec(ctx, query, item.Quantity, productTrackingID); err != nil {
+			fmt.Printf("[Saga Engine Error] Failed to compensate inventory for product %s: %v\n", productTrackingID, err)
 		}
 	}
 

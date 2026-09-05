@@ -188,6 +188,14 @@ type RideBid struct {
 	CreatedAt       time.Time `json:"created_at"`
 }
 
+// RiderDistance represents a nearby rider with distance from pickup.
+type RiderDistance struct {
+	RiderTrackID string  `json:"rider_track_id"`
+	DistanceKm   float64 `json:"distance_km"`
+	Latitude     float64 `json:"latitude"`
+	Longitude    float64 `json:"longitude"`
+}
+
 // DeliveryCounterBid represents a rider's counter-offer to a delivery bid
 type DeliveryCounterBid struct {
 	ID           int64     `json:"id"`

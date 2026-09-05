@@ -27,6 +27,7 @@ import (
 	"github.com/omnigo/backend/internal/payment/payfast"
 	"github.com/omnigo/backend/internal/payment_orchestrator"
 	"github.com/omnigo/backend/internal/payment_orchestrator/fraud"
+	"github.com/omnigo/backend/internal/shared/money"
 	"github.com/omnigo/backend/internal/shared/telemetry"
 )
 
@@ -367,14 +368,14 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 	}
 	defer tx.Rollback(ctx)
 
-	var expectedAmount float64
+	var expectedAmountPaisa int64
 	var orderStatus string
 	var customerTrackingID string
 	var storeID string
 	err = tx.QueryRow(ctx,
-		`SELECT total_amount, status, customer_tracking_id, store_tracking_id 
+		`SELECT total_amount_paisa, status, customer_tracking_id, store_tracking_id 
 		 FROM orders WHERE order_tracking_id = $1 FOR UPDATE`, req.OrderID,
-	).Scan(&expectedAmount, &orderStatus, &customerTrackingID, &storeID)
+	).Scan(&expectedAmountPaisa, &orderStatus, &customerTrackingID, &storeID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: order not found: %v", ErrNotFound, err)
 	}
@@ -386,7 +387,7 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 	}
 
 	if s.fraud != nil {
-		if err := s.fraud.CheckOrderAnomaly(ctx, merchantUserID, expectedAmount); err != nil {
+		if err := s.fraud.CheckOrderAnomaly(ctx, merchantUserID, float64(expectedAmountPaisa)/100.0); err != nil {
 			log.Printf("[PayFastService] Anomaly detected: %v", err)
 		}
 	}
@@ -474,21 +475,21 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 			log.Printf("ERROR: delivery tracking id lookup error for order %s: %v", req.OrderID, scanErr)
 		}
 	}
-	split, err := s.calculator.CalculateSplit(ctx, expectedAmount, storeID, deliveryTrackingID)
+	split, err := s.calculator.CalculateSplit(ctx, expectedAmountPaisa, storeID, deliveryTrackingID)
 	if err != nil {
 		return nil, fmt.Errorf("commission split calculation failed: %w", err)
 	}
 	totalCalculated := split.AdminRevenue + split.VendorEscrow + split.DeliveryEscrow
-	expectedPaisa := int64(math.Round(expectedAmount * 100))
-	calculatedPaisa := int64(math.Round(totalCalculated * 100))
-	if expectedPaisa != calculatedPaisa {
-		return nil, fmt.Errorf("split parity error: calculated %d paisa vs total %d paisa", calculatedPaisa, expectedPaisa)
+	if expectedAmountPaisa != totalCalculated {
+		return nil, fmt.Errorf("split parity error: calculated %d paisa vs total %d paisa", totalCalculated, expectedAmountPaisa)
 	}
 
+	expectedAmount := float64(expectedAmountPaisa) / 100.0
+
 	splitMeta := map[string]float64{
-		"admin_revenue":   split.AdminRevenue,
-		"vendor_escrow":   split.VendorEscrow,
-		"delivery_escrow": split.DeliveryEscrow,
+		"admin_revenue":   money.PaisaToRupees(split.AdminRevenue),
+		"vendor_escrow":   money.PaisaToRupees(split.VendorEscrow),
+		"delivery_escrow": money.PaisaToRupees(split.DeliveryEscrow),
 	}
 	metaBytes, _ := json.Marshal(PaymentMetadata{
 		CustomerMobile:  authoritativeMobile,
@@ -501,7 +502,7 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 	_, err = tx.Exec(ctx,
 		`INSERT INTO payment_transactions (transaction_id, order_tracking_id, gateway, amount, currency, status, kind, idempotency_key, metadata)
 		 VALUES ($1, $2, 'payfast', $3, $4, 'pending', 'payment', $5, $6::jsonb)`,
-		internalTxnID, req.OrderID, expectedAmount, s.defaultCurrency, idempotencyKey, string(metaBytes),
+		internalTxnID, req.OrderID, float64(expectedAmountPaisa)/100.0, s.defaultCurrency, idempotencyKey, string(metaBytes),
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "ux_payment_active_order") || strings.Contains(err.Error(), "unique constraint") || strings.Contains(err.Error(), "duplicate key") {
@@ -533,7 +534,7 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 			strings.TrimRight(s.payfast.BaseURL(), "/"),
 			url.QueryEscape(s.payfast.MerchantID()),
 			url.QueryEscape(req.OrderID),
-			expectedAmount,
+			float64(expectedAmountPaisa)/100.0,
 			url.QueryEscape(authoritativeMobile),
 			url.QueryEscape(returnURL),
 			url.QueryEscape(returnURL),
@@ -570,7 +571,7 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 			BasketID:         req.OrderID,
 			OrderDate:        time.Now().Format("2006-01-02 15:04:05"),
 			TxnDesc:          "OmniGo Order " + req.OrderID,
-			TxnAmt:           fmt.Sprintf("%.2f", expectedAmount),
+			TxnAmt:           fmt.Sprintf("%.2f", float64(expectedAmountPaisa)/100.0),
 			CustomerIP:       clientIP,
 			MerCatCode:       s.merchantCategory,
 			Otp:              req.OTP,
@@ -667,7 +668,7 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 			s.fraud.RecordAttempt(ctx, merchantUserID, clientIP, true)
 		}
 
-		if err := s.VerifyAndSettle(ctx, internalTxnID, req.OrderID, txnRes.TransactionID, expectedAmount); err != nil {
+		if err := s.VerifyAndSettle(ctx, internalTxnID, req.OrderID, txnRes.TransactionID, expectedAmountPaisa); err != nil {
 			return nil, err
 		}
 
@@ -825,7 +826,7 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		BasketID:         req.OrderID,
 		OrderDate:        time.Now().Format("2006-01-02 15:04:05"),
 		TxnDesc:          "OmniGo Order " + req.OrderID,
-		TxnAmt:           fmt.Sprintf("%.2f", expectedAmount),
+		TxnAmt:           fmt.Sprintf("%.2f", float64(expectedAmountPaisa)/100.0),
 		CustomerIP:       clientIP,
 		MerCatCode:       s.merchantCategory,
 		Otp:              req.OTP,
@@ -883,7 +884,7 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 	}
 
 	// 8. Verify & Settle
-	if err := s.VerifyAndSettle(ctx, internalTxnID, req.OrderID, txnRes.TransactionID, expectedAmount); err != nil {
+	if err := s.VerifyAndSettle(ctx, internalTxnID, req.OrderID, txnRes.TransactionID, expectedAmountPaisa); err != nil {
 		return nil, err
 	}
 
@@ -913,16 +914,16 @@ func (s *PayFastService) Handle3DSCallback(ctx context.Context, mdParam, paRes, 
 
 	// 1. Fetch 3DS Payment Record with Replay Defense Guard
 	var orderID string
-	var amount float64
+	var amountPaisa int64
 	var metaJSON []byte
 	var customerTrackingID string
 	err = s.db.QueryRow(ctx,
-		`SELECT pt.order_tracking_id, pt.amount, pt.metadata, o.customer_tracking_id 
+		`SELECT pt.order_tracking_id, pt.amount_paisa, pt.metadata, o.customer_tracking_id 
 		 FROM payment_transactions pt
 		 JOIN orders o ON o.order_tracking_id = pt.order_tracking_id
 		 WHERE pt.transaction_id = $1 AND pt.status = '3ds_required'`,
 		internalTxnID,
-	).Scan(&orderID, &amount, &metaJSON, &customerTrackingID)
+	).Scan(&orderID, &amountPaisa, &metaJSON, &customerTrackingID)
 
 	if err != nil {
 		return "", errors.New("no pending 3DS payment found for transaction (possible replay or already finalized)")
@@ -959,7 +960,7 @@ func (s *PayFastService) Handle3DSCallback(ctx context.Context, mdParam, paRes, 
 		BasketID:         orderID,
 		OrderDate:        time.Now().Format("2006-01-02 15:04:05"),
 		TxnDesc:          "OmniGo Order " + orderID,
-		TxnAmt:           fmt.Sprintf("%.2f", amount),
+		TxnAmt:           fmt.Sprintf("%.2f", float64(amountPaisa)/100.0),
 		CustomerIP:       origCustomerIP,
 		MerCatCode:       s.merchantCategory,
 		ECI:              meta.ECI,
@@ -998,7 +999,7 @@ func (s *PayFastService) Handle3DSCallback(ctx context.Context, mdParam, paRes, 
 	}
 
 	// 4. Verify Status & Settle
-	if err := s.VerifyAndSettle(ctx, internalTxnID, orderID, txnRes.TransactionID, amount); err != nil {
+	if err := s.VerifyAndSettle(ctx, internalTxnID, orderID, txnRes.TransactionID, amountPaisa); err != nil {
 		return orderID, err
 	}
 
@@ -1006,14 +1007,8 @@ func (s *PayFastService) Handle3DSCallback(ctx context.Context, mdParam, paRes, 
 }
 
 // VerifyAndSettle queries PayFast status and settles the database transaction atomically.
-//
-// The context is deliberately detached (WithoutCancel) before any work: by the time this
-// runs, funds have MAY already be captured at the gateway. If the originating HTTP request
-// dies mid-settlement (client disconnect, load-balancer timeout), a cancellable context
-// would abort the local ledger/order updates while the customer was still charged —
-// leaving a paid order stuck unsettled until reconciliation. Values (tracing etc.) are
-// preserved; only cancellation is dropped.
-func (s *PayFastService) VerifyAndSettle(ctx context.Context, internalTxnID, orderID, gatewayTxnID string, expectedAmount float64) error {
+// expectedAmountPaisa is in paisa (int64).
+func (s *PayFastService) VerifyAndSettle(ctx context.Context, internalTxnID, orderID, gatewayTxnID string, expectedAmountPaisa int64) error {
 	ctx = context.WithoutCancel(ctx)
 
 	if gatewayTxnID == "" {
@@ -1059,17 +1054,16 @@ func (s *PayFastService) VerifyAndSettle(ctx context.Context, internalTxnID, ord
 			}
 			return fmt.Errorf("invalid gateway amount format: %w", parseErr)
 		}
-		expectedPaisa := int64(math.Round(expectedAmount * 100))
 		gatewayPaisa := int64(math.Round(gatewayAmt * 100))
-		if expectedPaisa != gatewayPaisa {
-			if markErr := s.MarkPaymentFailed(ctx, internalTxnID, fmt.Sprintf("Amount mismatch: expected %d paisa, got %d paisa", expectedPaisa, gatewayPaisa)); markErr != nil {
+		if expectedAmountPaisa != gatewayPaisa {
+			if markErr := s.MarkPaymentFailed(ctx, internalTxnID, fmt.Sprintf("Amount mismatch: expected %d paisa, got %d paisa", expectedAmountPaisa, gatewayPaisa)); markErr != nil {
 				log.Printf("CRITICAL: failed to update payment status via MarkPaymentFailed for txn %s: %v", internalTxnID, markErr)
 			}
 			return errors.New("transaction amount mismatch")
 		}
 	}
 
-	return s.ExecuteSplit(ctx, internalTxnID, orderID, expectedAmount, gatewayTxnID)
+	return s.ExecuteSplit(ctx, internalTxnID, orderID, expectedAmountPaisa, gatewayTxnID)
 }
 
 // ExecuteSplit creates the outbox event and prepares the transaction for atomic settlement.
@@ -1078,7 +1072,8 @@ func (s *PayFastService) VerifyAndSettle(ctx context.Context, internalTxnID, ord
 // Like VerifyAndSettle, the context is detached: this is pure local bookkeeping (DB + outbox)
 // for money that may already be captured at the gateway — it must never be aborted by an
 // upstream HTTP cancellation.
-func (s *PayFastService) ExecuteSplit(ctx context.Context, internalTxnID, orderID string, expectedAmount float64, gatewayTxnID string) error {
+// expectedAmountPaisa is in paisa (int64).
+func (s *PayFastService) ExecuteSplit(ctx context.Context, internalTxnID, orderID string, expectedAmountPaisa int64, gatewayTxnID string) error {
 	ctx = context.WithoutCancel(ctx)
 
 	tx, err := s.db.Begin(ctx)
@@ -1088,21 +1083,21 @@ func (s *PayFastService) ExecuteSplit(ctx context.Context, internalTxnID, orderI
 	defer tx.Rollback(ctx)
 
 	// 1. Lock order FIRST (Global lock order: orders -> payment_transactions)
-	var dbAmount float64
+	var dbAmountPaisa int64
 	var storeID string
 	var vendorTrackingID string
 	var orderStatus, paymentStatus string
 	err = tx.QueryRow(ctx,
-		`SELECT total_amount, store_tracking_id, vendor_tracking_id, status, COALESCE(payment_status, '') FROM orders WHERE order_tracking_id = $1 FOR UPDATE`, orderID,
-	).Scan(&dbAmount, &storeID, &vendorTrackingID, &orderStatus, &paymentStatus)
+		`SELECT total_amount_paisa, store_tracking_id, vendor_tracking_id, status, COALESCE(payment_status, '') FROM orders WHERE order_tracking_id = $1 FOR UPDATE`, orderID,
+	).Scan(&dbAmountPaisa, &storeID, &vendorTrackingID, &orderStatus, &paymentStatus)
 	if err != nil {
 		return fmt.Errorf("order not found: %w", err)
 	}
 	if orderStatus == "paid" || paymentStatus == "paid" || paymentStatus == "settlement_pending" {
 		return errors.New("conflict: order already paid or settlement in progress")
 	}
-	if dbAmount != expectedAmount {
-		return fmt.Errorf("order amount changed: expected %.2f, got %.2f", expectedAmount, dbAmount)
+	if dbAmountPaisa != expectedAmountPaisa {
+		return fmt.Errorf("order amount changed: expected %d paisa, got %d paisa", expectedAmountPaisa, dbAmountPaisa)
 	}
 
 	var deliveryTrackingID string
@@ -1112,7 +1107,7 @@ func (s *PayFastService) ExecuteSplit(ctx context.Context, internalTxnID, orderI
 		}
 	}
 
-	split, err := s.calculator.CalculateSplit(ctx, dbAmount, storeID, deliveryTrackingID)
+	split, err := s.calculator.CalculateSplit(ctx, dbAmountPaisa, storeID, deliveryTrackingID)
 	if err != nil {
 		return fmt.Errorf("split calculation failed: %w", err)
 	}
@@ -1133,7 +1128,7 @@ func (s *PayFastService) ExecuteSplit(ctx context.Context, internalTxnID, orderI
 	// Update orders payment status and all split columns
 	_, err = tx.Exec(ctx,
 		`UPDATE orders 
-		 SET admin_commission = $1, vendor_escrow = $2, delivery_escrow = $3, payment_status = 'settlement_pending', updated_at = NOW() 
+		 SET admin_commission_paisa = $1, vendor_escrow_paisa = $2, delivery_escrow_paisa = $3, payment_status = 'settlement_pending', updated_at = NOW() 
 		 WHERE order_tracking_id = $4`,
 		split.AdminRevenue, split.VendorEscrow, split.DeliveryEscrow, orderID,
 	)
@@ -1145,13 +1140,13 @@ func (s *PayFastService) ExecuteSplit(ctx context.Context, internalTxnID, orderI
 		{
 			"debit_account":  string(ledger.AccountPayFastHolding),
 			"credit_account": string(ledger.AccountAdminRevenue),
-			"amount":         split.AdminRevenue,
+			"amount_paisa":   split.AdminRevenue,
 			"idempotency":    idempotencyKey + ":admin",
 		},
 		{
 			"debit_account":  string(ledger.AccountPayFastHolding),
 			"credit_account": string(ledger.AccountVendorLockedEscrow),
-			"amount":         split.VendorEscrow,
+			"amount_paisa":   split.VendorEscrow,
 			"idempotency":    idempotencyKey + ":vendor",
 		},
 	}
@@ -1159,25 +1154,25 @@ func (s *PayFastService) ExecuteSplit(ctx context.Context, internalTxnID, orderI
 		transfers = append(transfers, map[string]interface{}{
 			"debit_account":  string(ledger.AccountPayFastHolding),
 			"credit_account": string(ledger.AccountCentralEscrow),
-			"amount":         split.DeliveryEscrow,
+			"amount_paisa":   split.DeliveryEscrow,
 			"idempotency":    idempotencyKey + ":delivery",
 		})
 	}
 
 	outboxPayload, err := json.Marshal(map[string]interface{}{
-		"internal_txn_id":      internalTxnID,
-		"order_id":             orderID,
-		"gateway_txn_id":       gatewayTxnID,
-		"store_id":             storeID,
-		"vendor_tracking_id":   vendorTrackingID,
-		"delivery_tracking_id": deliveryTrackingID,
-		"total_amount":         dbAmount,
-		"currency":             s.defaultCurrency,
-		"admin_revenue":        split.AdminRevenue,
-		"vendor_escrow":        split.VendorEscrow,
-		"delivery_escrow":      split.DeliveryEscrow,
-		"idempotency_key":      idempotencyKey,
-		"transfers":            transfers,
+		"internal_txn_id":        internalTxnID,
+		"order_id":               orderID,
+		"gateway_txn_id":         gatewayTxnID,
+		"store_id":               storeID,
+		"vendor_tracking_id":     vendorTrackingID,
+		"delivery_tracking_id":   deliveryTrackingID,
+		"total_amount_paisa":     dbAmountPaisa,
+		"currency":               s.defaultCurrency,
+		"admin_revenue_paisa":    split.AdminRevenue,
+		"vendor_escrow_paisa":    split.VendorEscrow,
+		"delivery_escrow_paisa":  split.DeliveryEscrow,
+		"idempotency_key":        idempotencyKey,
+		"transfers":              transfers,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to marshal outbox payload: %w", err)
@@ -1308,24 +1303,24 @@ func (s *PayFastService) HandleIPN(ctx context.Context, params IPNParams) error 
 
 	// Robust transaction lookup: match by gateway_txn_id first if supplied, otherwise fallback to active/latest txn for order
 	var internalTxnID, gatewayTxnID string
-	var amount float64
+	var amountPaisa int64
 
 	if params.TransactionID != "" {
 		err = s.db.QueryRow(ctx,
-			`SELECT transaction_id, COALESCE(gateway_txn_id, ''), amount 
+			`SELECT transaction_id, COALESCE(gateway_txn_id, ''), amount_paisa 
 			 FROM payment_transactions 
 			 WHERE gateway_txn_id = $1 OR (order_tracking_id = $2 AND status IN ('processing', '3ds_required', 'gateway_pending', 'pending'))
 			 ORDER BY created_at DESC LIMIT 1`,
 			params.TransactionID, basketID,
-		).Scan(&internalTxnID, &gatewayTxnID, &amount)
+		).Scan(&internalTxnID, &gatewayTxnID, &amountPaisa)
 	} else {
 		err = s.db.QueryRow(ctx,
-			`SELECT transaction_id, COALESCE(gateway_txn_id, ''), amount 
+			`SELECT transaction_id, COALESCE(gateway_txn_id, ''), amount_paisa 
 			 FROM payment_transactions 
 			 WHERE order_tracking_id = $1 
 			 ORDER BY created_at DESC LIMIT 1`,
 			basketID,
-		).Scan(&internalTxnID, &gatewayTxnID, &amount)
+		).Scan(&internalTxnID, &gatewayTxnID, &amountPaisa)
 	}
 
 	if err != nil {
@@ -1353,7 +1348,7 @@ func (s *PayFastService) HandleIPN(ctx context.Context, params IPNParams) error 
 		return nil
 	}
 
-	result := s.VerifyAndSettle(ctx, internalTxnID, basketID, gatewayTxnID, amount)
+	result := s.VerifyAndSettle(ctx, internalTxnID, basketID, gatewayTxnID, amountPaisa)
 	s.markIPNEventProcessed(ctx, eventID, result)
 	return result
 }

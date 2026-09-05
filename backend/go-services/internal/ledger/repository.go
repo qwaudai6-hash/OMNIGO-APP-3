@@ -23,7 +23,7 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 func (r *Repository) InsertEntries(ctx context.Context, tx pgx.Tx, entries []LedgerEntry) error {
 	for _, e := range entries {
 		query := `
-			INSERT INTO ledger_entries (id, transaction_id, account, amount, currency, reference_type, reference_id, description, idempotency_key, signature, signature_version)
+			INSERT INTO ledger_entries (id, transaction_id, account, amount_paisa, currency, reference_type, reference_id, description, idempotency_key, signature, signature_version)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		`
 		_, err := tx.Exec(ctx, query,
@@ -38,10 +38,10 @@ func (r *Repository) InsertEntries(ctx context.Context, tx pgx.Tx, entries []Led
 }
 
 // GetBalance returns the net balance (sum of all amounts) for an account.
-func (r *Repository) GetBalance(ctx context.Context, account Account) (float64, error) {
-	var balance float64
+func (r *Repository) GetBalance(ctx context.Context, account Account) (int64, error) {
+	var balance int64
 	err := r.db.QueryRow(ctx,
-		`SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE account = $1`, account,
+		`SELECT COALESCE(SUM(amount_paisa), 0) FROM ledger_entries WHERE account = $1`, account,
 	).Scan(&balance)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get balance for %s: %w", account, err)
@@ -50,10 +50,10 @@ func (r *Repository) GetBalance(ctx context.Context, account Account) (float64, 
 }
 
 // GetBalanceInTx returns the net balance for an account within an active transaction.
-func (r *Repository) GetBalanceInTx(ctx context.Context, tx pgx.Tx, account Account) (float64, error) {
-	var balance float64
+func (r *Repository) GetBalanceInTx(ctx context.Context, tx pgx.Tx, account Account) (int64, error) {
+	var balance int64
 	err := tx.QueryRow(ctx,
-		`SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE account = $1`, account,
+		`SELECT COALESCE(SUM(amount_paisa), 0) FROM ledger_entries WHERE account = $1`, account,
 	).Scan(&balance)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get balance for %s: %w", account, err)
@@ -64,7 +64,7 @@ func (r *Repository) GetBalanceInTx(ctx context.Context, tx pgx.Tx, account Acco
 // GetEntriesByReference returns all ledger entries for a given reference.
 func (r *Repository) GetEntriesByReference(ctx context.Context, refType, refID string) ([]LedgerEntry, error) {
 	rows, err := r.db.Query(ctx,
-		`SELECT id, transaction_id, account, amount, currency, reference_type, reference_id, description, idempotency_key, signature, signature_version, created_at
+		`SELECT id, transaction_id, account, amount_paisa, currency, reference_type, reference_id, description, idempotency_key, signature, signature_version, created_at
 		 FROM ledger_entries WHERE reference_type = $1 AND reference_id = $2 ORDER BY created_at`,
 		refType, refID,
 	)
@@ -88,7 +88,7 @@ func (r *Repository) GetEntriesByReference(ctx context.Context, refType, refID s
 // GetTransactionEntries returns all entries sharing the same transaction_id.
 func (r *Repository) GetTransactionEntries(ctx context.Context, txID uuid.UUID) ([]LedgerEntry, error) {
 	rows, err := r.db.Query(ctx,
-		`SELECT id, transaction_id, account, amount, currency, reference_type, reference_id, description, idempotency_key, signature, signature_version, created_at
+		`SELECT id, transaction_id, account, amount_paisa, currency, reference_type, reference_id, description, idempotency_key, signature, signature_version, created_at
 		 FROM ledger_entries WHERE transaction_id = $1 ORDER BY created_at`,
 		txID,
 	)

@@ -15,29 +15,29 @@ import (
 type ReconciliationResult struct {
 	Timestamp           time.Time `json:"timestamp"`
 	TotalOrdersCount    int64     `json:"total_orders_count"`
-	TotalOrdersVolume   float64   `json:"total_orders_volume"`
+	TotalOrdersVolumePaisa int64  `json:"total_orders_volume_paisa"`
 	// TigerBeetle ledger balances (the source of truth for fund accounting)
-	TBVendorLockedEscrow  float64 `json:"tb_vendor_locked_escrow"`
-	TBVendorPendingEscrow float64 `json:"tb_vendor_pending_escrow"`
-	TBVendorWallet        float64 `json:"tb_vendor_wallet"`
-	TBCentralEscrow       float64 `json:"tb_central_escrow"`
-	TBAdminRevenue        float64 `json:"tb_admin_revenue"`
-	TBRiderCODDebt        float64 `json:"tb_rider_cod_debt"`
-	TBCashReceivable      float64 `json:"tb_cash_receivable"`
+	TBVendorLockedEscrowPaisa  int64 `json:"tb_vendor_locked_escrow_paisa"`
+	TBVendorPendingEscrowPaisa int64 `json:"tb_vendor_pending_escrow_paisa"`
+	TBVendorWalletPaisa        int64 `json:"tb_vendor_wallet_paisa"`
+	TBCentralEscrowPaisa       int64 `json:"tb_central_escrow_paisa"`
+	TBAdminRevenuePaisa        int64 `json:"tb_admin_revenue_paisa"`
+	TBRiderCODDebtPaisa        int64 `json:"tb_rider_cod_debt_paisa"`
+	TBCashReceivablePaisa      int64 `json:"tb_cash_receivable_paisa"`
 	// PostgreSQL relational sums (must reconcile against TB)
-	PGActiveHolds        float64 `json:"pg_active_holds"`
-	PGVendorWalletBalance float64 `json:"pg_vendor_wallet_balance"`
-	PGRiderWalletBalance  float64 `json:"pg_rider_wallet_balance"`
+	PGActiveHoldsPaisa        int64 `json:"pg_active_holds_paisa"`
+	PGVendorWalletBalancePaisa int64 `json:"pg_vendor_wallet_balance_paisa"`
+	PGRiderWalletBalancePaisa  int64 `json:"pg_rider_wallet_balance_paisa"`
 	// Per-account reconciliation status
-	VendorEscrowDiscrepancy  float64 `json:"vendor_escrow_discrepancy"`
-	VendorWalletDiscrepancy  float64 `json:"vendor_wallet_discrepancy"`
-	AdminRevenueDiscrepancy  float64 `json:"admin_revenue_discrepancy"`
-	CODDebtDiscrepancy       float64 `json:"cod_debt_discrepancy"`
-	CentralEscrowDiscrepancy float64 `json:"central_escrow_discrepancy"`
+	VendorEscrowDiscrepancyPaisa  int64 `json:"vendor_escrow_discrepancy_paisa"`
+	VendorWalletDiscrepancyPaisa  int64 `json:"vendor_wallet_discrepancy_paisa"`
+	AdminRevenueDiscrepancyPaisa  int64 `json:"admin_revenue_discrepancy_paisa"`
+	CODDebtDiscrepancyPaisa       int64 `json:"cod_debt_discrepancy_paisa"`
+	CentralEscrowDiscrepancyPaisa int64 `json:"central_escrow_discrepancy_paisa"`
 	// Overall verdict
-	MaxDiscrepancy float64 `json:"max_discrepancy"`
-	Threshold      float64 `json:"threshold"`
-	IsReconciled   bool    `json:"is_reconciled"`
+	MaxDiscrepancyPaisa int64 `json:"max_discrepancy_paisa"`
+	ThresholdPaisa      int64 `json:"threshold_paisa"`
+	IsReconciled        bool    `json:"is_reconciled"`
 }
 
 // ReconciliationWorker performs daily automated financial reconciliation
@@ -109,20 +109,20 @@ func (w *ReconciliationWorker) RunReconciliation(ctx context.Context) (*Reconcil
 
 	// 1. Total paid orders & volume from PostgreSQL
 	var totalOrders int64
-	var totalVolume float64
+	var totalVolumePaisa int64
 	err := w.db.QueryRow(ctx,
-		`SELECT COUNT(*), COALESCE(SUM(total_amount), 0.0) FROM orders WHERE payment_status = 'paid'`,
-	).Scan(&totalOrders, &totalVolume)
+		`SELECT COUNT(*), COALESCE(SUM(total_amount_paisa), 0) FROM orders WHERE payment_status = 'paid'`,
+	).Scan(&totalOrders, &totalVolumePaisa)
 	if err != nil {
 		log.Printf("[ReconciliationWorker] Error fetching postgres order totals: %v", err)
 		return result, err
 	}
 	result.TotalOrdersCount = totalOrders
-	result.TotalOrdersVolume = totalVolume
+	result.TotalOrdersVolumePaisa = totalVolumePaisa
 
 	// 2. Fetch every TigerBeetle ledger balance we need in one go.
 	if w.ledgerSvc != nil {
-		fetchTB := func(acc ledger.Account) (float64, error) {
+		fetchTB := func(acc ledger.Account) (int64, error) {
 			bal, err := w.ledgerSvc.GetBalance(ctx, acc)
 			if err != nil {
 				log.Printf("[ReconciliationWorker] Error fetching TB balance for %s: %v", acc, err)
@@ -130,72 +130,99 @@ func (w *ReconciliationWorker) RunReconciliation(ctx context.Context) (*Reconcil
 			}
 			return bal, nil
 		}
-		result.TBVendorLockedEscrow, _ = fetchTB(ledger.AccountVendorLockedEscrow)
-		result.TBVendorPendingEscrow, _ = fetchTB(ledger.AccountVendorPendingEscrow)
-		result.TBVendorWallet, _ = fetchTB(ledger.AccountVendorWallet)
-		result.TBCentralEscrow, _ = fetchTB(ledger.AccountCentralEscrow)
-		result.TBAdminRevenue, _ = fetchTB(ledger.AccountAdminRevenue)
-		result.TBRiderCODDebt, _ = fetchTB(ledger.AccountRiderCODDebt)
-		result.TBCashReceivable, _ = fetchTB(ledger.AccountCashReceivable)
+		result.TBVendorLockedEscrowPaisa, _ = fetchTB(ledger.AccountVendorLockedEscrow)
+		result.TBVendorPendingEscrowPaisa, _ = fetchTB(ledger.AccountVendorPendingEscrow)
+		result.TBVendorWalletPaisa, _ = fetchTB(ledger.AccountVendorWallet)
+		result.TBCentralEscrowPaisa, _ = fetchTB(ledger.AccountCentralEscrow)
+		result.TBAdminRevenuePaisa, _ = fetchTB(ledger.AccountAdminRevenue)
+		result.TBRiderCODDebtPaisa, _ = fetchTB(ledger.AccountRiderCODDebt)
+		result.TBCashReceivablePaisa, _ = fetchTB(ledger.AccountCashReceivable)
 	}
 
 	// 3. Fetch PostgreSQL relational sums to cross-check.
-	fetchPG := func(query string, dst *float64) {
-		var v float64
+	fetchPG := func(query string, dst *int64) {
+		var v int64
 		if err := w.db.QueryRow(ctx, query).Scan(&v); err != nil {
 			log.Printf("[ReconciliationWorker] Error fetching postgres sum (%s): %v", query, err)
 			return
 		}
 		*dst = v
 	}
-	fetchPG(`SELECT COALESCE(SUM(amount), 0.0) FROM escrow_holds WHERE status = 'held'`, &result.PGActiveHolds)
-	fetchPG(`SELECT COALESCE(SUM(balance), 0.0) FROM vendor_wallet`, &result.PGVendorWalletBalance)
-	fetchPG(`SELECT COALESCE(SUM(balance), 0.0) FROM rider_wallet`, &result.PGRiderWalletBalance)
+	fetchPG(`SELECT COALESCE(SUM(amount_paisa), 0) FROM escrow_holds WHERE status = 'held'`, &result.PGActiveHoldsPaisa)
+	fetchPG(`SELECT COALESCE(SUM(balance_paisa), 0) FROM vendor_wallet`, &result.PGVendorWalletBalancePaisa)
+	fetchPG(`SELECT COALESCE(SUM(balance_paisa), 0) FROM rider_wallet`, &result.PGRiderWalletBalancePaisa)
+
+	// FIX [RW-1/RW-2]: Fetch PG sums for AdminRevenue and CODDebt to enable proper reconciliation
+	var PGAdminRevenuePaisa int64
+	var PGCODDebtPaisa int64
+	fetchPG(`SELECT COALESCE(SUM(admin_commission_paisa), 0) FROM orders WHERE status IN ('paid', 'completed', 'delivered', 'accepted', 'shipped', 'in_transit')`, &PGAdminRevenuePaisa)
+	fetchPG(`SELECT COALESCE(SUM(amount_paisa), 0) FROM cod_debts WHERE status = 'pending'`, &PGCODDebtPaisa)
 
 	// 4. Per-account reconciliation. Each check compares one TigerBeetle
 	// account against the relational sum that should match it. A real
 	// financial bug shows up as a difference greater than the threshold.
-	result.VendorEscrowDiscrepancy = absDiff(result.TBVendorLockedEscrow, result.PGActiveHolds)
-	result.VendorWalletDiscrepancy = absDiff(result.TBVendorWallet, result.PGVendorWalletBalance)
-	result.AdminRevenueDiscrepancy = result.TBAdminRevenue // TB only — PG is the source for this account
-	result.CODDebtDiscrepancy = result.TBRiderCODDebt     // TB only
-	result.CentralEscrowDiscrepancy = result.TBCentralEscrow
+	result.VendorEscrowDiscrepancyPaisa = absDiffInt64(result.TBVendorLockedEscrowPaisa, result.PGActiveHoldsPaisa)
+	result.VendorWalletDiscrepancyPaisa = absDiffInt64(result.TBVendorWalletPaisa, result.PGVendorWalletBalancePaisa)
+	// FIX [RW-1]: Compare AdminRevenue between TB and PG
+	result.AdminRevenueDiscrepancyPaisa = absDiffInt64(result.TBAdminRevenuePaisa, PGAdminRevenuePaisa)
+	// FIX [RW-2]: Compare CODDebt between TB and PG
+	result.CODDebtDiscrepancyPaisa = absDiffInt64(result.TBRiderCODDebtPaisa, PGCODDebtPaisa)
+	result.CentralEscrowDiscrepancyPaisa = result.TBCentralEscrowPaisa
 
 	// 5. Compute the relative threshold: max(minThreshold, totalVolume * relativeRate).
 	// Both values come from env-configured ReconciliationConfig so operators
 	// can tune sensitivity per environment.
-	minThreshold := 1.0
+	minThresholdPaisa := int64(100) // 1.00 PKR = 100 paisa
 	relativeRate := 0.0001
 	if w.cfg != nil {
-		minThreshold = w.cfg.MinThresholdPKR
+		minThresholdPaisa = int64(w.cfg.MinThresholdPKR * 100)
 		relativeRate = w.cfg.RelativeRate
 	}
-	threshold := math.Max(minThreshold, result.TotalOrdersVolume*relativeRate)
-	result.Threshold = threshold
+	thresholdPaisa := int64(math.Max(float64(minThresholdPaisa), float64(totalVolumePaisa)*relativeRate))
+	result.ThresholdPaisa = thresholdPaisa
 
 	// 6. Overall verdict: ALL per-account checks must be within threshold.
-	maxDisc := math.Max(result.VendorEscrowDiscrepancy, result.VendorWalletDiscrepancy)
-	result.MaxDiscrepancy = maxDisc
-	result.IsReconciled = maxDisc < threshold
+	// FIX [RW-1/RW-2]: Include AdminRevenue and CODDebt in max discrepancy calculation
+	maxDiscPaisa := maxInt64(result.VendorEscrowDiscrepancyPaisa,
+		result.VendorWalletDiscrepancyPaisa,
+		result.AdminRevenueDiscrepancyPaisa,
+		result.CODDebtDiscrepancyPaisa,
+	)
+	result.MaxDiscrepancyPaisa = maxDiscPaisa
+	result.IsReconciled = maxDiscPaisa < thresholdPaisa
 
 	if result.IsReconciled {
-		log.Printf("[ReconciliationWorker] ✅ SUCCESS: Reconciliation Passed. Orders: %d (%0.2f PKR), VendorEscrow disc: %0.2f, VendorWallet disc: %0.2f, CentralEscrow: %0.2f, AdminRevenue: %0.2f, threshold: %0.2f PKR",
-			result.TotalOrdersCount, result.TotalOrdersVolume,
-			result.VendorEscrowDiscrepancy, result.VendorWalletDiscrepancy,
-			result.TBCentralEscrow, result.TBAdminRevenue, threshold)
+		log.Printf("[ReconciliationWorker] ✅ SUCCESS: Reconciliation Passed. Orders: %d (%d paisa), VendorEscrow disc: %d, VendorWallet disc: %d, AdminRevenue disc: %d, CODDebt disc: %d, threshold: %d paisa",
+			result.TotalOrdersCount, result.TotalOrdersVolumePaisa,
+			result.VendorEscrowDiscrepancyPaisa, result.VendorWalletDiscrepancyPaisa,
+			result.AdminRevenueDiscrepancyPaisa, result.CODDebtDiscrepancyPaisa, thresholdPaisa)
 	} else {
-		log.Printf("[CRITICAL-SECURITY-ALERT] 🚨 FINANCIAL DISCREPANCY! VendorEscrow disc: %0.2f, VendorWallet disc: %0.2f, threshold: %0.2f PKR (max=%0.2f)",
-			result.VendorEscrowDiscrepancy, result.VendorWalletDiscrepancy, threshold, maxDisc)
+		log.Printf("[CRITICAL-SECURITY-ALERT] 🚨 FINANCIAL DISCREPANCY! VendorEscrow: %d, VendorWallet: %d, AdminRevenue: %d, CODDebt: %d, threshold: %d paisa (max discrepancy: %d)",
+			result.VendorEscrowDiscrepancyPaisa, result.VendorWalletDiscrepancyPaisa,
+			result.AdminRevenueDiscrepancyPaisa, result.CODDebtDiscrepancyPaisa, thresholdPaisa, maxDiscPaisa)
 	}
 
 	return result, nil
 }
 
-// absDiff returns the absolute difference between two floats.
-func absDiff(a, b float64) float64 {
+// absDiffInt64 returns the absolute difference between two int64.
+func absDiffInt64(a, b int64) int64 {
 	d := a - b
 	if d < 0 {
 		return -d
 	}
 	return d
+}
+
+func maxInt64(values ...int64) int64 {
+	if len(values) == 0 {
+		return 0
+	}
+	max := values[0]
+	for _, v := range values[1:] {
+		if v > max {
+			max = v
+		}
+	}
+	return max
 }

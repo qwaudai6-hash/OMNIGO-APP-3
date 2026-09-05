@@ -208,8 +208,17 @@ func (r *DeliveryRepository) UpdateRiderLocation(ctx context.Context, riderTrack
 	})
 	if jsonErr == nil {
 		r.redis.Set(ctx, coordsKey, coordsJSON, 300*time.Second)
-		// Publish telemetry coordinates to Redis Pub/Sub channel for sub-millisecond streaming to client
-		r.redis.Publish(ctx, "rider:telemetry:pubsub", coordsJSON)
+		// Publish telemetry coordinates to Redis Stream for durable delivery to clients.
+		// Unlike Pub/Sub, messages persist and survive client disconnects/reconnects.
+		r.redis.XAdd(ctx, &redis.XAddArgs{
+			Stream: "stream:rider:telemetry",
+			MaxLen: 50000,
+			Approx: true,
+			Values: map[string]interface{}{
+				"data": string(coordsJSON),
+				"ts":   time.Now().UnixMilli(),
+			},
+		})
 	}
 
 	return nil
@@ -311,14 +320,14 @@ func (r *DeliveryRepository) AcceptGigWithEligibility(ctx context.Context, track
 		return fmt.Errorf("conflict: rider KYC verification required. Please submit CNIC and Driving License documents for admin approval")
 	}
 
-	// Block COD gig if rider has >= 5000 cash in hand
+	// Block COD gig if rider has >= 5000 PKR cash in hand (500000 paisa)
 	if isCod {
-		var cashInHand float64
-		walletQuery := `SELECT COALESCE(cash_in_hand, 0) FROM rider_wallet WHERE rider_tracking_id = $1`
-		if walletErr := tx.QueryRow(ctx, walletQuery, riderID).Scan(&cashInHand); walletErr != nil {
+		var cashInHandPaisa int64
+		walletQuery := `SELECT COALESCE(cash_in_hand_paisa, 0) FROM rider_wallet WHERE rider_tracking_id = $1`
+		if walletErr := tx.QueryRow(ctx, walletQuery, riderID).Scan(&cashInHandPaisa); walletErr != nil {
 			log.Printf("Warning: could not read rider_wallet for %s: %v", riderID, walletErr)
 		}
-		if cashInHand >= 5000.0 {
+		if cashInHandPaisa >= 500000 { // 5000 PKR in paisa
 			return fmt.Errorf("conflict: cash limit reached (>= 5000). Please deposit to accept COD orders")
 		}
 	}
@@ -662,12 +671,12 @@ func (r *DeliveryRepository) UpdateGigStatus(ctx context.Context, trackingID str
 	// the status update.
 	if status == models.StatusCompleted && riderEarning > 0 && assignedRider != "" {
 		upsertWallet := `
-			INSERT INTO rider_wallet (rider_tracking_id, balance, lifetime_earnings, updated_at)
+			INSERT INTO rider_wallet (rider_tracking_id, balance_paisa, lifetime_earnings_paisa, updated_at)
 			VALUES ($1, $2, $2, NOW())
 			ON CONFLICT (rider_tracking_id)
 			DO UPDATE SET
-				balance = rider_wallet.balance + $2,
-				lifetime_earnings = rider_wallet.lifetime_earnings + $2,
+				balance_paisa = rider_wallet.balance_paisa + $2,
+				lifetime_earnings_paisa = rider_wallet.lifetime_earnings_paisa + $2,
 				updated_at = NOW()
 		`
 		if _, err := tx.Exec(ctx, upsertWallet, assignedRider, riderEarning); err != nil {
@@ -726,7 +735,8 @@ func (r *DeliveryRepository) UpdateOrderDisputeStatus(ctx context.Context, order
 }
 
 // RecordCODDebt inserts a pending debt for the rider for the COD amount.
-func (r *DeliveryRepository) RecordCODDebt(ctx context.Context, orderTrackingID, riderTrackingID string, amount float64) error {
+// amountPaisa is in paisa (int64).
+func (r *DeliveryRepository) RecordCODDebt(ctx context.Context, orderTrackingID, riderTrackingID string, amountPaisa int64) error {
 	query := `
 		INSERT INTO cod_debts (id, order_tracking_id, rider_tracking_id, amount_owed, status)
 		SELECT gen_random_uuid(), $1, $2, $3, 'pending'
@@ -735,7 +745,7 @@ func (r *DeliveryRepository) RecordCODDebt(ctx context.Context, orderTrackingID,
 			WHERE d.order_tracking_id = $1 AND d.status IN ('pending', 'settled')
 		)
 	`
-	_, err := r.writer.Exec(ctx, query, orderTrackingID, riderTrackingID, amount)
+	_, err := r.writer.Exec(ctx, query, orderTrackingID, riderTrackingID, amountPaisa)
 	return err
 }
 
@@ -750,6 +760,7 @@ func (r *DeliveryRepository) CancelDeliveryForOrder(ctx context.Context, orderTr
 		_, err := r.writer.Exec(ctx, query, orderTrackingID, cancelReason)
 		return err
 	}
+
 	query := `
 		UPDATE deliveries 
 		SET status = 'cancelled', updated_at = NOW()
@@ -757,96 +768,6 @@ func (r *DeliveryRepository) CancelDeliveryForOrder(ctx context.Context, orderTr
 	`
 	_, err := r.writer.Exec(ctx, query, orderTrackingID)
 	return err
-}
-
-// SettleCODVendorAndDebt closes the COD loop at delivery completion:
-//
-//	CLAIM-2 FIX: credits the VENDOR wallet (escrow_holds row written as
-//	'paid_out' for audit) — previously COD vendor money lived only in the
-//	TigerBeetle ledger and never reached vendor_wallet / payouts.
-//	CLAIM-3 FIX: auto-inserts the rider's cod_debts row so the Pay Now
-//	flow has something to settle (previously only the manual confirm
-//	endpoint created debts, which no client ever called).
-//
-// Idempotent per order: wallet uses upsert-add; escrow/debt inserts are
-// guarded by NOT EXISTS.
-func (r *DeliveryRepository) SettleCODVendorAndDebt(ctx context.Context, orderTrackingID, storeID, riderTrackingID string, orderTotal, adminCommission, riderEarning float64) error {
-	tx, err := r.writer.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-
-	var vendorID string
-	err = tx.QueryRow(ctx,
-		`SELECT COALESCE(vendor_tracking_id, '') FROM orders WHERE order_tracking_id = $1`,
-		orderTrackingID).Scan(&vendorID)
-	if err != nil {
-		return fmt.Errorf("order lookup failed: %w", err)
-	}
-	if vendorID == "" {
-		// CLAIM-3 FIX: Look up the actual vendor ID from the stores table rather than blindly using storeID
-		err = tx.QueryRow(ctx, `SELECT COALESCE(vendor_tracking_id, '') FROM stores WHERE store_tracking_id = $1`, storeID).Scan(&vendorID)
-		if err != nil || vendorID == "" {
-			return fmt.Errorf("store vendor lookup failed for store %s: %v", storeID, err)
-		}
-	}
-
-	vendorAmount := orderTotal - adminCommission - riderEarning
-	if vendorAmount < 0 {
-		vendorAmount = 0
-	}
-
-	if vendorAmount > 0 {
-		// VW-3 FIX: Idempotency check. The function may be retried if the
-		// outer transaction in delivery_service.go fails after the gig
-		// status update but before/after this function runs. Without this
-		// check, the vendor_wallet would be double-credited. We use the
-		// escrow_holds audit row (inserted below) as the idempotency
-		// marker: if a 'paid_out' hold already exists for this order, the
-		// settlement has already happened and we should skip.
-		var alreadySettled bool
-		err = tx.QueryRow(ctx,
-			`SELECT EXISTS(SELECT 1 FROM escrow_holds WHERE order_tracking_id = $1 AND status = 'paid_out')`,
-			orderTrackingID,
-		).Scan(&alreadySettled)
-		if err != nil {
-			return fmt.Errorf("settle idempotency check failed: %w", err)
-		}
-		if alreadySettled {
-			return nil // already settled in a previous call — no-op
-		}
-
-		// CLAIM-2: credit the vendor's withdrawable wallet.
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO vendor_wallet (vendor_tracking_id, balance, lifetime_earnings, updated_at)
-			VALUES ($1, $2, $2, NOW())
-			ON CONFLICT (vendor_tracking_id)
-			DO UPDATE SET balance = vendor_wallet.balance + $2,
-			              lifetime_earnings = vendor_wallet.lifetime_earnings + $2,
-			              updated_at = NOW()
-		`, vendorID, vendorAmount); err != nil {
-			return fmt.Errorf("vendor wallet credit failed: %w", err)
-		}
-
-		// Audit trail: an already-settled escrow hold (excluded from the
-		// PayoutWorker sweep, which only scans status='released').
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO escrow_holds (id, order_tracking_id, vendor_tracking_id, amount, status, hold_until, released_at)
-			SELECT gen_random_uuid(), $1, $2, $3, 'paid_out', NOW(), NOW()
-			WHERE NOT EXISTS (
-				SELECT 1 FROM escrow_holds e WHERE e.order_tracking_id = $1 AND e.status = 'paid_out'
-			)
-		`, orderTrackingID, vendorID, vendorAmount); err != nil {
-			return fmt.Errorf("cod escrow audit row failed: %w", err)
-		}
-	}
-
-	// Vendor wallet + escrow audit already handled above.
-	// COD debt is created by RecordCODDebt() — do NOT duplicate here
-	// (the old INSERT had `amount` column which doesn't exist in cod_debts).
-
-	return tx.Commit(ctx)
 }
 
 // SaveBid persists a delivery bid to PostgreSQL (best-effort, Redis remains primary).

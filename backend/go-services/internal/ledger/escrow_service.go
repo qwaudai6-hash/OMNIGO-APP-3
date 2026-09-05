@@ -3,12 +3,13 @@ package ledger
 import (
 	"context"
 	"fmt"
+	"math"
 
 	"github.com/google/uuid"
 )
 
 // MoveToVendorPendingEscrow moves funds from the central order escrow to the vendor's 48-hour pending escrow.
-func (s *Service) MoveToVendorPendingEscrow(ctx context.Context, orderID string, amount float64) (uuid.UUID, error) {
+func (s *Service) MoveToVendorPendingEscrow(ctx context.Context, orderID string, amount int64) (uuid.UUID, error) {
 	req := TransferRequest{
 		DebitAccount:   AccountCentralEscrow,
 		CreditAccount:  AccountVendorPendingEscrow,
@@ -24,12 +25,13 @@ func (s *Service) MoveToVendorPendingEscrow(ctx context.Context, orderID string,
 }
 
 // ReleaseEscrowToVendor splits the pending escrow into admin commission and vendor spendable wallet.
-func (s *Service) ReleaseEscrowToVendor(ctx context.Context, orderID string, amount float64, commissionRate float64) (uuid.UUID, error) {
-	if commissionRate < 0 || commissionRate > 1 {
-		return uuid.Nil, fmt.Errorf("commission rate must be between 0 and 1")
+// commissionRate is a float like 2.00 (2%) or 15.00 (15%).
+func (s *Service) ReleaseEscrowToVendor(ctx context.Context, orderID string, amount int64, commissionRate float64) (uuid.UUID, error) {
+	if commissionRate < 0 || commissionRate > 100 {
+		return uuid.Nil, fmt.Errorf("commission rate must be between 0 and 100, got %f", commissionRate)
 	}
 
-	adminAmount := amount * commissionRate
+	adminAmount := int64(math.Round(float64(amount) * commissionRate / 100.0))
 	vendorAmount := amount - adminAmount
 
 	reqs := []TransferRequest{
@@ -59,7 +61,7 @@ func (s *Service) ReleaseEscrowToVendor(ctx context.Context, orderID string, amo
 }
 
 // ReverseEscrowToCustomer refunds the pending escrow back to the customer's refund account.
-func (s *Service) ReverseEscrowToCustomer(ctx context.Context, orderID string, amount float64) (uuid.UUID, error) {
+func (s *Service) ReverseEscrowToCustomer(ctx context.Context, orderID string, amount int64) (uuid.UUID, error) {
 	req := TransferRequest{
 		DebitAccount:   AccountVendorPendingEscrow,
 		CreditAccount:  AccountCustomerRefund,

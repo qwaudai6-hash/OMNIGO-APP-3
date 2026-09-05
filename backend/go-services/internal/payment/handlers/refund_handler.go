@@ -37,7 +37,7 @@ func NewRefundHandler(orchestrator *service.Orchestrator, ledgerSvc *ledger.Serv
 type RefundRequest struct {
 	OrderID     string  `json:"order_tracking_id" binding:"required"`
 	Reason      string  `json:"reason" binding:"required"`
-	Amount      float64 `json:"amount"`    // 0 = full refund
+	Amount      float64 `json:"amount"`    // 0 = full refund (rupees, converted to paisa internally)
 	RefundTo    string  `json:"refund_to"` // original | wallet
 	RequestedBy string  `json:"requested_by" binding:"required"`
 }
@@ -68,10 +68,12 @@ func (h *RefundHandler) executeRefund(ctx context.Context, req RefundRequest) (g
 		return gin.H{"error": "order not found"}, http.StatusNotFound, err
 	}
 
-	refundAmount := req.Amount
-	if refundAmount == 0 || refundAmount > order.TotalAmount {
-		refundAmount = order.TotalAmount
+	// Convert rupees to paisa for internal processing
+	refundAmountRupees := req.Amount
+	if refundAmountRupees == 0 || refundAmountRupees > order.TotalAmount {
+		refundAmountRupees = order.TotalAmount
 	}
+	refundAmountPaisa := int64(refundAmountRupees * 100)
 
 	// Idempotency: one successful refund per order for now.
 	idempotencyKey := fmt.Sprintf("refund:%s", req.OrderID)
@@ -92,15 +94,18 @@ func (h *RefundHandler) executeRefund(ctx context.Context, req RefundRequest) (g
 	if paymentTxn, err := h.txnRepo.GetByOrderID(ctx, req.OrderID, paymentRepo.KindPayment); err == nil && paymentTxn != nil {
 		gatewayTxnID = paymentTxn.GatewayTxnID
 		
-		if paymentTxn.Amount > 0 && refundAmount > paymentTxn.Amount {
-			refundAmount = paymentTxn.Amount
+		if paymentTxn.Amount > 0 {
+			paymentPaisa := int64(paymentTxn.Amount * 100)
+			if refundAmountPaisa > paymentPaisa {
+				refundAmountPaisa = paymentPaisa
+			}
 		}
 	}
 
 	// Call gateway refund for online payments. COD is handled as a reversal.
 	if gateway != "cod" && gateway != "wallet" {
 		if h.orchestrator != nil {
-			if err := h.orchestrator.Refund(ctx, gateway, gatewayTxnID, refundAmount); err != nil {
+			if err := h.orchestrator.Refund(ctx, gateway, gatewayTxnID, float64(refundAmountPaisa)/100.0); err != nil {
 				return gin.H{"error": "gateway refund failed: " + err.Error()}, http.StatusBadGateway, err
 			}
 		}
@@ -111,15 +116,16 @@ func (h *RefundHandler) executeRefund(ctx context.Context, req RefundRequest) (g
 		OrderID:        req.OrderID,
 		Gateway:        gateway,
 		GatewayTxnID:   gatewayTxnID,
-		Amount:         refundAmount,
+		Amount:         float64(refundAmountPaisa) / 100.0, // Store as rupees for payment_transactions compat
 		Currency:       order.Currency,
 		Status:         paymentRepo.TxnRefunded,
 		Kind:           paymentRepo.KindRefund,
 		IdempotencyKey: idempotencyKey,
 		Metadata: map[string]any{
-			"reason":       req.Reason,
-			"requested_by": req.RequestedBy,
-			"refund_to":    req.RefundTo,
+			"reason":        req.Reason,
+			"requested_by":  req.RequestedBy,
+			"refund_to":     req.RefundTo,
+			"amount_paisa":  refundAmountPaisa,
 		},
 	}
 	if _, err := h.txnRepo.Create(ctx, txn); err != nil {
@@ -135,7 +141,7 @@ func (h *RefundHandler) executeRefund(ctx context.Context, req RefundRequest) (g
 	_, err = h.ledgerSvc.Transfer(ctx, ledger.TransferRequest{
 		DebitAccount:   ledger.AccountCentralEscrow,
 		CreditAccount:  creditAccount,
-		Amount:         refundAmount,
+		Amount:         refundAmountPaisa,
 		Currency:       order.Currency,
 		ReferenceType:  "order_refund",
 		ReferenceID:    req.OrderID,
@@ -168,13 +174,14 @@ func (h *RefundHandler) executeRefund(ctx context.Context, req RefundRequest) (g
 
 	// Notify dependent services (notification, SMS, email) of the refund.
 	if h.orderSvc != nil {
-		h.orderSvc.EmitRefundEvent(ctx, req.OrderID, req.Reason, refundAmount, order.Currency)
+		h.orderSvc.EmitRefundEvent(ctx, req.OrderID, req.Reason, float64(refundAmountPaisa)/100.0, order.Currency)
 	}
 
 	return gin.H{
 		"status":         "refunded",
 		"order_id":       req.OrderID,
-		"amount":         refundAmount,
+		"amount":         float64(refundAmountPaisa) / 100.0,
+		"amount_paisa":   refundAmountPaisa,
 		"currency":       order.Currency,
 		"transaction_id": txn.TransactionID,
 	}, http.StatusOK, nil

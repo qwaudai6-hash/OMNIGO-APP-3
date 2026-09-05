@@ -130,11 +130,13 @@ func (h *WebhookHandler) settleSuccess(ctx context.Context, gatewayName string, 
 	if err != nil {
 		return fmt.Errorf("order %s not found: %w", event.OrderID, err)
 	}
-	const amountEpsilon = 0.01
-	if diff := event.Amount - order.TotalAmount; diff > amountEpsilon || diff < -amountEpsilon {
-		return fmt.Errorf("amount mismatch for order %s: gateway %.2f vs order %.2f", event.OrderID, event.Amount, order.TotalAmount)
+	// Convert amounts to paisa for comparison
+	eventAmountPaisa := int64(event.Amount * 100)
+	orderAmountPaisa := int64(order.TotalAmount * 100)
+	if eventAmountPaisa != orderAmountPaisa {
+		return fmt.Errorf("amount mismatch for order %s: gateway %d paisa vs order %d paisa", event.OrderID, eventAmountPaisa, orderAmountPaisa)
 	}
-	settleAmount := order.TotalAmount
+	settleAmountPaisa := orderAmountPaisa
 
 	// Idempotent local record of the capture. The row starts at
 	// settlement_pending and the SettlementWorker flips it to 'captured'
@@ -151,13 +153,14 @@ func (h *WebhookHandler) settleSuccess(ctx context.Context, gatewayName string, 
 		OrderID:        event.OrderID,
 		Gateway:        gatewayName,
 		GatewayTxnID:   event.TransactionID,
-		Amount:         settleAmount,
+		Amount:         float64(settleAmountPaisa) / 100.0, // Store as rupees for payment_transactions compat
 		Currency:       event.Currency,
 		Status:         paymentRepo.TxnSettlementPending,
 		Kind:           paymentRepo.KindPayment,
 		IdempotencyKey: idempotencyKey,
 		Metadata: map[string]any{
-			"customer_id": event.CustomerID,
+			"customer_id":   event.CustomerID,
+			"amount_paisa":  settleAmountPaisa,
 		},
 	})
 	if err != nil {
@@ -171,7 +174,7 @@ func (h *WebhookHandler) settleSuccess(ctx context.Context, gatewayName string, 
 	if h.calculator != nil {
 		deliveryTrackingID = h.calculator.ResolveDeliveryTrackingID(ctx, event.OrderID)
 	}
-	split, err := h.calculator.CalculateSplit(ctx, settleAmount, order.VendorStoreTrackID, deliveryTrackingID)
+	split, err := h.calculator.CalculateSplit(ctx, settleAmountPaisa, order.VendorStoreTrackID, deliveryTrackingID)
 	if err != nil {
 		return fmt.Errorf("split calculation failed for order %s: %w", event.OrderID, err)
 	}
@@ -207,11 +210,11 @@ func (h *WebhookHandler) settleSuccess(ctx context.Context, gatewayName string, 
 		"store_id":             order.VendorStoreTrackID,
 		"vendor_tracking_id":   order.VendorTrackID,
 		"delivery_tracking_id": deliveryTrackingID,
-		"total_amount":         settleAmount,
+		"total_amount_paisa":   settleAmountPaisa,
 		"currency":             event.Currency,
-		"admin_revenue":        split.AdminRevenue,
-		"vendor_escrow":        split.VendorEscrow,
-		"delivery_escrow":      split.DeliveryEscrow,
+		"admin_revenue_paisa":  split.AdminRevenue,
+		"vendor_escrow_paisa":  split.VendorEscrow,
+		"delivery_escrow_paisa": split.DeliveryEscrow,
 		"idempotency_key":      idempotencyKey,
 		"transfers":            transfers,
 	})
@@ -228,8 +231,8 @@ func (h *WebhookHandler) settleSuccess(ctx context.Context, gatewayName string, 
 		return fmt.Errorf("failed to enqueue settlement outbox event: %w", err)
 	}
 
-	log.Printf("[Webhook] Settlement enqueued for order %s (txn %s, %.2f %s via %s): admin=%.2f vendor_escrow=%.2f delivery_escrow=%.2f",
-		event.OrderID, txn.TransactionID, settleAmount, event.Currency, gatewayName,
+	log.Printf("[Webhook] Settlement enqueued for order %s (txn %s, %d paisa %s via %s): admin=%d vendor_escrow=%d delivery_escrow=%d",
+		event.OrderID, txn.TransactionID, settleAmountPaisa, event.Currency, gatewayName,
 		split.AdminRevenue, split.VendorEscrow, split.DeliveryEscrow)
 	return nil
 }

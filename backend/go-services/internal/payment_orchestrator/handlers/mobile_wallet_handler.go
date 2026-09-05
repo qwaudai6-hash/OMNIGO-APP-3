@@ -101,6 +101,13 @@ func (h *MobileWalletHandler) Initiate(gateway string) gin.HandlerFunc {
 			c.JSON(http.StatusForbidden, gin.H{"error": "order does not belong to authenticated customer"})
 			return
 		}
+
+		// Double-payment guard: reject if order is already paid
+		if order.Status == "paid" || order.PaymentStatus == "paid" {
+			c.JSON(http.StatusConflict, gin.H{"error": "order has already been paid"})
+			return
+		}
+
 		const amountEpsilon = 0.01
 		if diff := req.Amount - order.TotalAmount; diff > amountEpsilon || diff < -amountEpsilon {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "amount mismatch: provided amount does not match order total"})
@@ -186,11 +193,13 @@ func (h *MobileWalletHandler) settleSuccess(ctx context.Context, gateway string,
 	if err != nil {
 		return fmt.Errorf("order %s not found: %w", event.OrderID, err)
 	}
-	const amountEpsilon = 0.01
-	if diff := event.Amount - order.TotalAmount; diff > amountEpsilon || diff < -amountEpsilon {
-		return fmt.Errorf("amount mismatch for order %s: gateway %.2f vs order %.2f", event.OrderID, event.Amount, order.TotalAmount)
+	// Convert to paisa for exact comparison
+	eventAmountPaisa := int64(event.Amount * 100)
+	orderAmountPaisa := int64(order.TotalAmount * 100)
+	if eventAmountPaisa != orderAmountPaisa {
+		return fmt.Errorf("amount mismatch for order %s: gateway %d paisa vs order %d paisa", event.OrderID, eventAmountPaisa, orderAmountPaisa)
 	}
-	settleAmount := order.TotalAmount
+	settleAmountPaisa := orderAmountPaisa
 
 	idempotencyKey := fmt.Sprintf("settle:%s:%s", gateway, event.TransactionID)
 	existing, getErr := h.txnRepo.GetByIDempotencyKey(ctx, idempotencyKey)
@@ -202,7 +211,7 @@ func (h *MobileWalletHandler) settleSuccess(ctx context.Context, gateway string,
 		OrderID:        event.OrderID,
 		Gateway:        gateway,
 		GatewayTxnID:   event.TransactionID,
-		Amount:         settleAmount,
+		Amount:         float64(settleAmountPaisa) / 100.0,
 		Currency:       event.Currency,
 		Status:         paymentRepo.TxnSettlementPending,
 		Kind:           paymentRepo.KindPayment,
@@ -216,7 +225,7 @@ func (h *MobileWalletHandler) settleSuccess(ctx context.Context, gateway string,
 	}
 
 	deliveryTrackingID := h.calculator.ResolveDeliveryTrackingID(ctx, event.OrderID)
-	split, err := h.calculator.CalculateSplit(ctx, settleAmount, order.VendorStoreTrackID, deliveryTrackingID)
+	split, err := h.calculator.CalculateSplit(ctx, settleAmountPaisa, order.VendorStoreTrackID, deliveryTrackingID)
 	if err != nil {
 		return fmt.Errorf("split calculation failed for order %s: %w", event.OrderID, err)
 	}
@@ -225,13 +234,13 @@ func (h *MobileWalletHandler) settleSuccess(ctx context.Context, gateway string,
 		{
 			"debit_account":  string(ledger.AccountGatewayClearing),
 			"credit_account": string(ledger.AccountAdminRevenue),
-			"amount":         split.AdminRevenue,
+			"amount_paisa":   split.AdminRevenue,
 			"idempotency":    idempotencyKey + ":admin",
 		},
 		{
 			"debit_account":  string(ledger.AccountGatewayClearing),
 			"credit_account": string(ledger.AccountVendorLockedEscrow),
-			"amount":         split.VendorEscrow,
+			"amount_paisa":   split.VendorEscrow,
 			"idempotency":    idempotencyKey + ":vendor",
 		},
 	}
@@ -239,24 +248,24 @@ func (h *MobileWalletHandler) settleSuccess(ctx context.Context, gateway string,
 		transfers = append(transfers, map[string]any{
 			"debit_account":  string(ledger.AccountGatewayClearing),
 			"credit_account": string(ledger.AccountCentralEscrow),
-			"amount":         split.DeliveryEscrow,
+			"amount_paisa":   split.DeliveryEscrow,
 			"idempotency":    idempotencyKey + ":delivery",
 		})
 	}
 
 	outboxPayload, err := json.Marshal(map[string]any{
 		// Field names match workers.SettlementPayload JSON tags.
-		"internal_txn_id":      txn.TransactionID,
-		"order_id":             event.OrderID,
-		"gateway_txn_id":       event.TransactionID,
-		"store_id":             order.VendorStoreTrackID,
-		"vendor_tracking_id":   order.VendorTrackID,
-		"delivery_tracking_id": deliveryTrackingID,
-		"total_amount":         settleAmount,
-		"currency":             event.Currency,
-		"admin_revenue":        split.AdminRevenue,
-		"vendor_escrow":        split.VendorEscrow,
-		"delivery_escrow":      split.DeliveryEscrow,
+		"internal_txn_id":        txn.TransactionID,
+		"order_id":               event.OrderID,
+		"gateway_txn_id":         event.TransactionID,
+		"store_id":               order.VendorStoreTrackID,
+		"vendor_tracking_id":     order.VendorTrackID,
+		"delivery_tracking_id":   deliveryTrackingID,
+		"total_amount_paisa":     settleAmountPaisa,
+		"currency":               event.Currency,
+		"admin_revenue_paisa":    split.AdminRevenue,
+		"vendor_escrow_paisa":    split.VendorEscrow,
+		"delivery_escrow_paisa":  split.DeliveryEscrow,
 		"idempotency_key":      idempotencyKey,
 		"transfers":            transfers,
 	})
@@ -272,8 +281,8 @@ func (h *MobileWalletHandler) settleSuccess(ctx context.Context, gateway string,
 		return fmt.Errorf("failed to enqueue settlement outbox event: %w", err)
 	}
 
-	log.Printf("[mobile-wallet] settlement enqueued for order %s (%.2f %s via %s): admin=%.2f vendor_escrow=%.2f delivery_escrow=%.2f",
-		event.OrderID, settleAmount, event.Currency, gateway, split.AdminRevenue, split.VendorEscrow, split.DeliveryEscrow)
+	log.Printf("[mobile-wallet] settlement enqueued for order %s (%d paisa %s via %s): admin=%d vendor_escrow=%d delivery_escrow=%d",
+		event.OrderID, settleAmountPaisa, event.Currency, gateway, split.AdminRevenue, split.VendorEscrow, split.DeliveryEscrow)
 	return nil
 }
 

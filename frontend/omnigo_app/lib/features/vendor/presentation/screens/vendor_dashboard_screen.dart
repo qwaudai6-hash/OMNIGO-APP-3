@@ -44,6 +44,9 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
   // double-tap and race two requests.
   bool _isHandoverInProgress = false;
 
+  // Double-back-to-exit: track last back press time
+  DateTime? _lastBackPress;
+
   // Periodic poll for new orders (vendor live map handles real-time via its own WebSocket)
   Timer? _orderPollTimer;
 
@@ -124,7 +127,7 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
     });
 
     try {
-      final response = await ApiClient().get('/orders/vendor/${widget.trackingId}');
+      final response = await sl<ApiClient>().get('/orders/vendor/${widget.trackingId}');
       if (mounted) {
         setState(() {
           _orders = response as List<dynamic>;
@@ -643,7 +646,22 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        final now = DateTime.now();
+        if (_lastBackPress == null || now.difference(_lastBackPress!) > const Duration(seconds: 2)) {
+          _lastBackPress = now;
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Press back again to exit'), duration: Duration(seconds: 2)),
+          );
+          return;
+        }
+        // Allow pop on second back press within 2 seconds
+        Navigator.of(context).pop();
+      },
+      child: Scaffold(
       backgroundColor: AppTheme.bgColor,
       body: IndexedStack(
         index: _currentIndex,
@@ -684,6 +702,7 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
           ],
         ),
       ),
+    ),
     );
   }
 

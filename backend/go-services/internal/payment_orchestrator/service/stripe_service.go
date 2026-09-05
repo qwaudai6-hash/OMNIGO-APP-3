@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -79,7 +80,7 @@ type StripeCheckoutRequest struct {
 	OrderID    string  `json:"order_id"`
 	CustomerID string  `json:"customer_id"`
 	StoreID    string  `json:"store_id"`
-	Amount     float64 `json:"amount"`
+	Amount     float64 `json:"amount"` // rupees from frontend
 	Currency   string  `json:"currency"`
 }
 
@@ -117,11 +118,13 @@ func (s *StripeService) ProcessCheckout(ctx context.Context, merchantUserID, cli
 	}
 
 	// 2. Amount validation (server-authoritative)
-	const amountEpsilon = 0.01
-	if diff := req.Amount - dbAmount; diff > amountEpsilon || diff < -amountEpsilon {
+	// Convert both to paisa for exact comparison
+	reqAmountPaisa := int64(math.Round(req.Amount * 100))
+	dbAmountPaisa := int64(math.Round(dbAmount * 100))
+	if reqAmountPaisa != dbAmountPaisa {
 		return nil, stripeClient.ErrAmountMismatch
 	}
-	req.Amount = dbAmount
+	req.Amount = dbAmount // keep rupees for Stripe API
 	if req.StoreID == "" {
 		req.StoreID = storeID
 	}
@@ -138,12 +141,13 @@ func (s *StripeService) ProcessCheckout(ctx context.Context, merchantUserID, cli
 	idempotencyKey := stripeClient.GenerateIdempotencyKey("checkout", req.OrderID)
 
 	// 5. Create PaymentIntent via Stripe
-	amountCents := int64(req.Amount * 100)
+	amountCents := int64(req.Amount * 100) // Stripe expects cents
 	metadata := map[string]string{
-		"order_id":    req.OrderID,
-		"customer_id": req.CustomerID,
-		"store_id":    req.StoreID,
-		"gateway":     "stripe",
+		"order_id":     req.OrderID,
+		"customer_id":  req.CustomerID,
+		"store_id":     req.StoreID,
+		"gateway":      "stripe",
+		"amount_paisa": fmt.Sprintf("%d", int64(req.Amount*100)),
 	}
 
 	pi, err := s.stripe.CreatePaymentIntent(ctx, amountCents, req.Currency, metadata, idempotencyKey)
@@ -156,13 +160,14 @@ func (s *StripeService) ProcessCheckout(ctx context.Context, merchantUserID, cli
 	metaBytes, _ := json.Marshal(map[string]any{
 		"payment_intent_id": pi.ID,
 		"customer_ip":       clientIP,
+		"amount_paisa":      int64(req.Amount * 100),
 	})
 	_, err = s.db.Exec(ctx,
 		`INSERT INTO payment_transactions
 		 (transaction_id, order_tracking_id, gateway, gateway_txn_id, amount, currency, status, kind, idempotency_key, metadata, created_at, updated_at)
 		 VALUES ($1, $2, 'stripe', $3, $4, $5, 'pending', 'payment', $6, $7::jsonb, NOW(), NOW())
 		 ON CONFLICT (transaction_id) DO NOTHING`,
-		internalTxnID, req.OrderID, pi.ID, req.Amount, req.Currency,
+		internalTxnID, req.OrderID, pi.ID, float64(req.Amount), req.Currency,
 		idempotencyKey, string(metaBytes),
 	)
 	if err != nil {
@@ -178,7 +183,7 @@ func (s *StripeService) ProcessCheckout(ctx context.Context, merchantUserID, cli
 		log.Printf("[StripeService] WARNING: failed to update order payment_status for %s: %v", req.OrderID, err)
 	}
 
-	s.logEvent("checkout", req.OrderID, pi.ID, fmt.Sprintf("PaymentIntent created: amount=%.2f %s", req.Amount, req.Currency))
+	s.logEvent("checkout", req.OrderID, pi.ID, fmt.Sprintf("PaymentIntent created: amount=%.2f %s (%d paisa)", req.Amount, req.Currency, int64(req.Amount*100)))
 
 	return &StripeCheckoutResponse{
 		Status:       "requires_action",
@@ -293,7 +298,8 @@ func (s *StripeService) handlePaymentSucceeded(ctx context.Context, event stripe
 	}
 
 	// Use refetched state, not event payload
-	canonicalAmount := float64(pi.Amount) / 100.0
+	canonicalAmountCents := pi.Amount
+	canonicalAmountPaisa := canonicalAmountCents // Stripe cents = our paisa for PKR
 	if orderID == "" {
 		orderID = pi.Metadata["order_id"]
 	}
@@ -326,12 +332,12 @@ func (s *StripeService) handlePaymentSucceeded(ctx context.Context, event stripe
 
 	// Execute ledger split
 	storeID := pi.Metadata["store_id"]
-	if err := s.ExecuteSplit(ctx, orderID, storeID, canonicalAmount, pi.ID); err != nil {
+	if err := s.ExecuteSplit(ctx, orderID, storeID, canonicalAmountPaisa, pi.ID); err != nil {
 		log.Printf("[StripeWebhook] ERROR: split execution failed for order %s: %v", orderID, err)
 		return err
 	}
 
-	log.Printf("[StripeWebhook] payment_intent.succeeded: order=%s pi=%s amount=%.2f (refetched)", orderID, pi.ID, canonicalAmount)
+	log.Printf("[StripeWebhook] payment_intent.succeeded: order=%s pi=%s amount=%d paisa (refetched)", orderID, pi.ID, canonicalAmountPaisa)
 	return nil
 }
 
@@ -428,7 +434,8 @@ func (s *StripeService) handleChargeRefunded(ctx context.Context, event stripeSD
 // ─── Ledger Split ────────────────────────────────────────────────────────────
 
 // ExecuteSplit performs the three-way ledger split: admin commission + vendor escrow + delivery escrow.
-func (s *StripeService) ExecuteSplit(ctx context.Context, orderID, storeID string, amount float64, gatewayTxnID string) error {
+// amountPaisa is in paisa (int64).
+func (s *StripeService) ExecuteSplit(ctx context.Context, orderID, storeID string, amountPaisa int64, gatewayTxnID string) error {
 	ctx = context.WithoutCancel(ctx)
 
 	tx, err := s.db.Begin(ctx)
@@ -438,13 +445,13 @@ func (s *StripeService) ExecuteSplit(ctx context.Context, orderID, storeID strin
 	defer tx.Rollback(ctx)
 
 	// 1. Lock order
-	var dbAmount float64
+	var dbAmountPaisa int64
 	var vendorTrackingID string
 	var orderStatus, paymentStatus string
 	err = tx.QueryRow(ctx,
-		`SELECT total_amount, vendor_tracking_id, status, COALESCE(payment_status, '') FROM orders WHERE order_tracking_id = $1 FOR UPDATE`,
+		`SELECT total_amount_paisa, vendor_tracking_id, status, COALESCE(payment_status, '') FROM orders WHERE order_tracking_id = $1 FOR UPDATE`,
 		orderID,
-	).Scan(&dbAmount, &vendorTrackingID, &orderStatus, &paymentStatus)
+	).Scan(&dbAmountPaisa, &vendorTrackingID, &orderStatus, &paymentStatus)
 	if err != nil {
 		return fmt.Errorf("order not found: %w", err)
 	}
@@ -457,7 +464,7 @@ func (s *StripeService) ExecuteSplit(ctx context.Context, orderID, storeID strin
 		`SELECT COALESCE(tracking_id, '') FROM deliveries WHERE order_tracking_id = $1`, orderID,
 	).Scan(&deliveryTrackingID)
 
-	split, err := s.calculator.CalculateSplit(ctx, dbAmount, storeID, deliveryTrackingID)
+	split, err := s.calculator.CalculateSplit(ctx, dbAmountPaisa, storeID, deliveryTrackingID)
 	if err != nil {
 		return fmt.Errorf("split calculation failed: %w", err)
 	}
@@ -472,7 +479,7 @@ func (s *StripeService) ExecuteSplit(ctx context.Context, orderID, storeID strin
 
 	// 3. Update order split columns
 	_, _ = tx.Exec(ctx,
-		`UPDATE orders SET admin_commission = $1, vendor_escrow = $2, delivery_escrow = $3,
+		`UPDATE orders SET admin_commission_paisa = $1, vendor_escrow_paisa = $2, delivery_escrow_paisa = $3,
 		 payment_status = 'settlement_pending', updated_at = NOW() WHERE order_tracking_id = $4`,
 		split.AdminRevenue, split.VendorEscrow, split.DeliveryEscrow, orderID,
 	)
@@ -482,13 +489,13 @@ func (s *StripeService) ExecuteSplit(ctx context.Context, orderID, storeID strin
 		{
 			"debit_account":  string(ledger.AccountStripeHolding),
 			"credit_account": string(ledger.AccountAdminRevenue),
-			"amount":         split.AdminRevenue,
+			"amount_paisa":   split.AdminRevenue,
 			"idempotency":    idempotencyKey + ":admin",
 		},
 		{
 			"debit_account":  string(ledger.AccountStripeHolding),
 			"credit_account": string(ledger.AccountVendorLockedEscrow),
-			"amount":         split.VendorEscrow,
+			"amount_paisa":   split.VendorEscrow,
 			"idempotency":    idempotencyKey + ":vendor",
 		},
 	}
@@ -496,7 +503,7 @@ func (s *StripeService) ExecuteSplit(ctx context.Context, orderID, storeID strin
 		transfers = append(transfers, map[string]interface{}{
 			"debit_account":  string(ledger.AccountStripeHolding),
 			"credit_account": string(ledger.AccountCentralEscrow),
-			"amount":         split.DeliveryEscrow,
+			"amount_paisa":   split.DeliveryEscrow,
 			"idempotency":    idempotencyKey + ":delivery",
 		})
 	}
@@ -508,11 +515,11 @@ func (s *StripeService) ExecuteSplit(ctx context.Context, orderID, storeID strin
 		"store_id":             storeID,
 		"vendor_tracking_id":   vendorTrackingID,
 		"delivery_tracking_id": deliveryTrackingID,
-		"total_amount":         dbAmount,
+		"total_amount_paisa":   dbAmountPaisa,
 		"currency":             "PKR",
-		"admin_revenue":        split.AdminRevenue,
-		"vendor_escrow":        split.VendorEscrow,
-		"delivery_escrow":      split.DeliveryEscrow,
+		"admin_revenue_paisa":  split.AdminRevenue,
+		"vendor_escrow_paisa":  split.VendorEscrow,
+		"delivery_escrow_paisa": split.DeliveryEscrow,
 		"idempotency_key":      idempotencyKey,
 		"transfers":            transfers,
 	})
@@ -533,7 +540,7 @@ func (s *StripeService) ExecuteSplit(ctx context.Context, orderID, storeID strin
 		return fmt.Errorf("failed to commit split transaction: %w", err)
 	}
 
-	log.Printf("[StripeService] ExecuteSplit: order=%s admin=%.2f vendor=%.2f delivery=%.2f",
+	log.Printf("[StripeService] ExecuteSplit: order=%s admin=%d vendor=%d delivery=%d",
 		orderID, split.AdminRevenue, split.VendorEscrow, split.DeliveryEscrow)
 	return nil
 }
@@ -541,33 +548,34 @@ func (s *StripeService) ExecuteSplit(ctx context.Context, orderID, storeID strin
 // ─── Refund ──────────────────────────────────────────────────────────────────
 
 // ProcessRefund issues a refund via Stripe and updates local records.
-func (s *StripeService) ProcessRefund(ctx context.Context, orderID string, amount float64, reason string) error {
+// amountPaisa is in paisa (int64), 0 means full refund.
+func (s *StripeService) ProcessRefund(ctx context.Context, orderID string, amountPaisa int64, reason string) error {
 	if !s.stripe.IsConfigured() {
 		return stripeClient.ErrNotConfigured
 	}
 
 	// 1. Find the payment transaction
 	var gatewayTxnID string
-	var dbAmount float64
+	var dbAmountPaisa int64
 	err := s.db.QueryRow(ctx,
-		`SELECT gateway_txn_id, amount FROM payment_transactions WHERE order_id = $1 AND status = 'completed' ORDER BY created_at DESC LIMIT 1`,
+		`SELECT gateway_txn_id, amount_paisa FROM payment_transactions WHERE order_id = $1 AND status = 'completed' ORDER BY created_at DESC LIMIT 1`,
 		orderID,
-	).Scan(&gatewayTxnID, &dbAmount)
+	).Scan(&gatewayTxnID, &dbAmountPaisa)
 	if err != nil {
 		return fmt.Errorf("no completed payment found for order %s: %w", orderID, err)
 	}
 
 	// 2. Validate refund amount
-	if amount <= 0 {
-		amount = dbAmount // Full refund
+	if amountPaisa <= 0 {
+		amountPaisa = dbAmountPaisa // Full refund
 	}
-	if amount > dbAmount {
-		return fmt.Errorf("refund amount %.2f exceeds payment amount %.2f", amount, dbAmount)
+	if amountPaisa > dbAmountPaisa {
+		return fmt.Errorf("refund amount %d paisa exceeds payment amount %d paisa", amountPaisa, dbAmountPaisa)
 	}
 
 	// 3. Call Stripe refund API
 	idempotencyKey := stripeClient.GenerateRefundKey(orderID, 1)
-	amountCents := int64(amount * 100)
+	amountCents := amountPaisa // Stripe cents = our paisa for PKR
 	_, err = s.stripe.RefundPaymentIntent(ctx, gatewayTxnID, amountCents, idempotencyKey)
 	if err != nil {
 		return fmt.Errorf("stripe refund failed: %w", err)
@@ -583,7 +591,7 @@ func (s *StripeService) ProcessRefund(ctx context.Context, orderID string, amoun
 		gatewayTxnID,
 	)
 
-	s.logEvent("refund", orderID, gatewayTxnID, fmt.Sprintf("Refund processed: amount=%.2f reason=%s", amount, reason))
+	s.logEvent("refund", orderID, gatewayTxnID, fmt.Sprintf("Refund processed: amount=%d paisa reason=%s", amountPaisa, reason))
 	return nil
 }
 

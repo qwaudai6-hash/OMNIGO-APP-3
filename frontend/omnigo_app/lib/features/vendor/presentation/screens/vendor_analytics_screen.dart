@@ -119,10 +119,7 @@ class VendorAnalyticsScreenState extends State<VendorAnalyticsScreen> with Singl
         backgroundColor: Colors.transparent,
         elevation: 0,
         title: const Text('Store Telemetry', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 20)),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_rounded, color: Colors.white),
-          onPressed: () => Navigator.pop(context),
-        ),
+        leading: const SizedBox.shrink(), // No back button — this is a tab inside VendorDashboardScreen
         actions: [
           IconButton(
             icon: const Icon(Icons.sync_rounded, color: AppTheme.limeAccent),

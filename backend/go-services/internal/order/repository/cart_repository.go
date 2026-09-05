@@ -26,7 +26,7 @@ func (r *CartRepository) GetCart(ctx context.Context, userID string) (*models.Ca
 		return nil, err
 	}
 
-	queryItems := `SELECT id, cart_id, product_id, quantity, price, created_at, updated_at FROM cart_items WHERE cart_id = $1`
+	queryItems := `SELECT id, cart_id, product_tracking_id, quantity, price, created_at, updated_at FROM cart_items WHERE cart_id = $1`
 	rows, err := r.db.Query(ctx, queryItems, cart.ID)
 	if err != nil {
 		return nil, err
@@ -35,7 +35,7 @@ func (r *CartRepository) GetCart(ctx context.Context, userID string) (*models.Ca
 
 	for rows.Next() {
 		var item models.CartItem
-		if err := rows.Scan(&item.ID, &item.CartID, &item.ProductID, &item.Quantity, &item.Price, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.CartID, &item.ProductTrackingID, &item.Quantity, &item.Price, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		cart.Items = append(cart.Items, item)
@@ -67,45 +67,43 @@ func (r *CartRepository) ClearCart(ctx context.Context, userID string) error {
 }
 
 // AddItem adds an item to the cart or updates its quantity if it already exists
-func (r *CartRepository) AddItem(ctx context.Context, cartID int64, productID int64, quantity int, price float64) error {
-	checks := []struct {
-		id    int64
-		label string
-		query string
-	}{
-		{cartID, "cart", "SELECT 1 FROM carts WHERE id = $1"},
-		{productID, "product", "SELECT 1 FROM products WHERE id = $1"},
+func (r *CartRepository) AddItem(ctx context.Context, cartID int64, productTrackingID string, quantity int, price float64) error {
+	ok, err := database.Exists(ctx, r.db, "SELECT 1 FROM carts WHERE id = $1", cartID)
+	if err != nil {
+		return err
 	}
-	for _, c := range checks {
-		ok, err := database.Exists(ctx, r.db, c.query, c.id)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return fmt.Errorf("%s %d does not exist", c.label, c.id)
-		}
+	if !ok {
+		return fmt.Errorf("cart %d does not exist", cartID)
+	}
+
+	ok, err = database.Exists(ctx, r.db, "SELECT 1 FROM products WHERE product_tracking_id = $1", productTrackingID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("product %s does not exist", productTrackingID)
 	}
 
 	query := `
-		INSERT INTO cart_items (cart_id, product_id, quantity, price, created_at, updated_at)
+		INSERT INTO cart_items (cart_id, product_tracking_id, quantity, price, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, NOW(), NOW())
-		ON CONFLICT (cart_id, product_id)
+		ON CONFLICT (cart_id, product_tracking_id)
 		DO UPDATE SET quantity = cart_items.quantity + EXCLUDED.quantity, updated_at = NOW()
 	`
-	_, err := r.db.Exec(ctx, query, cartID, productID, quantity, price)
+	_, err = r.db.Exec(ctx, query, cartID, productTrackingID, quantity, price)
 	return err
 }
 
 // UpdateItemQuantity updates the quantity of a specific cart item
-func (r *CartRepository) UpdateItemQuantity(ctx context.Context, cartID int64, productID int64, quantity int) error {
-	query := `UPDATE cart_items SET quantity = $1, updated_at = NOW() WHERE cart_id = $2 AND product_id = $3`
-	_, err := r.db.Exec(ctx, query, quantity, cartID, productID)
+func (r *CartRepository) UpdateItemQuantity(ctx context.Context, cartID int64, productTrackingID string, quantity int) error {
+	query := `UPDATE cart_items SET quantity = $1, updated_at = NOW() WHERE cart_id = $2 AND product_tracking_id = $3`
+	_, err := r.db.Exec(ctx, query, quantity, cartID, productTrackingID)
 	return err
 }
 
 // RemoveItem removes a specific item from the cart
-func (r *CartRepository) RemoveItem(ctx context.Context, cartID int64, productID int64) error {
-	query := `DELETE FROM cart_items WHERE cart_id = $1 AND product_id = $2`
-	_, err := r.db.Exec(ctx, query, cartID, productID)
+func (r *CartRepository) RemoveItem(ctx context.Context, cartID int64, productTrackingID string) error {
+	query := `DELETE FROM cart_items WHERE cart_id = $1 AND product_tracking_id = $2`
+	_, err := r.db.Exec(ctx, query, cartID, productTrackingID)
 	return err
 }

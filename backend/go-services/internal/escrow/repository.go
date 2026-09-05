@@ -66,7 +66,7 @@ func (r *Repository) CreateHold(ctx context.Context, hold *EscrowHold) error {
 	}
 
 	query := `
-		INSERT INTO escrow_holds (id, order_tracking_id, vendor_tracking_id, amount, status, hold_until)
+		INSERT INTO escrow_holds (id, order_tracking_id, vendor_tracking_id, amount_paisa, status, hold_until)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (order_tracking_id, vendor_tracking_id) DO NOTHING
 	`
@@ -80,11 +80,26 @@ func (r *Repository) CreateHold(ctx context.Context, hold *EscrowHold) error {
 	return nil
 }
 
-// HoldExistsForOrder checks if a hold for the given order already exists.
+// HoldExistsForOrder checks if an active escrow hold for the given order exists.
+// Only 'held' and 'disputed' holds are considered active — 'released', 'paid_out',
+// 'cancelled', and 'refunded' are terminal states that do not block new holds.
 func (r *Repository) HoldExistsForOrder(ctx context.Context, orderTrackingID string) (bool, error) {
 	var count int
 	err := r.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM escrow_holds WHERE order_tracking_id = $1`,
+		`SELECT COUNT(*) FROM escrow_holds WHERE order_tracking_id = $1 AND status IN ('held', 'disputed')`,
+		orderTrackingID,
+	).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// HoldExistsForOrderTx checks if an active escrow hold exists within a transaction.
+func (r *Repository) HoldExistsForOrderTx(ctx context.Context, tx pgx.Tx, orderTrackingID string) (bool, error) {
+	var count int
+	err := tx.QueryRow(ctx,
+		`SELECT COUNT(*) FROM escrow_holds WHERE order_tracking_id = $1 AND status IN ('held', 'disputed')`,
 		orderTrackingID,
 	).Scan(&count)
 	if err != nil {
@@ -100,7 +115,7 @@ func (r *Repository) CreateHoldInTx(ctx context.Context, tx pgx.Tx, hold *Escrow
 	}
 
 	query := `
-		INSERT INTO escrow_holds (id, order_tracking_id, vendor_tracking_id, amount, status, hold_until)
+		INSERT INTO escrow_holds (id, order_tracking_id, vendor_tracking_id, amount_paisa, status, hold_until)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (order_tracking_id, vendor_tracking_id) DO NOTHING
 	`
@@ -223,6 +238,72 @@ func (r *Repository) GetHoldsByVendor(ctx context.Context, vendorTrackingID stri
 		}
 		if releasedAt.Year() > 1 {
 			h.ReleasedAt = &releasedAt
+		}
+		holds = append(holds, h)
+	}
+	return holds, rows.Err()
+}
+
+// EscrowHoldDetail is a row returned by GetHoldsByVendorWithOrder — used by the
+// vendor wallet screen to display per-order escrow breakdown.
+type EscrowHoldDetail struct {
+	ID              string     `json:"id"`
+	OrderTrackingID string     `json:"order_tracking_id"`
+	AmountPaisa     int64      `json:"amount_paisa"`
+	Status          string     `json:"status"`
+	HoldUntil       time.Time  `json:"hold_until"`
+	ReleasedAt      *time.Time `json:"released_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	// Joined from orders table
+	PaymentGateway string `json:"payment_gateway"`
+	Currency       string `json:"currency"`
+	OrderStatus    string `json:"order_status"`
+}
+
+// GetHoldsByVendorWithOrder returns escrow holds for a vendor enriched with
+// order-level metadata (payment_gateway, currency, order status). Uses
+// amount_paisa (int64) and is the data source for the vendor wallet's
+// "Escrow Holds" breakdown UI.
+//
+// LIMIT 200 is sufficient for the wallet screen (paginated if more needed).
+func (r *Repository) GetHoldsByVendorWithOrder(ctx context.Context, vendorTrackingID string) ([]EscrowHoldDetail, error) {
+	rows, err := r.db.Query(ctx,
+		`SELECT eh.id::text,
+		        eh.order_tracking_id,
+		        COALESCE(eh.amount_paisa, ROUND(eh.amount * 100)::BIGINT),
+		        eh.status,
+		        eh.hold_until,
+		        COALESCE(eh.released_at, '0001-01-01'::timestamptz),
+		        eh.created_at,
+		        COALESCE(o.payment_gateway, ''),
+		        COALESCE(o.currency, 'PKR'),
+		        COALESCE(o.status, '')
+		 FROM escrow_holds eh
+		 LEFT JOIN orders o ON o.order_tracking_id = eh.order_tracking_id
+		 WHERE eh.vendor_tracking_id = $1
+		 ORDER BY eh.created_at DESC
+		 LIMIT 200`,
+		vendorTrackingID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var holds []EscrowHoldDetail
+	for rows.Next() {
+		var h EscrowHoldDetail
+		var releasedAt time.Time
+		if err := rows.Scan(
+			&h.ID, &h.OrderTrackingID, &h.AmountPaisa, &h.Status,
+			&h.HoldUntil, &releasedAt, &h.CreatedAt,
+			&h.PaymentGateway, &h.Currency, &h.OrderStatus,
+		); err != nil {
+			return nil, err
+		}
+		if releasedAt.Year() > 1 {
+			t := releasedAt
+			h.ReleasedAt = &t
 		}
 		holds = append(holds, h)
 	}

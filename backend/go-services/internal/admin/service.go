@@ -797,31 +797,33 @@ func (s *AdminSurveillanceService) GetDisputedOrders(ctx context.Context) ([]Dis
 // silently re-marked as 'refunded'.
 func (s *AdminSurveillanceService) ResolveDispute(ctx context.Context, orderTrackingID string, decision string) error {
 	// First fetch the escrow record — try disputed escrow, then any escrow
-	var escrowAmount float64
+	var escrowAmountPaisa int64
 	var customerID string
 	var escrowStatus string
 	query := `
-		SELECT e.amount, o.customer_tracking_id, e.status
+		SELECT COALESCE(e.amount_paisa, ROUND(e.amount * 100)::BIGINT), o.customer_tracking_id, e.status
 		FROM escrow_holds e
 		JOIN orders o ON e.order_tracking_id = o.order_tracking_id
 		WHERE e.order_tracking_id = $1
 		ORDER BY e.created_at DESC LIMIT 1
 	`
-	err := s.dbReader.QueryRow(ctx, query, orderTrackingID).Scan(&escrowAmount, &customerID, &escrowStatus)
+	err := s.dbReader.QueryRow(ctx, query, orderTrackingID).Scan(&escrowAmountPaisa, &customerID, &escrowStatus)
 	if err != nil {
 		// No escrow record — get order amount directly for COD already-settled orders
+		var orderTotalRupees float64
 		err2 := s.dbReader.QueryRow(ctx,
 			"SELECT total_amount, customer_tracking_id FROM orders WHERE order_tracking_id = $1",
-			orderTrackingID).Scan(&escrowAmount, &customerID)
+			orderTrackingID).Scan(&orderTotalRupees, &customerID)
 		if err2 != nil {
 			return fmt.Errorf("order not found: %w", err2)
 		}
+		escrowAmountPaisa = int64(orderTotalRupees * 100)
 		escrowStatus = "paid_out"
 	}
 
 	switch decision {
 	case "vendor_guilty", "rider_guilty":
-		return s.resolveDisputeGuilty(ctx, orderTrackingID, decision, customerID, escrowAmount, escrowStatus)
+		return s.resolveDisputeGuilty(ctx, orderTrackingID, decision, customerID, escrowAmountPaisa, escrowStatus)
 	case "customer_guilty":
 		return s.resolveDisputeCustomerGuilty(ctx, orderTrackingID, escrowStatus)
 	default:
@@ -835,7 +837,7 @@ func (s *AdminSurveillanceService) ResolveDispute(ctx context.Context, orderTrac
 // roll back together.
 func (s *AdminSurveillanceService) resolveDisputeGuilty(
 	ctx context.Context, orderTrackingID, decision, customerID string,
-	escrowAmount float64, escrowStatus string,
+	escrowAmountPaisa int64, escrowStatus string,
 ) error {
 	tx, err := s.dbWriter.Begin(ctx)
 	if err != nil {
@@ -843,13 +845,13 @@ func (s *AdminSurveillanceService) resolveDisputeGuilty(
 	}
 	defer tx.Rollback(ctx)
 
-	// 1. Credit customer wallet (refund)
+	// 1. Credit customer wallet (refund) using paisa columns
 	upsertWallet := `
-		INSERT INTO customer_wallet (customer_tracking_id, balance, updated_at)
-		VALUES ($1, $2, NOW())
-		ON CONFLICT (customer_tracking_id) DO UPDATE SET balance = customer_wallet.balance + $2, updated_at = NOW()
+		INSERT INTO customer_wallet (customer_tracking_id, balance_paisa, lifetime_spent_paisa, updated_at)
+		VALUES ($1, $2, 0, NOW())
+		ON CONFLICT (customer_tracking_id) DO UPDATE SET balance_paisa = customer_wallet.balance_paisa + $2, updated_at = NOW()
 	`
-	_, err = tx.Exec(ctx, upsertWallet, customerID, escrowAmount)
+	_, err = tx.Exec(ctx, upsertWallet, customerID, escrowAmountPaisa)
 	if err != nil {
 		return fmt.Errorf("failed to credit customer wallet: %w", err)
 	}
@@ -867,7 +869,7 @@ func (s *AdminSurveillanceService) resolveDisputeGuilty(
 		}
 	}
 
-	// 3. Penalty debit (rider or vendor). Look up the tracking ID, then debit.
+	// 3. Penalty debit (rider or vendor). Look up the tracking ID, then debit using paisa columns.
 	if decision == "rider_guilty" {
 		var riderTrackingID string
 		err = tx.QueryRow(ctx,
@@ -879,8 +881,8 @@ func (s *AdminSurveillanceService) resolveDisputeGuilty(
 		}
 		if riderTrackingID != "" {
 			_, err = tx.Exec(ctx,
-				"UPDATE rider_wallet SET balance = balance - $1, updated_at = NOW() WHERE rider_tracking_id = $2 AND balance >= $1",
-				escrowAmount, riderTrackingID,
+				"UPDATE rider_wallet SET balance_paisa = balance_paisa - $1, cash_in_hand_paisa = cash_in_hand_paisa - $1, updated_at = NOW() WHERE rider_tracking_id = $2 AND balance_paisa >= $1",
+				escrowAmountPaisa, riderTrackingID,
 			)
 			if err != nil {
 				return fmt.Errorf("failed to debit rider penalty: %w", err)
@@ -898,8 +900,8 @@ func (s *AdminSurveillanceService) resolveDisputeGuilty(
 		}
 		if vendorTrackingID != "" {
 			_, err = tx.Exec(ctx,
-				"UPDATE vendor_wallet SET balance = balance - $1, updated_at = NOW() WHERE vendor_tracking_id = $2 AND balance >= $1",
-				escrowAmount, vendorTrackingID,
+				"UPDATE vendor_wallet SET balance_paisa = balance_paisa - $1, updated_at = NOW() WHERE vendor_tracking_id = $2 AND balance_paisa >= $1",
+				escrowAmountPaisa, vendorTrackingID,
 			)
 			if err != nil {
 				return fmt.Errorf("failed to debit vendor penalty: %w", err)

@@ -416,8 +416,8 @@ func main() {
 			queryQ := `
 				SELECT u.tracking_id, u.full_name, u.email, COALESCE(u.phone,''),
 				       u.is_verified, COALESCE(u.created_at::text,''),
-				       COALESCE(rw.balance, 0) AS wallet_balance,
-				       COALESCE(rw.cash_in_hand, 0) AS cash_in_hand,
+				       COALESCE(rw.balance_paisa, 0) AS wallet_balance_paisa,
+				       COALESCE(rw.cash_in_hand_paisa, 0) AS cash_in_hand_paisa,
 				       COALESCE((SELECT COUNT(*) FROM deliveries d WHERE d.rider_tracking_id = u.tracking_id AND d.status = 'completed'), 0) AS completed_deliveries,
 				       COALESCE((SELECT COUNT(*) FROM deliveries d WHERE d.rider_tracking_id = u.tracking_id AND d.status IN ('broadcasting','accepted','picked_up','in_transit')), 0) AS active_deliveries
 				FROM users u
@@ -918,28 +918,28 @@ func main() {
 
 			// Customer wallet = liability (refunds owed to customers)
 			if err := dbPool.QueryRow(ctx,
-				`SELECT COALESCE(SUM(balance), 0) FROM customer_wallet`,
+				`SELECT COALESCE(SUM(balance_paisa), 0) FROM customer_wallet`,
 			).Scan(&customerBalance); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "customer_wallet query failed: " + err.Error()})
 				return
 			}
 			// Vendor wallet = liability (pending payouts to vendors)
 			if err := dbPool.QueryRow(ctx,
-				`SELECT COALESCE(SUM(balance), 0) FROM vendor_wallet`,
+				`SELECT COALESCE(SUM(balance_paisa), 0) FROM vendor_wallet`,
 			).Scan(&vendorBalance); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "vendor_wallet query failed: " + err.Error()})
 				return
 			}
 			// Rider digital balance = liability (rider earnings, not yet withdrawn)
 			if err := dbPool.QueryRow(ctx,
-				`SELECT COALESCE(SUM(balance), 0) FROM rider_wallet`,
+				`SELECT COALESCE(SUM(balance_paisa), 0) FROM rider_wallet`,
 			).Scan(&riderBalance); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "rider_wallet.balance query failed: " + err.Error()})
 				return
 			}
 			// Rider cash-in-hand = asset (riders have collected platform's cash, not yet deposited)
 			if err := dbPool.QueryRow(ctx,
-				`SELECT COALESCE(SUM(cash_in_hand), 0) FROM rider_wallet`,
+				`SELECT COALESCE(SUM(cash_in_hand_paisa), 0) FROM rider_wallet`,
 			).Scan(&riderCashInHand); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "rider_wallet.cash_in_hand query failed: " + err.Error()})
 				return
@@ -991,7 +991,7 @@ func main() {
 				       SUM(cd.amount_owed) AS total_cod_collected,
 				       SUM(CASE WHEN cd.status = 'settled' THEN cd.amount_owed ELSE 0 END) AS settled_amount,
 				       SUM(CASE WHEN cd.status = 'pending' THEN cd.amount_owed ELSE 0 END) AS pending_amount,
-				       COALESCE(rw.cash_in_hand, 0) AS cash_in_hand
+				       COALESCE(rw.cash_in_hand_paisa, 0) AS cash_in_hand_paisa
 				FROM cod_debts cd
 				LEFT JOIN users u ON u.tracking_id = cd.rider_tracking_id
 				LEFT JOIN rider_wallet rw ON rw.rider_tracking_id = cd.rider_tracking_id
@@ -1003,7 +1003,7 @@ func main() {
 				args = append(args, riderID)
 				argIdx++
 			}
-			query += ` GROUP BY cd.rider_tracking_id, u.full_name, rw.cash_in_hand ORDER BY total_cod_collected DESC`
+			query += ` GROUP BY cd.rider_tracking_id, u.full_name, rw.cash_in_hand_paisa ORDER BY total_cod_collected DESC`
 
 			rows, err := dbPool.Query(ctx, query, args...)
 			if err != nil {
@@ -1121,15 +1121,15 @@ func main() {
 				       COUNT(*) FILTER (WHERE d.status = 'completed') AS completed,
 				       COUNT(*) FILTER (WHERE d.status = 'cancelled') AS cancelled,
 				       ROUND(100.0 * COUNT(*) FILTER (WHERE d.status = 'completed') / NULLIF(COUNT(*), 0), 1) AS completion_rate,
-				       COALESCE(rw.balance, 0) AS wallet_balance,
-				       COALESCE(rw.cash_in_hand, 0) AS cash_in_hand,
-				       COALESCE((SELECT COUNT(*) FROM cod_debts cd WHERE cd.rider_tracking_id = d.rider_tracking_id AND cd.status = 'pending'), 0) AS pending_debts,
-				       COALESCE((SELECT AVG(r.rating) FROM ratings r WHERE r.rater_id = d.rider_tracking_id), 0) AS avg_rating
-				FROM deliveries d
-				LEFT JOIN users u ON u.tracking_id = d.rider_tracking_id
-				LEFT JOIN rider_wallet rw ON rw.rider_tracking_id = d.rider_tracking_id
-				WHERE d.created_at > NOW() - INTERVAL '1 day' * $1 AND d.rider_tracking_id IS NOT NULL
-				GROUP BY d.rider_tracking_id, u.full_name, rw.balance, rw.cash_in_hand
+			       COALESCE(rw.balance_paisa, 0) AS wallet_balance_paisa,
+			       COALESCE(rw.cash_in_hand_paisa, 0) AS cash_in_hand_paisa,
+			       COALESCE((SELECT COUNT(*) FROM cod_debts cd WHERE cd.rider_tracking_id = d.rider_tracking_id AND cd.status = 'pending'), 0) AS pending_debts,
+			       COALESCE((SELECT AVG(r.rating) FROM ratings r WHERE r.rater_id = d.rider_tracking_id), 0) AS avg_rating
+			FROM deliveries d
+			LEFT JOIN users u ON u.tracking_id = d.rider_tracking_id
+			LEFT JOIN rider_wallet rw ON rw.rider_tracking_id = d.rider_tracking_id
+			WHERE d.created_at > NOW() - INTERVAL '1 day' * $1 AND d.rider_tracking_id IS NOT NULL
+			GROUP BY d.rider_tracking_id, u.full_name, rw.balance_paisa, rw.cash_in_hand_paisa
 				ORDER BY completed DESC
 				LIMIT $2 OFFSET $3`, days, limit, offset)
 			if err != nil {

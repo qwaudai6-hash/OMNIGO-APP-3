@@ -11,18 +11,18 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func roundToPaisa(val float64) float64 {
-	return math.Round(val*100.0) / 100.0
+func roundToPaisa(val float64) int64 {
+	return int64(math.Round(val))
 }
 
 // SplitResult contains the calculated payment split for an order.
 type SplitResult struct {
-	OrderTotal     float64 `json:"order_total"`
-	DeliveryFee    float64 `json:"delivery_fee"`
-	AdminRevenue   float64 `json:"admin_revenue"`   // Dynamic rate based on store commission + COD surcharge
-	VendorEscrow   float64 `json:"vendor_escrow"`   // Remainder after admin + delivery
-	DeliveryEscrow float64 `json:"delivery_escrow"` // delivery_fee → held for rider payout
-	CommissionRate float64 `json:"commission_rate"` // Base store commission rate
+	OrderTotal     int64   `json:"order_total"`     // paisa
+	DeliveryFee    int64   `json:"delivery_fee"`    // paisa
+	AdminRevenue   int64   `json:"admin_revenue"`   // paisa - Dynamic rate based on store commission + COD surcharge
+	VendorEscrow   int64   `json:"vendor_escrow"`   // paisa - Remainder after admin + delivery
+	DeliveryEscrow int64   `json:"delivery_escrow"` // paisa - delivery_fee → held for rider payout
+	CommissionRate float64 `json:"commission_rate"` // Base store commission rate (e.g., 2.00 for 2%)
 }
 
 func envFloat(key string, fallback float64) float64 {
@@ -48,7 +48,8 @@ func NewCommissionCalculator(db *pgxpool.Pool) *CommissionCalculator {
 
 // CalculateSplit computes the three-way split for an online payment.
 // It reads the store's commission_rate and the delivery gig's fee.
-func (c *CommissionCalculator) CalculateSplit(ctx context.Context, orderTotal float64, storeTrackingID, deliveryTrackingID string) (*SplitResult, error) {
+// orderTotalPaisa is the order total in paisa (int64).
+func (c *CommissionCalculator) CalculateSplit(ctx context.Context, orderTotalPaisa int64, storeTrackingID, deliveryTrackingID string) (*SplitResult, error) {
 	// 1. Read store commission_rate
 	var commissionRate float64 = envFloat("DEFAULT_COMMISSION_RATE", 2.00)
 	err := c.db.QueryRow(ctx,
@@ -60,37 +61,42 @@ func (c *CommissionCalculator) CalculateSplit(ctx context.Context, orderTotal fl
 	}
 
 	// 2. Read delivery fee from the gig
-	var deliveryFee float64
+	// NOTE: deliveries table has delivery_fee (NUMERIC rupees) and rider_earning_paisa (BIGINT)
+	// Use delivery_fee converted to paisa for consistency
+	var deliveryFeePaisa int64
 	if deliveryTrackingID != "" {
+		var deliveryFeeRupees float64
 		err = c.db.QueryRow(ctx,
 			`SELECT COALESCE(delivery_fee, 0) FROM deliveries WHERE tracking_id = $1`, deliveryTrackingID,
-		).Scan(&deliveryFee)
+		).Scan(&deliveryFeeRupees)
 		if err != nil {
-			deliveryFee = 0
+			deliveryFeePaisa = 0
+		} else {
+			deliveryFeePaisa = int64(math.Round(deliveryFeeRupees * 100))
 		}
 	}
 
-	// 3. Calculate splits with exact 2-decimal paisa precision
-	adminRevenue := roundToPaisa(orderTotal * commissionRate / 100.0)
-	deliveryEscrow := roundToPaisa(deliveryFee)
-	var vendorEscrow float64
+	// 3. Calculate splits in paisa with exact integer arithmetic
+	adminRevenue := int64(math.Round(float64(orderTotalPaisa) * commissionRate / 100.0))
+	deliveryEscrow := deliveryFeePaisa
+	var vendorEscrow int64
 
-	// Guarantee that total split never exceeds orderTotal
-	if adminRevenue+deliveryEscrow > orderTotal {
-		if deliveryEscrow >= orderTotal {
-			deliveryEscrow = roundToPaisa(orderTotal)
+	// Guarantee that total split never exceeds orderTotalPaisa
+	if adminRevenue+deliveryEscrow > orderTotalPaisa {
+		if deliveryEscrow >= orderTotalPaisa {
+			deliveryEscrow = orderTotalPaisa
 			adminRevenue = 0
 			vendorEscrow = 0
 		} else {
-			adminRevenue = roundToPaisa(orderTotal - deliveryEscrow)
+			adminRevenue = orderTotalPaisa - deliveryEscrow
 			vendorEscrow = 0
 		}
 	} else {
-		vendorEscrow = roundToPaisa(orderTotal - adminRevenue - deliveryEscrow)
+		vendorEscrow = orderTotalPaisa - adminRevenue - deliveryEscrow
 	}
 
 	return &SplitResult{
-		OrderTotal:     roundToPaisa(orderTotal),
+		OrderTotal:     orderTotalPaisa,
 		DeliveryFee:    deliveryEscrow,
 		AdminRevenue:   adminRevenue,
 		VendorEscrow:   vendorEscrow,
@@ -100,7 +106,8 @@ func (c *CommissionCalculator) CalculateSplit(ctx context.Context, orderTotal fl
 }
 
 // CalculateCODSplit computes the split for COD settlement (higher admin cut since rider handled cash).
-func (c *CommissionCalculator) CalculateCODSplit(ctx context.Context, orderTotal float64, storeTrackingID string, orderTrackingID string) (*SplitResult, error) {
+// orderTotalPaisa is the order total in paisa (int64).
+func (c *CommissionCalculator) CalculateCODSplit(ctx context.Context, orderTotalPaisa int64, storeTrackingID string, orderTrackingID string) (*SplitResult, error) {
 	var commissionRate float64 = envFloat("DEFAULT_COMMISSION_RATE", 2.00)
 	err := c.db.QueryRow(ctx,
 		`SELECT commission_rate FROM stores WHERE store_tracking_id = $1`, storeTrackingID,
@@ -109,38 +116,38 @@ func (c *CommissionCalculator) CalculateCODSplit(ctx context.Context, orderTotal
 		commissionRate = envFloat("DEFAULT_COMMISSION_RATE", 2.00)
 	}
 
-	var deliveryFee float64
+	var deliveryFeePaisa int64
 	if orderTrackingID != "" {
 		err = c.db.QueryRow(ctx,
-			`SELECT COALESCE(delivery_fee, 0) FROM deliveries WHERE order_tracking_id = $1 LIMIT 1`, orderTrackingID,
-		).Scan(&deliveryFee)
+			`SELECT COALESCE(amount_paisa, 0) FROM deliveries WHERE order_tracking_id = $1 LIMIT 1`, orderTrackingID,
+		).Scan(&deliveryFeePaisa)
 		if err != nil {
-			deliveryFee = 0
+			deliveryFeePaisa = 0
 		}
 	}
 
 	codSurcharge := envFloat("COD_SURCHARGE_RATE", 0.5)
 
-	adminRevenue := roundToPaisa(orderTotal * (commissionRate + codSurcharge) / 100.0)
-	deliveryEscrow := roundToPaisa(deliveryFee)
-	var vendorEscrow float64
+	adminRevenue := int64(math.Round(float64(orderTotalPaisa) * (commissionRate + codSurcharge) / 100.0))
+	deliveryEscrow := deliveryFeePaisa
+	var vendorEscrow int64
 
-	// Guarantee total COD split never exceeds orderTotal
-	if adminRevenue+deliveryEscrow > orderTotal {
-		if deliveryEscrow >= orderTotal {
-			deliveryEscrow = roundToPaisa(orderTotal)
+	// Guarantee total COD split never exceeds orderTotalPaisa
+	if adminRevenue+deliveryEscrow > orderTotalPaisa {
+		if deliveryEscrow >= orderTotalPaisa {
+			deliveryEscrow = orderTotalPaisa
 			adminRevenue = 0
 			vendorEscrow = 0
 		} else {
-			adminRevenue = roundToPaisa(orderTotal - deliveryEscrow)
+			adminRevenue = orderTotalPaisa - deliveryEscrow
 			vendorEscrow = 0
 		}
 	} else {
-		vendorEscrow = roundToPaisa(orderTotal - adminRevenue - deliveryEscrow)
+		vendorEscrow = orderTotalPaisa - adminRevenue - deliveryEscrow
 	}
 
 	return &SplitResult{
-		OrderTotal:     roundToPaisa(orderTotal),
+		OrderTotal:     orderTotalPaisa,
 		DeliveryFee:    deliveryEscrow,
 		AdminRevenue:   adminRevenue,
 		VendorEscrow:   vendorEscrow,
@@ -151,22 +158,23 @@ func (c *CommissionCalculator) CalculateCODSplit(ctx context.Context, orderTotal
 
 // CalculateRiderDeliveryCredit computes the rider's earning from a completed delivery.
 // Rider gets: delivery_fee - admin_commission
-func (c *CommissionCalculator) CalculateRiderDeliveryCredit(ctx context.Context, deliveryTrackingID string) (riderEarning, adminCommission float64, err error) {
-	var deliveryFee float64
+// Returns values in paisa (int64).
+func (c *CommissionCalculator) CalculateRiderDeliveryCredit(ctx context.Context, deliveryTrackingID string) (riderEarning, adminCommission int64, err error) {
+	var deliveryFeePaisa int64
 	err = c.db.QueryRow(ctx,
-		`SELECT COALESCE(delivery_fee, 0), COALESCE(admin_commission, 0) FROM deliveries WHERE tracking_id = $1`,
+		`SELECT COALESCE(amount_paisa, 0), COALESCE(commission_paisa, 0) FROM deliveries WHERE tracking_id = $1`,
 		deliveryTrackingID,
-	).Scan(&deliveryFee, &adminCommission)
+	).Scan(&deliveryFeePaisa, &adminCommission)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to read delivery gig: %w", err)
 	}
 
-	riderEarning = roundToPaisa(deliveryFee - adminCommission)
+	riderEarning = deliveryFeePaisa - adminCommission
 	if riderEarning < 0 {
 		riderEarning = 0
 	}
 
-	return riderEarning, roundToPaisa(adminCommission), nil
+	return riderEarning, adminCommission, nil
 }
 
 // ResolveDeliveryTrackingID returns the DEL- tracking ID of the delivery gig

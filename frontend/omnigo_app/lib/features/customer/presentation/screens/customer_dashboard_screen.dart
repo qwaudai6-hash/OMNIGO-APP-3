@@ -21,6 +21,9 @@ import 'order_detail_screen.dart';
 import 'cart_screen.dart';
 import '../widgets/vehicle_selector_sheet.dart';
 import 'customer_wallet_screen.dart';
+import 'customer_saved_cards_screen.dart';
+import 'security_settings_screen.dart';
+import 'my_orders_screen.dart';
 import '../../../shared/presentation/widgets/map_libre_map_widget.dart';
 import '../../../../shared/presentation/widgets/chat_nav_button.dart';
 import '../../../../shared/presentation/services/chat_service.dart';
@@ -844,9 +847,11 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('Welcome to OMNIGO',
-                        style: TextStyle(fontSize: 16, color: Colors.grey),),
-                    Text(widget.trackingId,
+                    Text(
+                        'Welcome, ${SessionRegistry.instance.fullName ?? 'User'}',
+                        style: const TextStyle(fontSize: 16, color: Colors.grey),),
+                    const SizedBox(height: 4),
+                    Text('OMNIGO Customer',
                         style: const TextStyle(
                             fontSize: 14,
                             fontWeight: FontWeight.bold,
@@ -1035,7 +1040,8 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                 children: [
                   const Text('OMNIGO E-Shop',
                       style: TextStyle(fontSize: 16, color: Colors.grey),),
-                  Text(widget.trackingId,
+                  const SizedBox(height: 4),
+                  Text(SessionRegistry.instance.fullName ?? 'User',
                       style: const TextStyle(
                           fontSize: 14,
                           fontWeight: FontWeight.bold,
@@ -1452,69 +1458,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   }
 
   Widget _buildOrdersTab() {
-    return Padding(
-      padding: const EdgeInsets.all(24.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('Track Orders',
-              style: TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.bold,
-                  color: AppTheme.blackAccent,),),
-          const SizedBox(height: 20),
-          Expanded(
-            child: _isLoadingOrders
-                ? const Center(
-                    child:
-                        CircularProgressIndicator(color: AppTheme.limeAccent),)
-                : _customerOrders.isEmpty
-                    ? const Center(
-                        child: Text('No orders placed yet.',
-                            style: TextStyle(color: Colors.grey, fontSize: 16),),)
-                    : RefreshIndicator(
-                        onRefresh: _fetchOrders,
-                        child: ListView.builder(
-                          itemCount: _customerOrders.length,
-                          itemBuilder: (context, index) {
-                            final order = _customerOrders[index];
-                            final id =
-                                order['order_tracking_id']?.toString() ?? 'ORD-UNKNOWN';
-                            final store =
-                                order['store_tracking_id']?.toString() ?? 'STOR-UNKNOWN';
-                            final total =
-                                (order['total_amount'] ?? 0.0).toString();
-                            final currency = order['currency']?.toString() ?? 'USD';
-                            final status = order['status']?.toString() ?? 'pending';
-                            final activeStatuses = {'pending', 'paid', 'accepted', 'processing', 'shipped', 'in_transit'};
-                            final isActive = activeStatuses.contains(status);
-                            final isCancelled = status == 'cancelled' || status == 'failed' || status == 'payment_failed';
-                            return GestureDetector(
-                              onTap: () {
-                                Navigator.push(
-                                  context,
-                                  MaterialPageRoute<void>(
-                                    builder: (_) =>
-                                        OrderDetailScreen(order: order as Map<String, dynamic>),
-                                  ),
-                                );
-                              },
-                              child: _buildTrackingItem(
-                                'Order #$id',
-                                'Total: $currency $total from $store',
-                                store,
-                                status.toUpperCase(),
-                                isActive,
-                                isCancelled: isCancelled,
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-          ),
-        ],
-      ),
-    );
+    return const MyOrdersScreen();
   }
 
   Widget _buildTrackingItem(
@@ -1621,10 +1565,10 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                   fontWeight: FontWeight.bold,
                   color: AppTheme.blackAccent,),),
           const SizedBox(height: 16),
-          _buildInfoRow(
-              'Email Address',
-              SessionRegistry.instance.email ?? 'Not provided',
-              Icons.email_outlined,),
+          _buildEmailRow(
+            SessionRegistry.instance.email ?? 'Not provided',
+            SessionRegistry.instance.isVerified ?? false,
+          ),
           _buildInfoRow(
               'Phone Number',
               SessionRegistry.instance.phone?.isNotEmpty == true
@@ -1650,14 +1594,14 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
           // "Add Payment Method" call-to-action.
           _buildPaymentCard(
             'Stripe Credit / Debit',
-            'Tap to add a card',
+            'Tap to manage saved cards',
             Colors.blue.shade100,
             Icons.credit_card,
             onTap: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Stripe payment integration is ready on the backend. Add flutter_stripe package to enable card entry.'),
-                  behavior: SnackBarBehavior.floating,
+              Navigator.push(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (_) => const CustomerSavedCardsScreen(),
                 ),
               );
             },
@@ -1696,6 +1640,27 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
               foregroundColor: Colors.white,
               minimumSize: const Size(double.infinity, 54),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            ),
+          ),
+          const SizedBox(height: 16),
+          OutlinedButton.icon(
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (_) => const SecuritySettingsScreen(),
+                ),
+              );
+            },
+            icon: const Icon(Icons.shield_outlined, color: AppTheme.blackAccent),
+            label: const Text(
+              'Security Settings',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: AppTheme.blackAccent),
+            ),
+            style: OutlinedButton.styleFrom(
+              minimumSize: const Size(double.infinity, 54),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              side: const BorderSide(color: AppTheme.blackAccent),
             ),
           ),
           const SizedBox(height: 16),
@@ -1755,6 +1720,83 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         ],
       ),
     );
+  }
+
+  Widget _buildEmailRow(String email, bool isVerified) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.grey.shade100),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            isVerified ? Icons.check_circle : Icons.email_outlined,
+            color: isVerified ? Colors.green : Colors.grey,
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Email Address',
+                    style: TextStyle(fontSize: 12, color: Colors.grey),),
+                const SizedBox(height: 2),
+                Text(email,
+                    style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                        color: AppTheme.blackAccent,),),
+                if (!isVerified)
+                  const Text('Not verified',
+                      style: TextStyle(fontSize: 11, color: Colors.orange),),
+              ],
+            ),
+          ),
+          if (!isVerified)
+            TextButton(
+              onPressed: () => _sendVerificationEmail(email),
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: const Text(
+                'Verify',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _sendVerificationEmail(String email) async {
+    try {
+      await sl<ApiClient>().post(ApiEndpoints.authSendVerificationEmail(), {});
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Verification email sent! Check your inbox.'),
+            backgroundColor: Colors.green,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to send verification email: $e'),
+            backgroundColor: Colors.redAccent,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
   }
 
   Widget _buildPaymentCard(
@@ -1832,7 +1874,20 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   Widget _buildNavItem(IconData icon, int index) {
     final isSelected = _currentIndex == index;
     return GestureDetector(
-      onTap: () => setState(() => _currentIndex = index),
+      onTap: () {
+        if (index == 4) {
+          Navigator.push(
+            context,
+            MaterialPageRoute<void>(
+              builder: (_) => MyOrdersScreen(customerTrackingId: widget.trackingId),
+            ),
+          );
+        } else {
+          setState(() {
+            _currentIndex = index;
+          });
+        }
+      },
       child: Icon(
         icon,
         color: isSelected ? AppTheme.limeAccent : Colors.white.withOpacity(0.5),

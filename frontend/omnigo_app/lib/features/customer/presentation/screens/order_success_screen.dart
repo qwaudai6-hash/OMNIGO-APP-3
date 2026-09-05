@@ -1,16 +1,14 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../screens/cart_screen.dart';
 
 class OrderSuccessScreen extends StatelessWidget {
 
   const OrderSuccessScreen({super.key, required this.trackingId, this.pending = false, this.failed = false});
   final String trackingId;
 
-  /// PF-4 FIX: when true the payment is still processing at the gateway —
-  /// render an honest amber "processing" state instead of a green success.
   final bool pending;
-
-  /// When true the payment has failed — render a red "failed" state with retry options.
   final bool failed;
 
   @override
@@ -55,18 +53,37 @@ class OrderSuccessScreen extends StatelessWidget {
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 32),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF8F9FA),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Column(
-                  children: [
-                    const Text('Order Tracking ID', style: TextStyle(color: Colors.grey, fontSize: 12)),
-                    const SizedBox(height: 4),
-                    Text(trackingId, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                  ],
+              GestureDetector(
+                onTap: () {
+                  Clipboard.setData(ClipboardData(text: trackingId));
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Order ID copied to clipboard'), duration: Duration(seconds: 2)),
+                  );
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF8F9FA),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.grey.shade200),
+                  ),
+                  child: Column(
+                    children: [
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Text('Order Tracking ID', style: TextStyle(color: Colors.grey, fontSize: 12)),
+                          const SizedBox(width: 8),
+                          Icon(Icons.copy, size: 14, color: Colors.grey.shade400),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        trackingId,
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, fontFamily: 'monospace'),
+                      ),
+                    ],
+                  ),
                 ),
               ),
               const Spacer(),
@@ -80,11 +97,44 @@ class OrderSuccessScreen extends StatelessWidget {
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                     ),
                     onPressed: () {
-                      // Go back to cart to retry
-                      Navigator.pop(context);
-                      Navigator.pop(context);
+                      Navigator.pushAndRemoveUntil(
+                        context,
+                        MaterialPageRoute(builder: (_) => const CartScreen()),
+                        (route) => route.isFirst,
+                      );
                     },
-                    child: const Text('Back to Cart', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                    child: const Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.shopping_cart, color: Colors.white),
+                        SizedBox(width: 8),
+                        Text('Back to Cart', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
+              if (!isFailed) ...[
+                SizedBox(
+                  width: double.infinity,
+                  height: 55,
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.green,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    ),
+                    onPressed: () {
+                      Navigator.popUntil(context, (route) => route.isFirst);
+                    },
+                    child: const Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.local_shipping, color: Colors.white),
+                        SizedBox(width: 8),
+                        Text('Track Order', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                      ],
+                    ),
                   ),
                 ),
                 const SizedBox(height: 16),
@@ -92,27 +142,22 @@ class OrderSuccessScreen extends StatelessWidget {
               SizedBox(
                 width: double.infinity,
                 height: 55,
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppTheme.blackAccent,
+                child: OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    side: const BorderSide(color: AppTheme.blackAccent),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                   ),
                   onPressed: () {
-                    // Just pop back to dashboard
-                    Navigator.pop(context);
+                    Navigator.popUntil(context, (route) => route.isFirst);
                   },
-                  child: Text(isFailed ? 'Back to Home' : 'Track Order', style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
-                ),
-              ),
-              const SizedBox(height: 16),
-              SizedBox(
-                width: double.infinity,
-                height: 55,
-                child: TextButton(
-                  onPressed: () {
-                    Navigator.pop(context);
-                  },
-                  child: const Text('Back to Home', style: TextStyle(color: AppTheme.blackAccent, fontSize: 16, fontWeight: FontWeight.bold)),
+                  child: const Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.home, color: AppTheme.blackAccent),
+                      SizedBox(width: 8),
+                      Text('Back to Home', style: TextStyle(color: AppTheme.blackAccent, fontSize: 16, fontWeight: FontWeight.bold)),
+                    ],
+                  ),
                 ),
               ),
             ],

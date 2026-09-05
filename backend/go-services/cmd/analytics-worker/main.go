@@ -89,7 +89,7 @@ func main() {
 						event.OrderID,
 						event.UserTrackID,
 						event.VendorStoreTrackID,
-						event.TotalAmount,
+						event.TotalAmountPaisa,
 						event.DropoffLat,
 						event.DropoffLng,
 						event.Timestamp,

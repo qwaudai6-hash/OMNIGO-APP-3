@@ -452,10 +452,7 @@ class VendorInventoryScreenState extends State<VendorInventoryScreen> {
             style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold),),
         backgroundColor: Colors.white,
         elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_rounded, color: Colors.black),
-          onPressed: () => Navigator.pop(context),
-        ),
+        leading: const SizedBox.shrink(), // No back button — this is a tab inside VendorDashboardScreen
         actions: [
           IconButton(
             icon: const Icon(Icons.add_rounded, color: AppTheme.blackAccent),

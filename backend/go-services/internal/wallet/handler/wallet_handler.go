@@ -15,16 +15,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/omnigo/backend/internal/ledger"
+	orderModels "github.com/omnigo/backend/internal/order/models"
 	"github.com/omnigo/backend/internal/payment/payfast"
 	sharedAuth "github.com/omnigo/backend/internal/shared/auth"
 	"github.com/omnigo/backend/internal/shared/messaging"
 	"github.com/omnigo/backend/internal/shared/middleware"
 	"github.com/omnigo/backend/internal/wallet/service"
-	"github.com/redis/go-redis/v9"
+	"github.com/redis/go-redis.v9"
 	"github.com/twmb/franz-go/pkg/kgo"
-
-	orderModels "github.com/omnigo/backend/internal/order/models"
 )
 
 type WalletHandler struct {
@@ -889,11 +887,12 @@ func (h *WalletHandler) LoadCustomerWalletCallback(c *gin.Context) {
 		return
 	}
 
-	err := h.customerWallet.CreditFunds(c.Request.Context(), customerTrackingID, txnID, amountPKR, ledger.AccountGatewayClearing, fmt.Sprintf("Wallet Top-up via %s (%s)", gateway, txnID))
+	amountPaisa := int64(amountPKR * 100)
+	err := h.customerWallet.CreditFunds(c.Request.Context(), customerTrackingID, txnID, amountPaisa)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to credit customer wallet: " + err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Wallet topped up successfully", "amount": amountPKR})
+	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Wallet topped up successfully", "amount": amountPKR, "amount_paisa": amountPaisa})
 }

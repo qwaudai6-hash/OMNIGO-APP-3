@@ -90,15 +90,19 @@ func (s *AnalyticsService) initSchema(ctx context.Context) error {
 }
 
 // InsertOrderEvent inserts a new order event directly into ClickHouse
-func (s *AnalyticsService) InsertOrderEvent(ctx context.Context, orderID, userID, vendorID string, amount, lat, lng float64, ts int64) error {
+// amount is in paisa (int64) — ClickHouse stores as Float64 for analytics.
+func (s *AnalyticsService) InsertOrderEvent(ctx context.Context, orderID, userID, vendorID string, amountPaisa int64, lat, lng float64, ts int64) error {
 	query := `
-		INSERT INTO order_events 
+		INSERT INTO order_events
 		(order_id, user_tracking_id, vendor_store_tracking_id, total_amount, dropoff_lat, dropoff_lng, timestamp)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 	`
 	eventTime := time.UnixMilli(ts)
 
-	err := s.conn.Exec(ctx, query, orderID, userID, vendorID, amount, lat, lng, eventTime)
+	// Convert paisa -> rupees (Float64) for ClickHouse analytics storage
+	amountRupees := float64(amountPaisa) / 100.0
+
+	err := s.conn.Exec(ctx, query, orderID, userID, vendorID, amountRupees, lat, lng, eventTime)
 	if err != nil {
 		return fmt.Errorf("failed to insert order event: %w", err)
 	}

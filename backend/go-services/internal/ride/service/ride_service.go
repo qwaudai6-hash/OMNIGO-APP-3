@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -25,6 +26,11 @@ func envFloat(key string, fallback float64) float64 {
 		}
 	}
 	return fallback
+}
+
+// rupeesToPaisa converts rupees (float64) to paisa (int64).
+func rupeesToPaisa(rupees float64) int64 {
+	return int64(math.Round(rupees * 100))
 }
 
 type RideService struct {
@@ -187,8 +193,9 @@ func (s *RideService) CompleteRide(ctx context.Context, trackingID string, req *
 		if commissionRate <= 0 || commissionRate >= 100 {
 			commissionRate = envFloat("RIDE_COMMISSION_PERCENT", 5.0)
 		}
-		commission := ride.FareAmount * (commissionRate / 100.0)
-		riderEarning := ride.FareAmount - commission
+		farePaisa := rupeesToPaisa(ride.FareAmount)
+		commission := int64(math.Round(float64(farePaisa) * commissionRate / 100.0))
+		riderEarning := farePaisa - commission
 
 		idempotencyKey := fmt.Sprintf("ride:complete:%s", trackingID)
 		_, err := s.ledger.MultiTransfer(ctx, []ledger.TransferRequest{
@@ -198,7 +205,7 @@ func (s *RideService) CompleteRide(ctx context.Context, trackingID string, req *
 				Amount:         commission,
 				ReferenceType:  "ride_completion",
 				ReferenceID:    trackingID,
-				Description:    fmt.Sprintf("Admin commission on ride %s (%.2f PKR)", trackingID, commission),
+				Description:    fmt.Sprintf("Admin commission on ride %s (%d paisa)", trackingID, commission),
 				IdempotencyKey: idempotencyKey + ":admin",
 			},
 			{
@@ -207,7 +214,7 @@ func (s *RideService) CompleteRide(ctx context.Context, trackingID string, req *
 				Amount:         riderEarning,
 				ReferenceType:  "ride_completion",
 				ReferenceID:    trackingID,
-				Description:    fmt.Sprintf("Rider earnings for ride %s (%.2f PKR)", trackingID, riderEarning),
+				Description:    fmt.Sprintf("Rider earnings for ride %s (%d paisa)", trackingID, riderEarning),
 				IdempotencyKey: idempotencyKey + ":rider",
 			},
 		})
@@ -219,12 +226,12 @@ func (s *RideService) CompleteRide(ctx context.Context, trackingID string, req *
 	// 3. Emit ride.completed event for analytics + admin dashboards.
 	if s.kafka != nil {
 		eventBytes, _ := json.Marshal(map[string]any{
-			"ride_id":          trackingID,
-			"rider_id":         req.RiderTrackID,
-			"final_fare":       req.FinalFare,
-			"distance_meters":  req.DistanceMeters,
-			"duration_seconds": req.DurationSeconds,
-			"payment_method":   req.PaymentMethod,
+			"ride_id":            trackingID,
+			"rider_id":           req.RiderTrackID,
+			"final_fare_paisa":   rupeesToPaisa(req.FinalFare),
+			"distance_meters":    req.DistanceMeters,
+			"duration_seconds":   req.DurationSeconds,
+			"payment_method":     req.PaymentMethod,
 		})
 		s.kafka.Client.Produce(ctx, &kgo.Record{
 			Topic: "ride.completed",

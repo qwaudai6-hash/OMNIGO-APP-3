@@ -93,6 +93,20 @@ func main() {
 		log.Println("Warning: Kafka unavailable, gig timeout worker disabled")
 	}
 
+	// Start Bid Cleanup Worker — removes expired bid data from Redis
+	if rdb != nil {
+		bidTTL := service.NewBidTTLManager(rdb)
+		bidCleanupWorker := service.NewBidCleanupWorker(bidTTL)
+		go bidCleanupWorker.Start(kafkaCtx)
+	}
+
+	// Start Redis Stream Consumers — durable event delivery
+	if rdb != nil {
+		bidConsumer := service.NewBidEventConsumer(rdb)
+		go bidConsumer.StartRiderConsumer(kafkaCtx)
+		go bidConsumer.StartCustomerConsumer(kafkaCtx)
+	}
+
 	// 5. Setup Router
 	router := gin.Default()
 	router.RedirectTrailingSlash = false

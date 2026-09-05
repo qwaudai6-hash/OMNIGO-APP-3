@@ -32,8 +32,8 @@ func TestVendorHandler_VW2_BalanceGuard(t *testing.T) {
 	body := src[idx:end]
 
 	// The fix: the UPDATE inside the withdrawal handler has the balance guard.
-	if !strings.Contains(body, "AND balance >= $1") {
-		t.Error("VW-2 fix missing: vendor_handler withdraw UPDATE should have `AND balance >= $1` guard")
+	if !strings.Contains(body, "AND balance_paisa >= $1") {
+		t.Error("VW-2 fix missing: vendor_handler withdraw UPDATE should have `AND balance_paisa >= $1` guard")
 	}
 	// The fix: checks RowsAffected() to surface concurrent wallet changes.
 	if !strings.Contains(body, "RowsAffected()") {

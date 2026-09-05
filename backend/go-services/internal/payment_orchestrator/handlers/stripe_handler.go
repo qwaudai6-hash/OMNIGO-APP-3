@@ -113,7 +113,8 @@ func (h *StripeSplitHandler) ProcessRefund(c *gin.Context) {
 		return
 	}
 
-	if err := h.service.ProcessRefund(c.Request.Context(), req.OrderID, req.Amount, req.Reason); err != nil {
+	amountPaisa := int64(req.Amount * 100)
+	if err := h.service.ProcessRefund(c.Request.Context(), req.OrderID, amountPaisa, req.Reason); err != nil {
 		errMsg := err.Error()
 		switch {
 		case strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "no completed payment"):
@@ -127,9 +128,10 @@ func (h *StripeSplitHandler) ProcessRefund(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":  "refunded",
-		"order_id": req.OrderID,
-		"amount":  req.Amount,
-		"message": "Refund processed successfully",
+		"status":       "refunded",
+		"order_id":     req.OrderID,
+		"amount":       req.Amount,
+		"amount_paisa": amountPaisa,
+		"message":      "Refund processed successfully",
 	})
 }

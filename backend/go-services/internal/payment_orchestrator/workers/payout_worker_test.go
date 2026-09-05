@@ -52,19 +52,19 @@ func TestPayoutWorker_VW1_SelectSpecificHolds(t *testing.T) {
 }
 
 // TestPayoutWorker_VW2_BalanceGuard validates VW-2 fix: the vendor_wallet
-// debit UPDATE should have `AND balance >= $2` guard to prevent negative
+// debit UPDATE should have `AND balance_paisa >= $2` guard to prevent negative
 // balance if a refactor changes the transaction boundaries.
 func TestPayoutWorker_VW2_BalanceGuard(t *testing.T) {
 	src := readPayoutWorkerSource(t)
 
 	// Locate the wallet debit UPDATE in the payout flow.
-	idx := strings.Index(src, "total_payouts = total_payouts + $2")
+	idx := strings.Index(src, "total_payouts_paisa = total_payouts_paisa + $2")
 	if idx == -1 {
 		t.Fatal("vendor_wallet debit UPDATE not found in payout_worker.go")
 	}
 	// Check the next 200 chars after the debit for the balance guard.
 	section := src[idx : idx+300]
-	if !strings.Contains(section, "AND balance >= $2") {
-		t.Error("VW-2 fix missing: PayoutWorker wallet debit should have `AND balance >= $2` guard")
+	if !strings.Contains(section, "AND balance_paisa >= $2") {
+		t.Error("VW-2 fix missing: PayoutWorker wallet debit should have `AND balance_paisa >= $2` guard")
 	}
 }

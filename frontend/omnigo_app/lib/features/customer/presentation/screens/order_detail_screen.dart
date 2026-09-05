@@ -362,7 +362,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                   ),
                   child: _isSubmitting
-                      ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                      ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
                       : const Text('Submit Report', style: TextStyle(color: Colors.white)),
                 ),
               ],
@@ -642,7 +642,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                               padding: const EdgeInsets.symmetric(vertical: 16),
                             ),
                             child: _isSubmitting
-                                ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                                ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
                                 : const Text('Confirm & Accept', style: TextStyle(color: AppTheme.limeAccent, fontWeight: FontWeight.bold)),
                           ),
                         ),

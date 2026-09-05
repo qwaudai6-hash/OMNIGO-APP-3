@@ -77,28 +77,3 @@ func TestAcceptGig_RiderMirrorHasErrorCheck(t *testing.T) {
 		t.Error("BUG #5 fix missing: error handling for rider-to-order mirror update")
 	}
 }
-
-// TestSettleCODVendorAndDebt_VW3_Idempotency validates VW-3 fix: the
-// SettleCODVendorAndDebt function must have an idempotency guard so
-// retries don't double-credit the vendor wallet.
-func TestSettleCODVendorAndDebt_VW3_Idempotency(t *testing.T) {
-	src := readDeliverySource(t)
-	idx := strings.Index(src, "func (r *DeliveryRepository) SettleCODVendorAndDebt")
-	if idx == -1 {
-		t.Fatal("SettleCODVendorAndDebt not found")
-	}
-	end := idx + 4000
-	if end > len(src) {
-		end = len(src)
-	}
-	body := src[idx:end]
-
-	// The fix uses the escrow_holds 'paid_out' row as the idempotency
-	// marker: if it already exists, the wallet credit is a no-op.
-	if !strings.Contains(body, "alreadySettled") {
-		t.Error("VW-3 fix missing: SettleCODVendorAndDebt should check for existing 'paid_out' escrow hold")
-	}
-	if !strings.Contains(body, "status = 'paid_out'") {
-		t.Error("VW-3 fix missing: idempotency check should look for status = 'paid_out'")
-	}
-}

@@ -144,7 +144,7 @@ func main() {
 	commissionCalculator := payment_orchestrator.NewCommissionCalculator(db.Writer)
 
 	customerWalletSvc := walletSvc.NewCustomerWalletService(db.Writer, ledgerSvc)
-	newCheckoutHandler := paymentHandlers.NewCheckoutHandler(paymentOrchestrator, customerWalletSvc, repo, escrowSvc).WithDB(db.Writer)
+	newCheckoutHandler := paymentHandlers.NewCheckoutHandler(paymentOrchestrator, customerWalletSvc, repo, escrowSvc, commissionCalculator).WithDB(db.Writer)
 
 	var rdbForWebhook redis.UniversalClient
 	if redisClient != nil {
@@ -182,8 +182,8 @@ func main() {
 	{
 		cartGroup.GET("", cartHandler.GetCart)
 		cartGroup.POST("/items", cartHandler.AddItem)
-		cartGroup.PUT("/items/:product_id", cartHandler.UpdateItem)
-		cartGroup.DELETE("/items/:product_id", cartHandler.RemoveItem)
+		cartGroup.PUT("/items/:product_tracking_id", cartHandler.UpdateItem)
+		cartGroup.DELETE("/items/:product_tracking_id", cartHandler.RemoveItem)
 		cartGroup.DELETE("", cartHandler.ClearCart)
 	}
 

@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/omnigo/backend/internal/order/models"
@@ -56,7 +55,7 @@ func (h *CartHandler) AddItem(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"message": "Item added to cart"})
 }
 
-// UpdateItem PUT /api/v1/cart/items/:product_id
+// UpdateItem PUT /api/v1/cart/items/:product_tracking_id
 func (h *CartHandler) UpdateItem(c *gin.Context) {
 	userID, exists := c.Get("tracking_id")
 	if !exists {
@@ -64,10 +63,9 @@ func (h *CartHandler) UpdateItem(c *gin.Context) {
 		return
 	}
 
-	productIDStr := c.Param("product_id")
-	productID, err := strconv.ParseInt(productIDStr, 10, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid product ID"})
+	productTrackingID := c.Param("product_tracking_id")
+	if productTrackingID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid product tracking ID"})
 		return
 	}
 
@@ -77,7 +75,7 @@ func (h *CartHandler) UpdateItem(c *gin.Context) {
 		return
 	}
 
-	if err := h.svc.UpdateItemQuantity(c.Request.Context(), userID.(string), productID, req.Quantity); err != nil {
+	if err := h.svc.UpdateItemQuantity(c.Request.Context(), userID.(string), productTrackingID, req.Quantity); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -85,7 +83,7 @@ func (h *CartHandler) UpdateItem(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Cart item updated"})
 }
 
-// RemoveItem DELETE /api/v1/cart/items/:product_id
+// RemoveItem DELETE /api/v1/cart/items/:product_tracking_id
 func (h *CartHandler) RemoveItem(c *gin.Context) {
 	userID, exists := c.Get("tracking_id")
 	if !exists {
@@ -93,14 +91,13 @@ func (h *CartHandler) RemoveItem(c *gin.Context) {
 		return
 	}
 
-	productIDStr := c.Param("product_id")
-	productID, err := strconv.ParseInt(productIDStr, 10, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid product ID"})
+	productTrackingID := c.Param("product_tracking_id")
+	if productTrackingID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid product tracking ID"})
 		return
 	}
 
-	if err := h.svc.RemoveItem(c.Request.Context(), userID.(string), productID); err != nil {
+	if err := h.svc.RemoveItem(c.Request.Context(), userID.(string), productTrackingID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}

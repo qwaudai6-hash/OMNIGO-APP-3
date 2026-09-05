@@ -423,19 +423,19 @@ class ApiEndpoints {
 
   // ── Admin: Ledger Balance & Entries ─────────────────────────────
   static String adminLedgerBalance(String account) =>
-      '$paymentBase/api/v1/ledger/balance/$account';
+      '$paymentBase/ledger/balance/$account';
   static String adminLedgerEntries(String type, String id) =>
-      '$paymentBase/api/v1/ledger/entries/$type/$id';
+      '$paymentBase/ledger/entries/$type/$id';
 
   // ── Admin: Escrow Holds ─────────────────────────────────────────
   static String adminEscrowHolds(String vendorId) =>
-      '$paymentBase/api/v1/payments/escrow/holds/$vendorId';
+      '$paymentBase/payments/escrow/holds/$vendorId';
 
   // ── Admin: Financial Reconciliation ─────────────────────────────
-  static String adminReconcile() => '$paymentBase/api/v1/finance/reconcile';
+  static String adminReconcile() => '$paymentBase/finance/reconcile';
 
   // ── Admin: 1LINK/1IBFT CSV Export ───────────────────────────────
-  static String adminExport1ibft() => '$paymentBase/api/v1/finance/payouts/export-1ibft';
+  static String adminExport1ibft() => '$paymentBase/finance/payouts/export-1ibft';
 
   // ── Payment Disputes (via payment-orchestrator) ─────────────────
   static String paymentDisputeList({String? status}) {

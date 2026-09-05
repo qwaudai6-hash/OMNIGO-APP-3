@@ -51,7 +51,7 @@ type LedgerEntry struct {
 	ID               uuid.UUID `json:"id"`
 	TransactionID    uuid.UUID `json:"transaction_id"`
 	Account          Account   `json:"account"`
-	Amount           float64   `json:"amount"` // negative = debit, positive = credit
+	Amount           int64     `json:"amount"` // negative = debit, positive = credit (paisa)
 	Currency         string    `json:"currency"`
 	ReferenceType    string    `json:"reference_type"`
 	ReferenceID      string    `json:"reference_id"`
@@ -66,7 +66,7 @@ type LedgerEntry struct {
 type TransferRequest struct {
 	DebitAccount   Account
 	CreditAccount  Account
-	Amount         float64
+	Amount         int64  // paisa (smallest currency unit)
 	Currency       string
 	ReferenceType  string
 	ReferenceID    string
@@ -77,6 +77,6 @@ type TransferRequest struct {
 // AccountBalance represents the net balance of a ledger account.
 type AccountBalance struct {
 	Account  Account `json:"account"`
-	Balance  float64 `json:"balance"`
+	Balance  int64   `json:"balance"` // paisa
 	Currency string  `json:"currency"`
 }

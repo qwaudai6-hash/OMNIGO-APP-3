@@ -24,6 +24,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   String _selectedPaymentMethod = 'cod';
   bool _isLoading = false;
   late final String _checkoutSessionNonce;
+  String? _createdOrderTrackingId;
 
   // Real delivery location — fetched from GPS
   String _deliveryAddress = 'Fetching your location...';
@@ -36,6 +37,50 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     super.initState();
     _checkoutSessionNonce = '${DateTime.now().millisecondsSinceEpoch}_${UniqueKey().toString()}';
     _fetchCurrentLocation();
+  }
+
+  // Helper: Cancel order on payment failure
+  Future<void> _cancelOrderOnFailure(String orderId, String reason) async {
+    try {
+      await sl<ApiClient>().post(
+        ApiEndpoints.customerCancelOrder(orderId),
+        {'reason': reason},
+      );
+    } catch (e) {
+      debugPrint('Failed to cancel order $orderId: $e');
+    }
+  }
+
+  // Helper: Get user-friendly error message from exception
+  String _getUserFriendlyError(dynamic e, String defaultMessage) {
+    if (e == null) return defaultMessage;
+    final errStr = e.toString().toLowerCase();
+
+    if (errStr.contains('socketexception') || errStr.contains('timeout') || errStr.contains('connection')) {
+      return 'Network error. Please check your internet connection and try again.';
+    }
+    if (errStr.contains('insufficient')) {
+      return 'Insufficient wallet balance for this purchase.';
+    }
+    if (errStr.contains('already paid') || errStr.contains('409')) {
+      return 'This order has already been paid.';
+    }
+    if (errStr.contains('cancelled') || errStr.contains('declined')) {
+      return 'Payment was declined. Please try a different payment method.';
+    }
+    if (errStr.contains('card') && errStr.contains('invalid')) {
+      return 'Invalid card details. Please check and try again.';
+    }
+    return defaultMessage;
+  }
+
+  // Helper: Check if error indicates order is already paid
+  bool _isAlreadyPaidError(dynamic error) {
+    if (error == null) return false;
+    final errStr = error.toString().toLowerCase();
+    return errStr.contains('already paid') ||
+        errStr.contains('already been paid') ||
+        errStr.contains('409');
   }
 
   Future<void> _fetchCurrentLocation() async {
@@ -130,6 +175,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     }
 
     setState(() => _isLoading = true);
+    _createdOrderTrackingId = null;
     try {
       final prefs = await SharedPreferences.getInstance();
       final userTrackId = prefs.getString('tracking_id') ?? '';
@@ -161,10 +207,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
       final response = await apiClient.post(ApiEndpoints.orderCheckout(), payload);
       final realOrderTrackingId =
-          response['order_tracking_id'] ?? response['tracking_id'];
+          (response['order_tracking_id'] ?? response['tracking_id']) as String?;
       if (realOrderTrackingId == null) {
         throw Exception('Order creation failed: no tracking id returned');
       }
+      _createdOrderTrackingId = realOrderTrackingId;
 
       // If card payment selected, create Stripe PaymentIntent using the
       // REAL order tracking ID so the webhook can correlate.
@@ -180,7 +227,24 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             'return_url': '${ApiEndpoints.gatewayBase}/order-success',
             'cancel_url': '${ApiEndpoints.gatewayBase}/checkout',
           },
+          idempotencyKey: 'checkout_stripe_$_checkoutSessionNonce',
         ) as Map<String, dynamic>;
+
+        // Check if order is already paid (Stripe returns error instead of client_secret)
+        final stripeError = checkoutResponse['error']?.toString() ?? '';
+        if (stripeError.contains('already paid')) {
+          await cart.clearCart();
+          if (mounted) {
+            await Navigator.pushAndRemoveUntil(
+              context,
+              MaterialPageRoute<void>(
+                builder: (_) => OrderSuccessScreen(trackingId: realOrderTrackingId.toString()),
+              ),
+              (route) => route.isFirst,
+            );
+          }
+          return;
+        }
 
         final clientSecret = checkoutResponse['client_secret']?.toString();
         if (clientSecret != null && clientSecret.isNotEmpty) {
@@ -194,27 +258,27 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             );
             await Stripe.instance.presentPaymentSheet();
           } catch (e) {
-            // BUG-15 FIX: Actually cancel the order on the backend instead of just saying it's cancelled.
-            try {
-              await apiClient.post(ApiEndpoints.customerCancelOrder(realOrderTrackingId.toString()), {'reason': 'Stripe payment failed: ${e.toString()}'});
-            } catch (_) {}
+            await _cancelOrderOnFailure(realOrderTrackingId.toString(), 'Stripe payment failed');
             if (mounted) {
+              final userMsg = _getUserFriendlyError(e, 'Payment failed. Please try again.');
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(
-                  content: Text('Payment failed: ${e.toString()}. Order has been cancelled.'),
+                  content: Text('$userMsg Your order has been cancelled.'),
                   duration: const Duration(seconds: 5),
                   backgroundColor: Colors.red,
+                  action: SnackBarAction(
+                    label: 'OK',
+                    textColor: Colors.white,
+                    onPressed: () {},
+                  ),
                 ),
               );
             }
             return;
           }
         } else {
-          // BUG-17 FIX: Cancel the orphan order before throwing.
-          try {
-            await apiClient.post(ApiEndpoints.customerCancelOrder(realOrderTrackingId.toString()), {'reason': 'No client secret from Stripe'});
-          } catch (_) {}
-          throw Exception('No client secret returned from checkout');
+          await _cancelOrderOnFailure(realOrderTrackingId.toString(), 'Stripe checkout failed: no client secret');
+          throw Exception('Unable to initialize payment. Please try again.');
         }
       } else if (_selectedPaymentMethod == 'wallet') {
         // Wallet checkout: deduct balance directly via /payment/checkout
@@ -230,10 +294,25 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               'return_url': '${ApiEndpoints.gatewayBase}/order-success',
               'cancel_url': '${ApiEndpoints.gatewayBase}/checkout',
             },
+            idempotencyKey: 'checkout_wallet_$_checkoutSessionNonce',
           );
         } catch (e) {
-          final msg = e.toString().replaceAll('Exception: ', '');
-          throw Exception(msg.contains('insufficient') ? msg : 'Wallet payment failed: $msg');
+          if (_isAlreadyPaidError(e)) {
+            await cart.clearCart();
+            if (mounted) {
+              await Navigator.pushAndRemoveUntil(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (_) => OrderSuccessScreen(trackingId: realOrderTrackingId.toString()),
+                ),
+                (route) => route.isFirst,
+              );
+            }
+            return;
+          }
+          await _cancelOrderOnFailure(realOrderTrackingId.toString(), 'Wallet payment failed');
+          final userMsg = _getUserFriendlyError(e, 'Wallet payment failed. Please try again.');
+          throw Exception(userMsg);
         }
       } else if (_selectedPaymentMethod == 'payfast') {
         // Collect card details from user (Option C Tokenized Flow)
@@ -256,20 +335,40 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             'cvv': cardDetails['cvv'],
             'customer_mobile_no': cardDetails['customer_mobile_no'],
           },
+          idempotencyKey: 'checkout_payfast_$_checkoutSessionNonce',
         ) as Map<String, dynamic>;
+
+        // Check for already paid error in response
+        final errorMsg = payfastResponse['error']?.toString() ?? '';
+        if (errorMsg.contains('already paid')) {
+          // Order already paid - show success instead of error
+          await cart.clearCart();
+          if (mounted) {
+            await Navigator.pushAndRemoveUntil(
+              context,
+              MaterialPageRoute<void>(
+                builder: (_) => OrderSuccessScreen(trackingId: realOrderTrackingId.toString()),
+              ),
+              (route) => route.isFirst,
+            );
+          }
+          return;
+        }
 
         final status = payfastResponse['status']?.toString();
         if (status == 'failed') {
-          throw Exception(payfastResponse['message'] ?? 'PayFast payment failed');
+          await _cancelOrderOnFailure(realOrderTrackingId.toString(), 'PayFast payment failed');
+          throw Exception(_getUserFriendlyError(payfastResponse['message'], 'Payment failed. Please try a different payment method.'));
         }
 
         // Handle 3DS Challenge redirect if gateway returned 3DS form HTML
-        if (status == '3ds_redirect' || payfastResponse['action'] == '3ds_redirect') {
+        if (status == '3ds_redirect') {
           final threedHtml = payfastResponse['threed_html']?.toString() ?? '';
           if (threedHtml.isNotEmpty && mounted) {
             final verified = await showPayFast3DSChallenge(context, threedHtml);
             if (!verified) {
-              throw Exception('3DS verification was cancelled or incomplete');
+              await _cancelOrderOnFailure(realOrderTrackingId.toString(), '3DS verification failed');
+              throw Exception('Payment verification failed. Please try again.');
             }
           }
         }
@@ -285,6 +384,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               ),
             );
           }
+        }
+
+        // Settlement pending or success - proceed to poll for order confirmation
+        if (status == 'settlement_pending' || status == 'success' || status == 'approved') {
+          // Payment authorized, proceed to confirmation polling
         }
       }
 
@@ -338,8 +442,31 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         );
       }
     } catch (e) {
+      if (_createdOrderTrackingId != null) {
+        final errStr = e.toString().toLowerCase();
+        final isNetworkError = errStr.contains('socketexception') ||
+            errStr.contains('timeout') ||
+            errStr.contains('connection') ||
+            errStr.contains('network') ||
+            errStr.contains('no internet');
+        if (isNetworkError) {
+          await _cancelOrderOnFailure(_createdOrderTrackingId!, 'Network error during payment');
+        }
+      }
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+        final userMsg = _getUserFriendlyError(e, 'Something went wrong. Please try again.');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(userMsg),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 4),
+            action: SnackBarAction(
+              label: 'OK',
+              textColor: Colors.white,
+              onPressed: () {},
+            ),
+          ),
+        );
       }
     } finally {
       if (mounted) setState(() => _isLoading = false);
@@ -394,7 +521,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                         ),
                         onPressed: _isLoading ? null : details.onStepContinue,
                         child: _isLoading
-                            ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                            ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
                             : Text(isLastStep ? 'Place Order' : 'Continue', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
                       ),
                     ),
@@ -428,7 +555,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                       if (_isFetchingLocation) ...[
                         const Row(
                           children: [
-                            SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)),
+                            SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2)),
                             SizedBox(width: 12),
                             Text('Fetching your location...'),
                           ],

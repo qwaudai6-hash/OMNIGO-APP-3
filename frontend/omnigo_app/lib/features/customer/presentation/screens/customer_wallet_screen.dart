@@ -58,6 +58,7 @@ class _CustomerWalletScreenState extends State<CustomerWalletScreen> {
     setState(() => _topUpInFlight = true);
     try {
       final api = ApiClient();
+      final nonce = '${gateway}_${DateTime.now().millisecondsSinceEpoch}';
       final resp = await api.post(
         ApiEndpoints.customerWalletLoad(),
         {
@@ -65,6 +66,7 @@ class _CustomerWalletScreenState extends State<CustomerWalletScreen> {
           'amount': amount,
           'currency': 'PKR',
         },
+        idempotencyKey: "wallet_topup_$nonce",
       );
       final redirectUrl = (resp as Map<String, dynamic>)['redirect_url']?.toString();
       if (redirectUrl == null || redirectUrl.isEmpty) {

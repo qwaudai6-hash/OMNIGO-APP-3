@@ -6,7 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"math"
+	"log"
 	"os"
 	"sync"
 
@@ -44,7 +44,7 @@ func NewService(db *pgxpool.Pool, tbService *TBService) *Service {
 }
 
 func generateSignature(entry LedgerEntry) string {
-	payload := fmt.Sprintf("%s:%s:%f:%s:%s", entry.TransactionID, entry.Account, entry.Amount, entry.ReferenceID, entry.IdempotencyKey)
+	payload := fmt.Sprintf("%s:%s:%d:%s:%s", entry.TransactionID, entry.Account, entry.Amount, entry.ReferenceID, entry.IdempotencyKey)
 	// We can't take a service method here because signature is a free
 	// function used in entry construction. The secret was already loaded
 	// at NewService() so we can read it via package-level var below.
@@ -68,6 +68,9 @@ func ledgerHMACSecret() []byte {
 			sec = os.Getenv("JWT_SECRET_KEY")
 		}
 		_hmacSecret = []byte(sec)
+		if sec == "" {
+			log.Printf("[Ledger] WARNING [LS-3]: HMAC_SECRET, INTERNAL_CALLBACK_SECRET, and JWT_SECRET_KEY are all unset. Ledger signatures will provide ZERO security.")
+		}
 	})
 	return _hmacSecret
 }
@@ -84,7 +87,7 @@ func (s *Service) Transfer(ctx context.Context, req TransferRequest) (uuid.UUID,
 		return uuid.Nil, fmt.Errorf("invalid credit account: %s", req.CreditAccount)
 	}
 	if req.Amount <= 0 {
-		return uuid.Nil, fmt.Errorf("transfer amount must be positive, got %f", req.Amount)
+		return uuid.Nil, fmt.Errorf("transfer amount must be positive, got %d paisa", req.Amount)
 	}
 	if req.DebitAccount == req.CreditAccount {
 		return uuid.Nil, fmt.Errorf("debit and credit accounts must be different")
@@ -162,7 +165,7 @@ func (s *Service) Transfer(ctx context.Context, req TransferRequest) (uuid.UUID,
 			ID:              tbID,
 			DebitAccountID:  AccountToUint128(req.DebitAccount),
 			CreditAccountID: AccountToUint128(req.CreditAccount),
-			Amount:          tb.ToUint128(uint64(math.Round(req.Amount * 100))), // Store as cents
+			Amount:          tb.ToUint128(uint64(req.Amount)), // Already in paisa (int64)
 			Ledger:          1,
 			Code:            1,
 		}
@@ -222,7 +225,7 @@ func (s *Service) MultiTransfer(ctx context.Context, reqs []TransferRequest) (uu
 			return uuid.Nil, fmt.Errorf("invalid credit account: %s", req.CreditAccount)
 		}
 		if req.Amount <= 0 {
-			return uuid.Nil, fmt.Errorf("transfer amount must be positive, got %f", req.Amount)
+			return uuid.Nil, fmt.Errorf("transfer amount must be positive, got %d paisa", req.Amount)
 		}
 		if req.Currency == "" {
 			req.Currency = "PKR"
@@ -274,7 +277,7 @@ func (s *Service) MultiTransfer(ctx context.Context, reqs []TransferRequest) (uu
 				ID:              tb.BytesToUint128(u),
 				DebitAccountID:  AccountToUint128(r.DebitAccount),
 				CreditAccountID: AccountToUint128(r.CreditAccount),
-				Amount:          tb.ToUint128(uint64(math.Round(r.Amount * 100))),
+				Amount:          tb.ToUint128(uint64(r.Amount)), // Already in paisa (int64)
 				Ledger:          1,
 				Code:            1,
 			})
@@ -293,7 +296,7 @@ func (s *Service) MultiTransfer(ctx context.Context, reqs []TransferRequest) (uu
 }
 
 // GetBalance returns the net balance for an account.
-func (s *Service) GetBalance(ctx context.Context, account Account) (float64, error) {
+func (s *Service) GetBalance(ctx context.Context, account Account) (int64, error) {
 	return s.repo.GetBalance(ctx, account)
 }
 

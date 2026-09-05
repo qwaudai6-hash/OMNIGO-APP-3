@@ -23,26 +23,26 @@ import (
 )
 
 type SettlementPayload struct {
-	InternalTxnID      string                   `json:"internal_txn_id"`
-	OrderID            string                   `json:"order_id"`
-	GatewayTxnID       string                   `json:"gateway_txn_id"`
-	StoreID            string                   `json:"store_id"`
-	VendorTrackingID   string                   `json:"vendor_tracking_id"`
-	DeliveryTrackingID string                   `json:"delivery_tracking_id"`
-	TotalAmount        float64                  `json:"total_amount"`
-	Currency           string                   `json:"currency"`
-	AdminRevenue       float64                  `json:"admin_revenue"`
-	VendorEscrow       float64                  `json:"vendor_escrow"`
-	DeliveryEscrow     float64                  `json:"delivery_escrow"`
-	IdempotencyKey     string                   `json:"idempotency_key"`
-	Transfers          []SettlementTransferItem `json:"transfers"`
+	InternalTxnID        string                   `json:"internal_txn_id"`
+	OrderID              string                   `json:"order_id"`
+	GatewayTxnID         string                   `json:"gateway_txn_id"`
+	StoreID              string                   `json:"store_id"`
+	VendorTrackingID     string                   `json:"vendor_tracking_id"`
+	DeliveryTrackingID   string                   `json:"delivery_tracking_id"`
+	TotalAmountPaisa     int64                    `json:"total_amount_paisa"`
+	Currency             string                   `json:"currency"`
+	AdminRevenuePaisa    int64                    `json:"admin_revenue_paisa"`
+	VendorEscrowPaisa    int64                    `json:"vendor_escrow_paisa"`
+	DeliveryEscrowPaisa  int64                    `json:"delivery_escrow_paisa"`
+	IdempotencyKey       string                   `json:"idempotency_key"`
+	Transfers            []SettlementTransferItem `json:"transfers"`
 }
 
 type SettlementTransferItem struct {
-	DebitAccount  string  `json:"debit_account"`
-	CreditAccount string  `json:"credit_account"`
-	Amount        float64 `json:"amount"`
-	Idempotency   string  `json:"idempotency"`
+	DebitAccount  string `json:"debit_account"`
+	CreditAccount string `json:"credit_account"`
+	AmountPaisa   int64  `json:"amount_paisa"`
+	Idempotency   string `json:"idempotency"`
 }
 
 // SettlementWorker polls and processes 'payment_settlement' outbox events and reconciles stuck payments.
@@ -74,6 +74,7 @@ func NewSettlementWorker(
 }
 
 // Start runs the settlement processing loop and gateway reconciliation loop.
+// FIX: Added health check ticker for database connectivity monitoring.
 func (w *SettlementWorker) Start(ctx context.Context) {
 	log.Println("[SettlementWorker] Starting background settlement and reconciliation worker...")
 
@@ -86,6 +87,9 @@ func (w *SettlementWorker) Start(ctx context.Context) {
 	cleanupTicker := time.NewTicker(5 * time.Minute)
 	defer cleanupTicker.Stop()
 
+	healthTicker := time.NewTicker(30 * time.Second)
+	defer healthTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -97,7 +101,29 @@ func (w *SettlementWorker) Start(ctx context.Context) {
 			w.reconcileStuckPayments(ctx)
 		case <-cleanupTicker.C:
 			w.cleanupStalePending(ctx)
+		case <-healthTicker.C:
+			w.checkDatabaseHealth(ctx)
 		}
+	}
+}
+
+// checkDatabaseHealth verifies database connectivity and logs warnings if issues detected.
+func (w *SettlementWorker) checkDatabaseHealth(ctx context.Context) {
+	if w.db == nil {
+		log.Printf("[SettlementWorker] CRITICAL: Database pool is nil!")
+		return
+	}
+
+	// Ping database to check connectivity
+	if err := w.db.Ping(ctx); err != nil {
+		log.Printf("[SettlementWorker] CRITICAL: Database ping failed: %v", err)
+	}
+
+	// Check for stale connections
+	stats := w.db.Stat()
+	if stats.IdleConns == 0 && stats.TotalConns > 5 {
+		log.Printf("[SettlementWorker] WARNING: All database connections are in use (%d/%d). High load detected.",
+			stats.TotalConns, stats.TotalConns)
 	}
 }
 
@@ -140,14 +166,15 @@ func (w *SettlementWorker) processPendingSettlements(ctx context.Context) {
 		return
 	}
 
-	// Mark claimed items as PROCESSING within the transaction
+	// FIX [SW-2]: Don't abort entire batch if one item fails to claim.
+	// Items that fail to claim will be picked up in the next poll cycle.
 	for _, item := range items {
 		if _, execErr := tx.Exec(ctx, `UPDATE outbox_events SET status = 'PROCESSING', updated_at = NOW() WHERE id = $1`, item.ID); execErr != nil {
-			log.Printf("[SettlementWorker] Failed to claim outbox event %d as PROCESSING: %v — aborting batch, will retry next poll", item.ID, execErr)
-			return
+			log.Printf("[SettlementWorker] Warning: failed to claim outbox event %d as PROCESSING: %v — will retry next poll", item.ID, execErr)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
+		log.Printf("[SettlementWorker] Warning: failed to commit claim transaction: %v", err)
 		return
 	}
 
@@ -157,8 +184,8 @@ func (w *SettlementWorker) processPendingSettlements(ctx context.Context) {
 			telemetry.ObserveSettlementDuration("failed", time.Since(itemStart))
 			log.Printf("[SettlementWorker] Error processing settlement outbox event %d: %v", item.ID, err)
 			if _, execErr := w.db.Exec(ctx,
-				`UPDATE outbox_events 
-				 SET status = 'PENDING', retry_count = retry_count + 1, error_message = $1, updated_at = NOW() 
+				`UPDATE outbox_events
+				 SET status = 'PENDING', retry_count = retry_count + 1, error_message = $1, updated_at = NOW()
 				 WHERE id = $2`,
 				err.Error(), item.ID,
 			); execErr != nil {
@@ -182,7 +209,7 @@ func (w *SettlementWorker) processSingleSettlement(ctx context.Context, eventID 
 	}
 
 	// 1. Create Escrow Hold for vendor — Mandatory fail-closed verification.
-	if payload.VendorEscrow > 0 && payload.StoreID != "" {
+	if payload.VendorEscrowPaisa > 0 && payload.StoreID != "" {
 		// CRITICAL FIX (escrow-vendor-id): holds MUST carry the VENDOR USER id
 		// (VEND-…), not the store id (STOR-…). PayoutWorker validates holds
 		// against users.tracking_id and EscrowReleaser credits vendor_wallet by
@@ -192,9 +219,9 @@ func (w *SettlementWorker) processSingleSettlement(ctx context.Context, eventID 
 			vendorID = payload.StoreID // legacy payload fallback
 			log.Printf("[SettlementWorker] WARNING: payload missing vendor_tracking_id for order %s — falling back to store id %s", payload.OrderID, payload.StoreID)
 		}
-		if err := w.escrow.CreateHold(ctx, payload.OrderID, vendorID, payload.VendorEscrow); err != nil {
-			log.Printf("[SettlementWorker] CRITICAL: Escrow hold creation failed for order %s (Store: %s, Amount: %.2f): %v",
-				payload.OrderID, payload.StoreID, payload.VendorEscrow, err)
+		if err := w.escrow.CreateHold(ctx, payload.OrderID, vendorID, payload.VendorEscrowPaisa); err != nil {
+			log.Printf("[SettlementWorker] CRITICAL: Escrow hold creation failed for order %s (Store: %s, Amount: %d paisa): %v",
+				payload.OrderID, payload.StoreID, payload.VendorEscrowPaisa, err)
 			return fmt.Errorf("mandatory escrow hold creation failed: %w", err)
 		}
 	}
@@ -202,13 +229,13 @@ func (w *SettlementWorker) processSingleSettlement(ctx context.Context, eventID 
 	// 2. Execute Ledger MultiTransfer (Atomic all-or-nothing double-entry split)
 	var transferReqs []ledger.TransferRequest
 	for _, tr := range payload.Transfers {
-		if tr.Amount <= 0 {
+		if tr.AmountPaisa <= 0 {
 			continue
 		}
 		transferReqs = append(transferReqs, ledger.TransferRequest{
 			DebitAccount:   ledger.Account(tr.DebitAccount),
 			CreditAccount:  ledger.Account(tr.CreditAccount),
-			Amount:         tr.Amount,
+			Amount:         tr.AmountPaisa,
 			Currency:       currency,
 			ReferenceType:  "order",
 			ReferenceID:    payload.OrderID,
@@ -260,8 +287,8 @@ func (w *SettlementWorker) processSingleSettlement(ctx context.Context, eventID 
 		return fmt.Errorf("failed to commit db settlement: %w", err)
 	}
 
-	log.Printf("[SettlementWorker] Successfully completed settlement for Order %s (Txn %s, Amount: %.2f %s)",
-		payload.OrderID, payload.InternalTxnID, payload.TotalAmount, currency)
+	log.Printf("[SettlementWorker] Successfully completed settlement for Order %s (Txn %s, Amount: %d paisa %s)",
+		payload.OrderID, payload.InternalTxnID, payload.TotalAmountPaisa, currency)
 	return nil
 }
 
@@ -291,19 +318,19 @@ func (w *SettlementWorker) reconcileStuckPayments(ctx context.Context) {
 	}
 	defer rows.Close()
 
-	type StuckTxn struct {
-		InternalTxnID string
-		OrderID       string
-		GatewayTxnID  string
-		Amount        float64
-		Status        string
-		CreatedAt     time.Time
-	}
+type StuckTxn struct {
+	InternalTxnID string
+	OrderID       string
+	GatewayTxnID  string
+	AmountPaisa   int64
+	Status        string
+	CreatedAt     time.Time
+}
 
 	var list []StuckTxn
 	for rows.Next() {
 		var p StuckTxn
-		if err := rows.Scan(&p.InternalTxnID, &p.OrderID, &p.GatewayTxnID, &p.Amount, &p.Status, &p.CreatedAt); err == nil {
+		if err := rows.Scan(&p.InternalTxnID, &p.OrderID, &p.GatewayTxnID, &p.AmountPaisa, &p.Status, &p.CreatedAt); err == nil {
 			list = append(list, p)
 		}
 	}
@@ -362,7 +389,7 @@ func (w *SettlementWorker) reconcileStuckPayments(ctx context.Context) {
 			// Verify amount in paisa if returned by gateway
 			if statusRes.TxnAmt != "" {
 				if gatewayAmt, err := strconv.ParseFloat(statusRes.TxnAmt, 64); err == nil {
-					expectedPaisa := int64(math.Round(p.Amount * 100))
+					expectedPaisa := p.AmountPaisa
 					gatewayPaisa := int64(math.Round(gatewayAmt * 100))
 					if expectedPaisa != gatewayPaisa {
 						log.Printf("[SettlementWorker] Reconciliation amount mismatch for %s: expected %d paisa, got %d paisa", p.InternalTxnID, expectedPaisa, gatewayPaisa)
@@ -385,7 +412,7 @@ func (w *SettlementWorker) reconcileStuckPayments(ctx context.Context) {
 
 			log.Printf("[SettlementWorker] Reconciliation verified SUCCESS for %s (%s). Enqueuing atomic settlement...", p.InternalTxnID, resolvedGatewayTxnID)
 			telemetry.RecordReconciliationOutcome("settled")
-			w.enqueueSettlementOutbox(ctx, p.InternalTxnID, p.OrderID, resolvedGatewayTxnID, p.Amount)
+			w.enqueueSettlementOutbox(ctx, p.InternalTxnID, p.OrderID, resolvedGatewayTxnID, p.AmountPaisa)
 		} else if statusRes.StatusCode != "" && !payfast.IsSuccessCode(statusRes.StatusCode) {
 			log.Printf("[SettlementWorker] Reconciliation verified REJECTION for %s: %s (code: %s)", p.InternalTxnID, statusRes.StatusMsg, statusRes.StatusCode)
 			if _, execErr := w.db.Exec(ctx,
@@ -400,18 +427,36 @@ func (w *SettlementWorker) reconcileStuckPayments(ctx context.Context) {
 }
 
 // cleanupStalePending marks abandoned 'pending' and '3ds_required' rows (>15m old) as failed.
+// FIX: Also cleans up outbox_events that have exceeded max retry count.
 func (w *SettlementWorker) cleanupStalePending(ctx context.Context) {
+	// Clean up stale payment_transactions
 	res, err := w.db.Exec(ctx,
-		`UPDATE payment_transactions 
+		`UPDATE payment_transactions
 		 SET status = 'failed', error_message = 'Payment initiation abandoned or 3DS session expired', updated_at = NOW()
 		 WHERE status IN ('pending', '3ds_required') AND created_at < NOW() - INTERVAL '15 minutes'`,
 	)
 	if err == nil && res.RowsAffected() > 0 {
 		log.Printf("[SettlementWorker] Cleaned up %d stale abandoned/3DS payment attempts", res.RowsAffected())
 	}
+
+	// Clean up outbox_events that have exceeded max retries (moved to FAILED status for manual intervention)
+	const maxRetries = 10
+	res, err = w.db.Exec(ctx,
+		`UPDATE outbox_events
+		 SET status = 'FAILED', error_message = 'Max retries exceeded - manual intervention required',
+		     updated_at = NOW()
+		 WHERE topic = 'payment_settlement'
+		   AND status = 'PENDING'
+		   AND retry_count >= $1
+		   AND updated_at < NOW() - INTERVAL '5 minutes'`,
+		maxRetries,
+	)
+	if err == nil && res.RowsAffected() > 0 {
+		log.Printf("[SettlementWorker] CRITICAL: Marked %d outbox events as FAILED after max retries - manual intervention required", res.RowsAffected())
+	}
 }
 
-func (w *SettlementWorker) enqueueSettlementOutbox(ctx context.Context, internalTxnID, orderID, gatewayTxnID string, amount float64) {
+func (w *SettlementWorker) enqueueSettlementOutbox(ctx context.Context, internalTxnID, orderID, gatewayTxnID string, amountPaisa int64) {
 	tx, err := w.db.Begin(ctx)
 	if err != nil {
 		log.Printf("[SettlementWorker] Failed to begin transaction for reconciliation of order %s: %v", orderID, err)
@@ -448,7 +493,7 @@ func (w *SettlementWorker) enqueueSettlementOutbox(ctx context.Context, internal
 		}
 	}
 
-	split, err := w.calculator.CalculateSplit(ctx, amount, storeID, deliveryTrackingID)
+	split, err := w.calculator.CalculateSplit(ctx, amountPaisa, storeID, deliveryTrackingID)
 	if err != nil {
 		log.Printf("[SettlementWorker] Error calculating split for order %s: %v", orderID, err)
 		return
@@ -464,13 +509,13 @@ func (w *SettlementWorker) enqueueSettlementOutbox(ctx context.Context, internal
 		{
 			DebitAccount:  string(ledger.AccountPayFastHolding),
 			CreditAccount: string(ledger.AccountAdminRevenue),
-			Amount:        split.AdminRevenue,
+			AmountPaisa:   split.AdminRevenue,
 			Idempotency:   idempotencyKey + ":admin",
 		},
 		{
 			DebitAccount:  string(ledger.AccountPayFastHolding),
 			CreditAccount: string(ledger.AccountVendorLockedEscrow),
-			Amount:        split.VendorEscrow,
+			AmountPaisa:   split.VendorEscrow,
 			Idempotency:   idempotencyKey + ":vendor",
 		},
 	}
@@ -478,25 +523,25 @@ func (w *SettlementWorker) enqueueSettlementOutbox(ctx context.Context, internal
 		transfers = append(transfers, SettlementTransferItem{
 			DebitAccount:  string(ledger.AccountPayFastHolding),
 			CreditAccount: string(ledger.AccountCentralEscrow),
-			Amount:        split.DeliveryEscrow,
+			AmountPaisa:   split.DeliveryEscrow,
 			Idempotency:   idempotencyKey + ":delivery",
 		})
 	}
 
 	outboxPayload, err := json.Marshal(SettlementPayload{
-		InternalTxnID:      internalTxnID,
-		OrderID:            orderID,
-		GatewayTxnID:       gatewayTxnID,
-		StoreID:            storeID,
-		VendorTrackingID:   vendorTrackID,
-		DeliveryTrackingID: deliveryTrackingID,
-		TotalAmount:        amount,
-		Currency:           currency,
-		AdminRevenue:       split.AdminRevenue,
-		VendorEscrow:       split.VendorEscrow,
-		DeliveryEscrow:     split.DeliveryEscrow,
-		IdempotencyKey:     idempotencyKey,
-		Transfers:          transfers,
+		InternalTxnID:        internalTxnID,
+		OrderID:              orderID,
+		GatewayTxnID:         gatewayTxnID,
+		StoreID:              storeID,
+		VendorTrackingID:     vendorTrackID,
+		DeliveryTrackingID:   deliveryTrackingID,
+		TotalAmountPaisa:     amountPaisa,
+		Currency:             currency,
+		AdminRevenuePaisa:    split.AdminRevenue,
+		VendorEscrowPaisa:    split.VendorEscrow,
+		DeliveryEscrowPaisa:  split.DeliveryEscrow,
+		IdempotencyKey:       idempotencyKey,
+		Transfers:            transfers,
 	})
 	if err != nil {
 		log.Printf("[SettlementWorker] Failed to marshal outbox payload for reconciliation %s: %v", orderID, err)

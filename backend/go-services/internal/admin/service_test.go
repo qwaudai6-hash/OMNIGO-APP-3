@@ -53,6 +53,8 @@ func TestResolveDispute_IsTransactional(t *testing.T) {
 		`_, _ = s.dbWriter.Exec(ctx, "UPDATE escrow_holds SET status = 'refunded'`,
 		`_, _ = s.dbWriter.Exec(ctx, "UPDATE rider_wallet SET balance = balance - $1`,
 		`_, _ = s.dbWriter.Exec(ctx, "UPDATE vendor_wallet SET balance = balance - $1`,
+		`"UPDATE rider_wallet SET balance = balance - $1`,
+		`"UPDATE vendor_wallet SET balance = balance - $1`,
 	}
 	for _, p := range buggyPatterns {
 		if strings.Contains(src, p) {

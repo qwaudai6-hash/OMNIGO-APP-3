@@ -318,6 +318,22 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
     ).then((_) => commentController.dispose());
   }
 
+  // C-4 FIX: Cancel order on payment failure to release stock
+  Future<void> _cancelOrderOnFailure(String orderId, String reason) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('jwt_token') ?? '';
+      await http.post(
+        Uri.parse(ApiEndpoints.customerCancelOrder(orderId)),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+        body: jsonEncode({'reason': reason}),
+      );
+    } catch (_) {}
+  }
+
   Future<void> _executeCheckout() async {
     if (_isCheckoutProcessing) return;
 
@@ -339,7 +355,11 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
           permission = await Geolocator.requestPermission();
         }
         if (permission == LocationPermission.whileInUse || permission == LocationPermission.always) {
-          final pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high, timeLimit: const Duration(seconds: 8));
+          // B3 FIX: Use new LocationSettings API (geolocator 13+ deprecated
+          // desiredAccuracy/timeLimit parameters). Matches other call sites in app.
+          final pos = await Geolocator.getCurrentPosition(
+            locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+          );
           dropoffLat = pos.latitude;
           dropoffLng = pos.longitude;
         }
@@ -443,17 +463,70 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
                 ),
               );
               await Stripe.instance.presentPaymentSheet();
+              // B9 FIX: After Stripe PaymentSheet succeeds, navigate to
+              // OrderSuccessScreen with pending=true (waiting for webhook to confirm).
+              // Without this fix, user saw unconditional green "Order Placed!" even
+              // though the backend hadn't yet marked the order as paid.
+              if (mounted) {
+                await prefs.remove('pending_nonce');
+                await prefs.remove('pending_order_product');
+                await prefs.remove('pending_order_status');
+                await Navigator.pushAndRemoveUntil(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => OrderSuccessScreen(
+                      trackingId: realOrderTrackingId,
+                      pending: true,
+                    ),
+                  ),
+                  (route) => route.isFirst,
+                );
+              }
+              return;
             } catch (e) {
               if (mounted) {
                 setState(() => _isCheckoutProcessing = false);
                 _showErrorDialog('Payment was cancelled or failed: $e');
               }
+              // C-4 FIX: Cancel order on payment failure to release reserved stock
+              await _cancelOrderOnFailure(realOrderTrackingId, 'Stripe payment failed: $e');
               await prefs.remove('pending_nonce');
               await prefs.remove('pending_order_product');
               await prefs.remove('pending_order_status');
               return;
             }
           }
+        } else {
+          // C-4 FIX: Cancel order on Stripe checkout failure to release reserved stock
+          if (mounted) setState(() => _isCheckoutProcessing = false);
+          final errBody = jsonDecode(checkoutResponse.body) as Map<String, dynamic>? ?? {};
+          String errMsg = errBody['error']?.toString() ?? 'Stripe checkout failed. Server returned ${checkoutResponse.statusCode}';
+          if (checkoutResponse.statusCode == 409) {
+            errMsg = 'Order has already been paid. Please refresh to see your order status.';
+            // Show success screen for already paid
+            if (mounted) {
+              await prefs.remove('pending_nonce');
+              await prefs.remove('pending_order_product');
+              await prefs.remove('pending_order_status');
+              await Navigator.pushAndRemoveUntil(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (_) => OrderSuccessScreen(
+                    trackingId: realOrderTrackingId,
+                    pending: false,
+                  ),
+                ),
+                (route) => route.isFirst,
+              );
+              return;
+            }
+          }
+          if (mounted) _showErrorDialog(errMsg);
+          await _cancelOrderOnFailure(realOrderTrackingId, 'Stripe checkout failed: ${checkoutResponse.statusCode}');
+          await prefs.remove('pending_nonce');
+          await prefs.remove('pending_order_product');
+          await prefs.remove('pending_order_status');
+          return;
         }
       } else if (paymentChoice == 'wallet') {
         // Wallet balance checkout: deduct directly via /payment/checkout
@@ -463,6 +536,9 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
           headers: {
             'Content-Type': 'application/json',
             'Authorization': 'Bearer $token',
+            // Idempotency-Key: a network-level retry of this exact Buy Now
+            // checkout replays the original attempt instead of double-charging.
+            'Idempotency-Key': 'buynow-$nonce',
           },
           body: jsonEncode({
             'gateway': 'wallet',
@@ -486,7 +562,37 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
           }
         } else {
           if (mounted) setState(() => _isCheckoutProcessing = false);
-          if (mounted) _showErrorDialog('Wallet payment failed. Server returned ${walletCheckoutResp.statusCode}');
+          String errorMsg = 'Wallet payment failed. Server returned ${walletCheckoutResp.statusCode}';
+          try {
+            final errorData = jsonDecode(walletCheckoutResp.body) as Map<String, dynamic>;
+            final backendError = errorData['error']?.toString();
+            if (backendError != null && backendError.isNotEmpty) {
+              errorMsg = backendError;
+            }
+          } catch (_) {}
+          if (walletCheckoutResp.statusCode == 409) {
+            errorMsg = 'Order has already been paid. Please refresh to see your order status.';
+            // Show success screen for already paid
+            if (mounted) {
+              await prefs.remove('pending_nonce');
+              await prefs.remove('pending_order_product');
+              await prefs.remove('pending_order_status');
+              await Navigator.pushAndRemoveUntil(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (_) => OrderSuccessScreen(
+                    trackingId: realOrderTrackingId,
+                    pending: false,
+                  ),
+                ),
+                (route) => route.isFirst,
+              );
+              return;
+            }
+          }
+          if (mounted) _showErrorDialog(errorMsg);
+          // C-4 FIX: Cancel order on payment failure to release reserved stock
+          await _cancelOrderOnFailure(realOrderTrackingId, 'Wallet payment failed: ${walletCheckoutResp.statusCode}');
           await prefs.remove('pending_nonce');
           await prefs.remove('pending_order_product');
           await prefs.remove('pending_order_status');
@@ -520,16 +626,55 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
               await launchUrl(uri, mode: LaunchMode.externalApplication);
             }
           }
-          // Order will be confirmed via webhook after payment.
-          if (mounted) setState(() => _isCheckoutProcessing = false);
-          if (mounted) _showPaymentPendingDialog(nonce, method: paymentChoice == 'jazzcash' ? 'JazzCash' : 'EasyPaisa');
-          await prefs.remove('pending_nonce');
-          await prefs.remove('pending_order_product');
-          await prefs.remove('pending_order_status');
+          // B1 FIX: Order will be confirmed via webhook after payment.
+          // Navigate to OrderSuccessScreen with pending=true instead of just
+          // showing a dialog and returning to product page.
+          if (mounted) {
+            await prefs.remove('pending_nonce');
+            await prefs.remove('pending_order_product');
+            await prefs.remove('pending_order_status');
+            await Navigator.pushAndRemoveUntil(
+              context,
+              MaterialPageRoute<void>(
+                builder: (_) => OrderSuccessScreen(
+                  trackingId: realOrderTrackingId,
+                  pending: true,
+                ),
+              ),
+              (route) => route.isFirst,
+            );
+          }
           return;
         } else {
           if (mounted) setState(() => _isCheckoutProcessing = false);
-          if (mounted) _showErrorDialog('Failed to initiate wallet payment. Server returned ${walletResponse.statusCode}');
+          String errorMsg = 'Failed to initiate wallet payment. Server returned ${walletResponse.statusCode}';
+          try {
+            final errorData = jsonDecode(walletResponse.body) as Map<String, dynamic>;
+            final backendError = errorData['error']?.toString();
+            if (backendError != null && backendError.isNotEmpty) {
+              errorMsg = backendError;
+            }
+          } catch (_) {}
+          if (walletResponse.statusCode == 409) {
+            errorMsg = 'Order has already been paid. Please refresh to see your order status.';
+            // Show success screen for already paid
+            if (mounted) {
+              await Navigator.pushAndRemoveUntil(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (_) => OrderSuccessScreen(
+                    trackingId: realOrderTrackingId,
+                    pending: false,
+                  ),
+                ),
+                (route) => route.isFirst,
+              );
+              return;
+            }
+          }
+          if (mounted) _showErrorDialog(errorMsg);
+          // C-4 FIX: Cancel order on payment failure to release reserved stock
+          await _cancelOrderOnFailure(realOrderTrackingId, 'JazzCash/EasyPaisa init failed: ${walletResponse.statusCode}');
           await prefs.remove('pending_nonce');
           await prefs.remove('pending_order_product');
           await prefs.remove('pending_order_status');
@@ -573,9 +718,31 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
         if (payfastResponse.statusCode != 200) {
           if (mounted) setState(() => _isCheckoutProcessing = false);
           final errBody = jsonDecode(payfastResponse.body) as Map<String, dynamic>? ?? {};
-          final errMsg = errBody['error']?.toString() ??
+          String errMsg = errBody['error']?.toString() ??
               'Failed to initiate PayFast payment. Server returned ${payfastResponse.statusCode}';
+          if (payfastResponse.statusCode == 409) {
+            errMsg = 'Order has already been paid. Please refresh to see your order status.';
+            // Show success screen for already paid
+            await prefs.remove('pending_nonce');
+            await prefs.remove('pending_order_product');
+            await prefs.remove('pending_order_status');
+            if (mounted) {
+              await Navigator.pushAndRemoveUntil(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (_) => OrderSuccessScreen(
+                    trackingId: realOrderTrackingId,
+                    pending: false,
+                  ),
+                ),
+                (route) => route.isFirst,
+              );
+              return;
+            }
+          }
           if (mounted) _showErrorDialog(errMsg);
+          // C-4 FIX: Cancel order on payment failure to release reserved stock
+          await _cancelOrderOnFailure(realOrderTrackingId, 'PayFast init failed: ${payfastResponse.statusCode}');
           return;
         }
 
@@ -584,6 +751,8 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
         if (status == 'failed') {
           if (mounted) setState(() => _isCheckoutProcessing = false);
           if (mounted) _showErrorDialog(pfData['message']?.toString() ?? 'PayFast payment failed');
+          // C-4 FIX: Cancel order on payment failure to release reserved stock
+          await _cancelOrderOnFailure(realOrderTrackingId, 'PayFast payment failed: ${pfData['message']}');
           return;
         }
 
@@ -604,11 +773,29 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
                 ),
               );
             }
+            // B1 FIX: Navigate to OrderSuccessScreen with pending=true (payment still processing)
+            // Instead of returning to product page, show the order tracking screen.
+            if (mounted) {
+              await prefs.remove('pending_nonce');
+              await prefs.remove('pending_order_product');
+              await prefs.remove('pending_order_status');
+              await Navigator.pushAndRemoveUntil(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (_) => OrderSuccessScreen(
+                    trackingId: realOrderTrackingId,
+                    pending: true,
+                  ),
+                ),
+                (route) => route.isFirst,
+              );
+            }
+            return;
           } else {
             if (mounted) setState(() => _isCheckoutProcessing = false);
             if (mounted) _showErrorDialog('Payment gateway returned no redirect URL');
+            return;
           }
-          return;
         }
 
         // 3DS step-up: render the bank challenge; the ACS posts its result to the
@@ -618,9 +805,23 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
           if (threedHtml.isNotEmpty && mounted) {
             final verified = await showPayFast3DSChallenge(context, threedHtml);
             if (!verified) {
+              // B2 FIX: Cancel the order on backend so stock is released immediately
+              // instead of waiting 30 minutes for OrderTimeoutWorker.
+              try {
+                final cancelResp = await http.post(
+                  Uri.parse(ApiEndpoints.customerCancelOrder(realOrderTrackingId)),
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ${prefs.getString('jwt_token') ?? ''}',
+                  },
+                );
+                debugPrint('3DS cancel: backend cancel response ${cancelResp.statusCode}');
+              } catch (e) {
+                debugPrint('3DS cancel: backend cancel failed: $e');
+              }
               if (mounted) setState(() => _isCheckoutProcessing = false);
               if (mounted) {
-                _showErrorDialog('3DS verification was cancelled or incomplete. Your order is saved as pending.');
+                _showErrorDialog('3DS verification was cancelled. Your order has been cancelled.');
               }
               return;
             }
@@ -682,29 +883,9 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
     );
   }
 
-  void _showPaymentPendingDialog(String nonce, {String method = 'PayFast'}) {
-    showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text('Payment Pending', style: TextStyle(color: Colors.orange)),
-        content: Text(
-          'You are being redirected to $method to complete your payment.\n\n'
-          'Your order (Ref: $nonce) will be confirmed once payment is received.\n'
-          'Please do not close this screen.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              Navigator.pop(context);
-            },
-            child: const Text('OK'),
-          ),
-        ],
-      ),
-    );
-  }
+  // B7 FIX: _showPaymentPendingDialog removed — no longer called after B1 fix
+  // (PayFast/JazzCash/EasyPaisa now navigate to OrderSuccessScreen with
+  // pending=true instead of showing a dialog and returning to product page).
 
   @override
   Widget build(BuildContext context) {
@@ -993,7 +1174,7 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
                   // Quantity Selector + Checkout Buttons
                   const SizedBox(height: 16),
 
-                  // Quantity Stepper
+                  // Quantity Stepper - disabled during checkout processing
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -1003,30 +1184,37 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
                       ),
                       Container(
                         decoration: BoxDecoration(
-                          border: Border.all(color: Colors.grey.shade300),
+                          border: Border.all(color: _isCheckoutProcessing ? Colors.grey.shade200 : Colors.grey.shade300),
                           borderRadius: BorderRadius.circular(16),
+                          color: _isCheckoutProcessing ? Colors.grey.shade100 : Colors.white,
                         ),
                         child: Row(
                           children: [
                             IconButton(
-                              icon: const Icon(Icons.remove_rounded, color: AppTheme.blackAccent),
-                              onPressed: _quantity > 1
-                                  ? () => setState(() => _quantity--)
-                                  : null,
+                              icon: Icon(
+                                Icons.remove_rounded,
+                                color: _isCheckoutProcessing ? Colors.grey : AppTheme.blackAccent,
+                              ),
+                              onPressed: _isCheckoutProcessing || _quantity <= 1
+                                  ? null
+                                  : () => setState(() => _quantity--),
                             ),
                             Text(
                               '$_quantity',
-                              style: const TextStyle(
+                              style: TextStyle(
                                 fontSize: 18,
                                 fontWeight: FontWeight.bold,
-                                color: AppTheme.blackAccent,
+                                color: _isCheckoutProcessing ? Colors.grey : AppTheme.blackAccent,
                               ),
                             ),
                             IconButton(
-                              icon: const Icon(Icons.add_rounded, color: AppTheme.blackAccent),
-                              onPressed: _quantity < _maxQuantity
-                                  ? () => setState(() => _quantity++)
-                                  : null,
+                              icon: Icon(
+                                Icons.add_rounded,
+                                color: _isCheckoutProcessing ? Colors.grey : AppTheme.blackAccent,
+                              ),
+                              onPressed: _isCheckoutProcessing || _quantity >= _maxQuantity
+                                  ? null
+                                  : () => setState(() => _quantity++),
                             ),
                           ],
                         ),
@@ -1164,7 +1352,7 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
         ),
         child: const Center(
           child: SizedBox(
-            width: 20, height: 20,
+            width: 24, height: 24,
             child: CircularProgressIndicator(strokeWidth: 2, color: Colors.grey),
           ),
         ),

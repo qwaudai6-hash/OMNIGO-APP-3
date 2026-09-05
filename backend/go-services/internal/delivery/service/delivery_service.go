@@ -40,6 +40,9 @@ type DeliveryService struct {
 	repo         *repository.DeliveryRepository
 	kafka        *messaging.KafkaClient
 	redis        redis.UniversalClient
+	streams      *StreamPublisher
+	proximity    *RiderProximitySearch
+	bidTTL       *BidTTLManager
 	osrmURL      string
 	httpClient   *http.Client
 	walletCredit *walletSvc.RiderWalletService
@@ -50,13 +53,19 @@ func NewDeliveryService(repo *repository.DeliveryRepository, kafka *messaging.Ka
 	if osrmURL == "" {
 		osrmURL = "https://router.project-osrm.org"
 	}
-	return &DeliveryService{
+	svc := &DeliveryService{
 		repo:       repo,
 		kafka:      kafka,
 		redis:      rdb,
 		osrmURL:    strings.TrimRight(osrmURL, "/"),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
+	if rdb != nil {
+		svc.streams = NewStreamPublisher(rdb)
+		svc.proximity = NewRiderProximitySearch(rdb)
+		svc.bidTTL = NewBidTTLManager(rdb)
+	}
+	return svc
 }
 
 // WithRiderWallet attaches the rider earnings service so completed deliveries
@@ -389,13 +398,15 @@ func (s *DeliveryService) UpdateGigStatus(ctx context.Context, trackingID string
 	if req.Status == models.StatusCompleted && s.walletCredit != nil && assignedRider != "" {
 		// Retry ledger transfer up to 3 times before giving up.
 		var creditErr error
+		riderEarningPaisa := int64(gig.RiderEarning * 100)
+		adminCommissionPaisa := int64(gig.AdminCommission * 100)
 		for attempt := 0; attempt < 3; attempt++ {
 			creditErr = s.walletCredit.CreditDelivery(
 				ctx,
 				assignedRider,
 				trackingID,
-				gig.RiderEarning,
-				gig.AdminCommission,
+				riderEarningPaisa,
+				adminCommissionPaisa,
 			)
 			if creditErr == nil {
 				break
@@ -428,43 +439,29 @@ func (s *DeliveryService) UpdateGigStatus(ctx context.Context, trackingID string
 		}
 
 		if gig.IsCOD {
+			orderTotalPaisa := int64(gig.OrderTotal * 100)
 			// Record rider cash collection liability.
-			if err := s.walletCredit.AddCODCollection(ctx, assignedRider, gig.OrderTotal); err != nil {
+			if err := s.walletCredit.AddCODCollection(ctx, assignedRider, orderTotalPaisa); err != nil {
 				log.Printf("Warning: failed to add COD collection to wallet for rider %s: %v", assignedRider, err)
 			}
 
 			// Ensure active debt record is created so the rider sees it and can settle via JazzCash/EasyPaisa
-			if err := s.repo.RecordCODDebt(ctx, gig.OrderTrackingID, assignedRider, gig.OrderTotal); err != nil {
+			if err := s.repo.RecordCODDebt(ctx, gig.OrderTrackingID, assignedRider, orderTotalPaisa); err != nil {
 				log.Printf("Warning: failed to record COD debt for rider %s: %v", assignedRider, err)
 			}
 
-			// Move collected cash into central escrow so the platform can split it.
-			if s.codService != nil {
-				if err := s.codService.OnCashCollected(ctx, gig.OrderTrackingID, gig.OrderTotal); err != nil {
-					log.Printf("Warning: COD cash collected ledger transfer failed for order %s: %v", gig.OrderTrackingID, err)
-				}
-
-				// Release COD escrow split using the gig's own store/vendor tracking
-				// and the rider earning recorded on the gig.
-				if err := s.codService.ReleaseAfterDelivery(
-					ctx,
-					gig.OrderTrackingID,
-					gig.VendorStoreTrackID,
-					gig.AssignedRiderID,
-					gig.OrderTotal,
-					gig.AdminCommission,
-					gig.RiderEarning,
-				); err != nil {
-					log.Printf("Warning: COD release after delivery failed for order %s: %v", gig.OrderTrackingID, err)
-				}
+			// H4 BOOKKEEPING FIX: Create the rider_cod_debt ledger entry here.
+			// This is the single source of truth — if Confirm endpoint was never called,
+			// the rider_cod_debt account will still be credited so SettleWebhook's debit
+			// doesn't leave the account negative. Idempotent via orderTrackingID key.
+			if err := s.walletCredit.CreateCODDebtLedger(ctx, gig.OrderTrackingID, orderTotalPaisa); err != nil {
+				log.Printf("Warning: failed to create COD debt ledger for order %s: %v", gig.OrderTrackingID, err)
 			}
 
-			// FIX C1+C2: Removed SettleCODVendorAndDebt call.
-			// The ReleaseAfterDelivery above already splits central_escrow →
-			// admin_revenue + vendor_locked_escrow via the ledger. The PayoutWorker
-			// will release the vendor portion after the 48-hour escrow hold.
-			// The old SettleCODVendorAndDebt was double-crediting the vendor
-			// (direct wallet credit + PayoutWorker credit from escrow hold).
+			// NOTE: Settlement ledger entries and escrow hold are created by cod_handler.SettleWebhook
+			// when the rider deposits cash via JazzCash/EasyPaisa. We do NOT create them here
+			// because at this point the rider is still holding the cash — the platform hasn't
+			// received it yet. Creating settlement entries now would cause double-counting.
 		}
 	}
 
@@ -1064,8 +1061,13 @@ func (s *DeliveryService) CreateRideBid(ctx context.Context, req *models.CreateB
 		return nil, fmt.Errorf("failed to persist bid: %w", err)
 	}
 
-	// Publish RIDE_BID_BROADCAST to Redis pub/sub (best-effort — non-critical)
-	if s.redis != nil {
+	// Mark as searching in Redis with TTL (best-effort)
+	if s.bidTTL != nil {
+		_ = s.bidTTL.MarkBidSearching(ctx, bidID, req.PickupLng, req.PickupLat)
+	}
+
+	// Publish RIDE_BID_BROADCAST via Redis Stream (durable — survives disconnects)
+	if s.streams != nil {
 		broadcastPayload := map[string]interface{}{
 			"action":               "RIDE_BID_BROADCAST",
 			"bid_id":               bidID,
@@ -1078,14 +1080,13 @@ func (s *DeliveryService) CreateRideBid(ctx context.Context, req *models.CreateB
 			"dropoff_lng":          req.DropoffLng,
 			"timestamp":            time.Now().UnixMilli(),
 		}
-		bytes, _ := json.Marshal(broadcastPayload)
-		s.redis.Publish(ctx, "rider:events", string(bytes))
+		_ = s.streams.Publish(ctx, StreamRiderEvents, broadcastPayload)
 	}
 
 	return bid, nil
 }
 
-// SubmitCounterBid processes a rider's counter-offer and pushes it to the customer via WebSocket.
+// SubmitCounterBid processes a rider's counter-offer and pushes it to the customer via Redis Stream.
 func (s *DeliveryService) SubmitCounterBid(ctx context.Context, req *models.CounterBidRequest) error {
 	// Persist to Postgres (required — counter-bid must be durable)
 	counter := &models.DeliveryCounterBid{
@@ -1101,9 +1102,8 @@ func (s *DeliveryService) SubmitCounterBid(ctx context.Context, req *models.Coun
 		return fmt.Errorf("failed to persist counter-bid: %w", err)
 	}
 
-	// Publish to Redis (best-effort — non-critical for durability)
-	if s.redis == nil {
-		// Redis down — counter-bid is persisted, real-time delivery degraded
+	// Publish to Redis Stream (durable — survives disconnects)
+	if s.streams == nil {
 		return nil
 	}
 
@@ -1118,24 +1118,19 @@ func (s *DeliveryService) SubmitCounterBid(ctx context.Context, req *models.Coun
 		"eta":           req.ETA,
 		"timestamp":     time.Now().UnixMilli(),
 	}
-	bytes, err := json.Marshal(offerPayload)
-	if err != nil {
-		return err
-	}
 
-	// Broadcast counter offer to the customer session channel
-	return s.redis.Publish(ctx, "customer:events", string(bytes)).Err()
+	return s.streams.Publish(ctx, StreamCustomerEvents, offerPayload)
 }
 
-// AcceptCounterBid accepts a rider's counter-offer, updating DB and notifying riders.
+// AcceptCounterBid accepts a rider's counter-offer, updating DB and notifying riders via Redis Stream.
 func (s *DeliveryService) AcceptCounterBid(ctx context.Context, bidID string, counterID int64) (*models.DeliveryCounterBid, error) {
 	counter, err := s.repo.AcceptCounterBid(ctx, bidID, counterID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Broadcast acceptance to riders
-	if s.redis != nil {
+	// Broadcast acceptance to riders via Redis Stream (durable)
+	if s.streams != nil {
 		payload := map[string]interface{}{
 			"action":      "DELIVERY_BID_ACCEPTED",
 			"bid_id":      bidID,
@@ -1144,8 +1139,12 @@ func (s *DeliveryService) AcceptCounterBid(ctx context.Context, bidID string, co
 			"fare":        counter.ProposedFare,
 			"timestamp":   time.Now().UnixMilli(),
 		}
-		bytes, _ := json.Marshal(payload)
-		s.redis.Publish(ctx, "rider:events", string(bytes))
+		_ = s.streams.Publish(ctx, StreamRiderEvents, payload)
+	}
+
+	// Cleanup bid data from Redis (no longer searching)
+	if s.bidTTL != nil {
+		_ = s.bidTTL.DeleteBidData(ctx, bidID)
 	}
 
 	return counter, nil

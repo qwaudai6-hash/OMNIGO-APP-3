@@ -332,25 +332,6 @@ class VendorAddProductScreenState extends State<VendorAddProductScreen>
     }
   }
 
-  void _handleResponse(http.Response response, String successMessage) {
-    if (!mounted) return;
-    setState(() => _isSaving = false);
-
-    if (response.statusCode == 200 || response.statusCode == 201) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(successMessage),
-          backgroundColor: Colors.green,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        ),
-      );
-      Navigator.pop(context, true); // pop + signal refresh
-    } else {
-      _showError('Server rejected request (${response.statusCode}): ${response.body}');
-    }
-  }
-
   void _handleApiResponse(dynamic response, String successMessage) {
     if (!mounted) return;
     setState(() => _isSaving = false);

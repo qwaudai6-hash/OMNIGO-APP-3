@@ -253,6 +253,9 @@ func (h *OrderHandler) UpdateOrderStatus(c *gin.Context) {
 // Authentication: JWTAuth() in the route group. Customers use this after
 // the rider hands over the package. The body must include the order id;
 // the caller must be the customer of that order.
+//
+// M-7 FIX: Added idempotency check - if order is already delivered,
+// returns success without error (idempotent replay protection).
 func (h *OrderHandler) ConfirmOrder(c *gin.Context) {
 	var req struct {
 		OrderTrackingID string `json:"order_tracking_id" binding:"required"`
@@ -272,25 +275,36 @@ func (h *OrderHandler) ConfirmOrder(c *gin.Context) {
 		return
 	}
 
-	if role != "admin" {
-		order, err := h.svc.GetOrder(c.Request.Context(), req.OrderTrackingID)
-		if err != nil {
-			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "order not found"})
-			return
-		}
-		if order.UserTrackID != callerID {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"error":   "FORBIDDEN_NOT_ORDER_OWNER",
-				"message": "only the order's customer or an admin may confirm delivery",
-			})
-			return
-		}
+	order, err := h.svc.GetOrder(c.Request.Context(), req.OrderTrackingID)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "order not found"})
+		return
+	}
+
+	if role != "admin" && order.UserTrackID != callerID {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"error":   "FORBIDDEN_NOT_ORDER_OWNER",
+			"message": "only the order's customer or an admin may confirm delivery",
+		})
+		return
+	}
+
+	// M-7 FIX: Check if already delivered before making the call.
+	// This provides idempotent replay protection at the HTTP layer.
+	if order.Status == "delivered" || order.Status == "completed" {
+		c.JSON(http.StatusOK, gin.H{
+			"status": "order already confirmed (idempotent replay)",
+			"order":  order,
+		})
+		return
 	}
 
 	// Mark the order as delivered (and stamp delivered_at) so the escrow
 	// release cron can settle funds after the 48-hour dispute window.
 	// The previous "completed" write didn't update delivered_at, which
 	// meant escrows never auto-released.
+	// Note: MarkOrderDelivered is idempotent at service level - if already
+	// delivered, it returns nil without error.
 	if err := h.svc.MarkOrderDelivered(c.Request.Context(), req.OrderTrackingID); err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

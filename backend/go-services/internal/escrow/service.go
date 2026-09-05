@@ -44,7 +44,7 @@ func NewService(db *pgxpool.Pool, ledgerSvc *ledger.Service, rdb redis.Universal
 }
 
 // CreateHold creates a new escrow hold for a vendor after delivery completion.
-func (s *Service) CreateHold(ctx context.Context, orderID, vendorID string, amount float64) error {
+func (s *Service) CreateHold(ctx context.Context, orderID, vendorID string, amount int64) error {
 	exists, err := s.repo.HoldExistsForOrder(ctx, orderID)
 	if err != nil {
 		return fmt.Errorf("failed to check existing hold: %w", err)
@@ -70,6 +70,33 @@ func (s *Service) CreateHold(ctx context.Context, orderID, vendorID string, amou
 	// Index in Redis sorted set for O(log N) expiry lookup
 	if idxErr := s.index.Add(ctx, hold.ID.String(), hold.HoldUntil); idxErr != nil {
 		fmt.Printf("[Escrow] Warning: failed to index hold %s in Redis: %v\n", hold.ID, idxErr)
+	}
+
+	return nil
+}
+
+// CreateHoldTx creates a new escrow hold inside an existing transaction.
+// Used when the caller needs atomic DB operations with the hold creation.
+func (s *Service) CreateHoldTx(ctx context.Context, tx pgx.Tx, orderID, vendorID string, amount int64) error {
+	exists, err := s.repo.HoldExistsForOrderTx(ctx, tx, orderID)
+	if err != nil {
+		return fmt.Errorf("failed to check existing hold: %w", err)
+	}
+	if exists {
+		return nil
+	}
+
+	hold := &EscrowHold{
+		ID:                uuid.New(),
+		OrderTrackingID:   orderID,
+		VendorTrackingID:  vendorID,
+		Amount:            amount,
+		Status:            StatusHeld,
+		HoldUntil:         time.Now().Add(getHoldDuration()),
+	}
+
+	if err := s.repo.CreateHoldInTx(ctx, tx, hold); err != nil {
+		return fmt.Errorf("escrow hold creation failed: %w", err)
 	}
 
 	return nil
@@ -116,7 +143,7 @@ func (s *Service) ReleaseExpiredHolds(ctx context.Context) (int, error) {
 
 			var holdID uuid.UUID
 			var orderID, vendorID string
-			var amount float64
+			var amount int64
 			err = tx.QueryRow(ctx, `
 				UPDATE escrow_holds
 				SET status = 'releasing', updated_at = NOW()
@@ -127,7 +154,7 @@ func (s *Service) ReleaseExpiredHolds(ctx context.Context) (int, error) {
 					LIMIT 1
 					FOR UPDATE SKIP LOCKED
 				)
-				RETURNING id, order_tracking_id, vendor_tracking_id, amount
+				RETURNING id, order_tracking_id, vendor_tracking_id, amount_paisa
 			`).Scan(&holdID, &orderID, &vendorID, &amount)
 			if err != nil {
 				_ = tx.Rollback(ctx)
@@ -158,12 +185,12 @@ func (s *Service) releaseOneHold(ctx context.Context, holdID uuid.UUID) error {
 	defer tx.Rollback(ctx)
 
 	var orderID, vendorID string
-	var amount float64
+	var amount int64
 	err = tx.QueryRow(ctx, `
 		UPDATE escrow_holds
 		SET status = 'releasing', updated_at = NOW()
 		WHERE id = $1 AND status = 'held' AND hold_until <= NOW()
-		RETURNING order_tracking_id, vendor_tracking_id, amount
+		RETURNING order_tracking_id, vendor_tracking_id, amount_paisa
 	`, holdID).Scan(&orderID, &vendorID, &amount)
 	if err != nil {
 		return err
@@ -173,7 +200,7 @@ func (s *Service) releaseOneHold(ctx context.Context, holdID uuid.UUID) error {
 }
 
 // processHoldTx handles the common hold processing logic (checks + transfer + commit).
-func (s *Service) processHoldTx(ctx context.Context, tx pgx.Tx, holdID uuid.UUID, orderID, vendorID string, amount float64) error {
+func (s *Service) processHoldTx(ctx context.Context, tx pgx.Tx, holdID uuid.UUID, orderID, vendorID string, amount int64) error {
 	// Fail-closed check: re-verify escrow_released flag
 	var alreadyReleased bool
 	err := tx.QueryRow(ctx,
@@ -198,8 +225,10 @@ func (s *Service) processHoldTx(ctx context.Context, tx pgx.Tx, holdID uuid.UUID
 		orderID,
 	).Scan(&hasDispute)
 	if err != nil {
+		// FIX [ES-5]: If dispute check fails, we should NOT proceed with release.
+		// Rolling back and returning error is the correct fail-closed behavior.
 		_ = tx.Rollback(ctx)
-		return nil
+		return fmt.Errorf("failed to check disputes for order %s: %w", orderID, err)
 	}
 	if hasDispute {
 		_, err := tx.Exec(ctx, `UPDATE escrow_holds SET status = 'held', updated_at = NOW() WHERE id = $1`, holdID)
@@ -247,14 +276,14 @@ func (s *Service) processHoldTx(ctx context.Context, tx pgx.Tx, holdID uuid.UUID
 		return fmt.Errorf("failed to mark escrow_released: %w", err)
 	}
 
-	// Credit vendor wallet
+	// Credit vendor wallet (using paisa columns after H4 migration)
 	_, err = tx.Exec(ctx, `
-		INSERT INTO vendor_wallet (vendor_tracking_id, balance, lifetime_earnings, updated_at)
+		INSERT INTO vendor_wallet (vendor_tracking_id, balance_paisa, lifetime_earnings_paisa, updated_at)
 		VALUES ($1, $2, $2, NOW())
 		ON CONFLICT (vendor_tracking_id)
 		DO UPDATE SET
-			balance = vendor_wallet.balance + $2,
-			lifetime_earnings = vendor_wallet.lifetime_earnings + $2,
+			balance_paisa = vendor_wallet.balance_paisa + $2,
+			lifetime_earnings_paisa = vendor_wallet.lifetime_earnings_paisa + $2,
 			updated_at = NOW()
 	`, vendorID, amount)
 	if err != nil {
@@ -270,7 +299,7 @@ func (s *Service) processHoldTx(ctx context.Context, tx pgx.Tx, holdID uuid.UUID
 	// Remove from Redis index after successful release
 	_ = s.index.Remove(ctx, holdID.String())
 
-	fmt.Printf("[Escrow] Released %.2f PKR for vendor %s (order %s)\n", amount, vendorID, orderID)
+	fmt.Printf("[Escrow] Released %d paisa for vendor %s (order %s)\n", amount, vendorID, orderID)
 	return nil
 }
 
@@ -338,14 +367,19 @@ func (s *Service) reAddHoldsToIndexByDispute(ctx context.Context, disputeID uuid
 }
 
 // RefundDispute executes a double-entry ledger refund to the customer and marks the escrow hold refunded.
+// FIX [ES-1]: Ledger transfer is done FIRST (idempotent, safe). All DB operations are wrapped in a single
+// transaction to ensure atomicity. If any DB operation fails, the entire transaction rolls back.
 func (s *Service) RefundDispute(ctx context.Context, disputeID uuid.UUID) error {
-	hold, err := s.repo.RefundDisputedHold(ctx, disputeID)
+	// Fetch hold details first (before any modifications)
+	var hold EscrowHold
+	err := s.db.QueryRow(ctx,
+		`SELECT id, order_tracking_id, vendor_tracking_id, amount, status, hold_until, created_at
+		 FROM escrow_holds WHERE dispute_id = $1 AND status = 'disputed'`,
+		disputeID,
+	).Scan(&hold.ID, &hold.OrderTrackingID, &hold.VendorTrackingID, &hold.Amount, &hold.Status, &hold.HoldUntil, &hold.CreatedAt)
 	if err != nil {
-		return fmt.Errorf("failed to mark escrow hold refunded: %w", err)
+		return fmt.Errorf("escrow hold not found or not in disputed status: %w", err)
 	}
-
-	// Remove from Redis index
-	_ = s.index.Remove(ctx, hold.ID.String())
 
 	// Fetch customer tracking ID from orders
 	var customerTrackingID string
@@ -357,7 +391,8 @@ func (s *Service) RefundDispute(ctx context.Context, disputeID uuid.UUID) error 
 		return fmt.Errorf("failed to fetch order customer: %w", err)
 	}
 
-	// Double-entry ledger transfer: vendor_locked_escrow -> customer_wallet
+	// STEP 1: Execute ledger transfer FIRST (idempotent, safe to retry)
+	// If this fails, hold stays 'disputed' - customer doesn't get money (correct behavior)
 	idempotencyKey := fmt.Sprintf("escrow:refund:%s", disputeID.String())
 	_, err = s.ledger.Transfer(ctx, ledger.TransferRequest{
 		DebitAccount:   ledger.AccountVendorLockedEscrow,
@@ -373,24 +408,52 @@ func (s *Service) RefundDispute(ctx context.Context, disputeID uuid.UUID) error 
 		return fmt.Errorf("ledger refund transfer failed: %w", err)
 	}
 
+	// STEP 2: All DB operations in a single transaction for atomicity
+	tx, txErr := s.db.Begin(ctx)
+	if txErr != nil {
+		return fmt.Errorf("failed to begin transaction for DB updates: %w", txErr)
+	}
+	defer tx.Rollback(ctx)
+
+	// Mark hold as refunded in DB
+	_, err = tx.Exec(ctx,
+		`UPDATE escrow_holds SET status = 'refunded', released_at = NOW() WHERE id = $1`,
+		hold.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update escrow_holds status: %w", err)
+	}
+
 	// Update customer wallet balance in customer_wallet table
 	upsertQuery := `
-		INSERT INTO customer_wallet (customer_tracking_id, balance, updated_at)
-		VALUES ($1, $2, NOW())
+		INSERT INTO customer_wallet (customer_tracking_id, balance_paisa, lifetime_spent_paisa, updated_at)
+		VALUES ($1, $2, 0, NOW())
 		ON CONFLICT (customer_tracking_id)
 		DO UPDATE SET
-			balance = customer_wallet.balance + $2,
+			balance_paisa = customer_wallet.balance_paisa + $2,
 			updated_at = NOW()
 	`
-	if _, err := s.db.Exec(ctx, upsertQuery, customerTrackingID, hold.Amount); err != nil {
-		fmt.Printf("[Escrow] Warning: failed to credit customer_wallet table directly: %v\n", err)
+	_, err = tx.Exec(ctx, upsertQuery, customerTrackingID, hold.Amount)
+	if err != nil {
+		return fmt.Errorf("failed to update customer_wallet: %w", err)
 	}
 
 	// Update order payment status to refunded
-	_, _ = s.db.Exec(ctx,
+	_, err = tx.Exec(ctx,
 		`UPDATE orders SET payment_status = 'refunded', updated_at = NOW() WHERE order_tracking_id = $1`,
 		hold.OrderTrackingID,
 	)
+	if err != nil {
+		return fmt.Errorf("failed to update order payment_status: %w", err)
+	}
+
+	// Commit transaction - all DB updates succeed or all fail together
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit DB transaction: %w", err)
+	}
+
+	// Remove from Redis index only after successful DB commit
+	_ = s.index.Remove(ctx, hold.ID.String())
 
 	return nil
 }

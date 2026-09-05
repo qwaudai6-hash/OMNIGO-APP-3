@@ -22,7 +22,7 @@ type EscrowHold struct {
 	ID               uuid.UUID    `json:"id"`
 	OrderTrackingID  string       `json:"order_tracking_id"`
 	VendorTrackingID string       `json:"vendor_tracking_id"`
-	Amount           float64      `json:"amount"`
+	Amount           int64        `json:"amount"` // paisa
 	Status           EscrowStatus `json:"status"`
 	HoldUntil        time.Time    `json:"hold_until"`
 	ReleasedAt       *time.Time   `json:"released_at,omitempty"`

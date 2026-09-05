@@ -44,8 +44,8 @@ func (s *CartService) GetCart(ctx context.Context, userID string) (*models.Cart,
 	return cart, nil
 }
 
-// fetchProductPrice calls the Product Service to get the real price
-func (s *CartService) fetchProductPrice(ctx context.Context, productID int64) (float64, error) {
+// fetchProductPrice calls the Product Service to get the real price using product_tracking_id
+func (s *CartService) fetchProductPrice(ctx context.Context, productTrackingID string) (float64, error) {
 	if s.productServiceURL == "" {
 		return 0, errors.New("product service URL not configured")
 	}
@@ -55,15 +55,14 @@ func (s *CartService) fetchProductPrice(ctx context.Context, productID int64) (f
 	var err error
 
 	if s.internalSigner != nil {
-		// Use internal HMAC-authenticated route to bypass JWT
-		url = fmt.Sprintf("%s/api/v1/internal/products/%d", s.productServiceURL, productID)
+		url = fmt.Sprintf("%s/api/v1/internal/products/tracking/%s", s.productServiceURL, productTrackingID)
 		req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
 			return 0, err
 		}
 		s.internalSigner.SignRequest(req, nil)
 	} else {
-		url = fmt.Sprintf("%s/api/v1/products/%d", s.productServiceURL, productID)
+		url = fmt.Sprintf("%s/api/v1/products/tracking/%s", s.productServiceURL, productTrackingID)
 		req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
 			return 0, err
@@ -82,7 +81,7 @@ func (s *CartService) fetchProductPrice(ctx context.Context, productID int64) (f
 	}
 
 	var data struct {
-		Price    float64 `json:"price"`
+		Price     float64 `json:"price"`
 		BasePrice float64 `json:"base_price"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
@@ -115,26 +114,22 @@ func (s *CartService) AddItem(ctx context.Context, userID string, req models.Add
 		return errors.New("cart contains items from a different store. Please clear cart first.")
 	}
 
-	// SP-GO-20: sanity-bound quantity at the cart layer. Stock is still
-	// authoritatively checked at order creation (atomic reserve), but an
-	// unbounded cart quantity enables absurd payloads and noisy downstream
-	// failures. 0/negative and >999 are rejected outright.
+	// Sanity-bound quantity at the cart layer
 	if req.Quantity <= 0 || req.Quantity > 999 {
 		return fmt.Errorf("invalid quantity %d: must be between 1 and 999", req.Quantity)
 	}
 
-	// Fetch real price from Product Service
-	realPrice, err := s.fetchProductPrice(ctx, req.ProductID)
+	// Fetch real price from Product Service using product_tracking_id
+	realPrice, err := s.fetchProductPrice(ctx, req.ProductTrackingID)
 	if err != nil {
 		return fmt.Errorf("failed to verify product price: %w", err)
 	}
 
-	return s.repo.AddItem(ctx, cart.ID, req.ProductID, req.Quantity, realPrice)
+	return s.repo.AddItem(ctx, cart.ID, req.ProductTrackingID, req.Quantity, realPrice)
 }
 
 // UpdateItemQuantity updates the quantity of a specific item
-func (s *CartService) UpdateItemQuantity(ctx context.Context, userID string, productID int64, quantity int) error {
-	// SP-GO-20: same bound as AddItem.
+func (s *CartService) UpdateItemQuantity(ctx context.Context, userID string, productTrackingID string, quantity int) error {
 	if quantity <= 0 || quantity > 999 {
 		return fmt.Errorf("invalid quantity %d: must be between 1 and 999", quantity)
 	}
@@ -143,17 +138,17 @@ func (s *CartService) UpdateItemQuantity(ctx context.Context, userID string, pro
 		return errors.New("cart not found")
 	}
 
-	return s.repo.UpdateItemQuantity(ctx, cart.ID, productID, quantity)
+	return s.repo.UpdateItemQuantity(ctx, cart.ID, productTrackingID, quantity)
 }
 
 // RemoveItem removes a specific item from the cart
-func (s *CartService) RemoveItem(ctx context.Context, userID string, productID int64) error {
+func (s *CartService) RemoveItem(ctx context.Context, userID string, productTrackingID string) error {
 	cart, err := s.repo.GetCart(ctx, userID)
 	if err != nil {
 		return errors.New("cart not found")
 	}
 
-	return s.repo.RemoveItem(ctx, cart.ID, productID)
+	return s.repo.RemoveItem(ctx, cart.ID, productTrackingID)
 }
 
 // ClearCart clears the entire cart
