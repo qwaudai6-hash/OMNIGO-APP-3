@@ -187,7 +187,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         },
       );
       if (mounted && resp != null) {
-        final fee = (resp['delivery_fee'] is num) ? (resp['delivery_fee'] as num).toDouble() : 50.0;
+        final fee = (resp['delivery_fee'] is num) ? (resp['delivery_fee'] as num).toDouble() : 0.0;
         final routing = (resp['routing_status'] as String?) ?? 'DYNAMIC_CALCULATED';
         setState(() {
           _deliveryFee = fee;
@@ -199,11 +199,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     } catch (e) {
       if (mounted) {
         setState(() {
-          _deliveryFee = 50.0;
+          _deliveryFee = 0.0;
           _routingStatus = 'FAILED_CALCULATION';
           _deliveryFeeLoading = false;
         });
-        cart.setDeliveryFee(50.0);
+        cart.setDeliveryFee(0.0);
       }
     }
   }
@@ -212,6 +212,18 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     if (_deliveryLocation == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please wait for location to be fetched'), backgroundColor: Colors.orange),
+      );
+      return;
+    }
+
+    // H4: Block checkout if delivery fee wasn't calculated (API failed)
+    if (_deliveryFee <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not calculate delivery fee. Please check your connection and try again.'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ),
       );
       return;
     }

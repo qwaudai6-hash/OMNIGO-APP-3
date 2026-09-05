@@ -587,18 +587,58 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       }
     });
 
-    LatLng pickup = _mapCenter; // fallback
-    try {
-      // Fetch live user GPS location
-      final position = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-          timeLimit: Duration(seconds: 5),
-        ),
-      );
-      pickup = LatLng(position.latitude, position.longitude);
-    } catch (e) {
-      debugPrint('Failed to get GPS location for pickup, using default Lahore center: $e');
+    LatLng? pickup;
+    const maxRetries = 3;
+    String? gpsError;
+
+    for (int attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        final bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+        if (!serviceEnabled) {
+          gpsError = 'Location services disabled. Enable GPS.';
+          break;
+        }
+        LocationPermission permission = await Geolocator.checkPermission();
+        if (permission == LocationPermission.denied) {
+          permission = await Geolocator.requestPermission();
+          if (permission == LocationPermission.denied) {
+            if (attempt < maxRetries - 1) {
+              await Future<void>.delayed(Duration(seconds: attempt + 1));
+              continue;
+            }
+            gpsError = 'Location permission denied.';
+            break;
+          }
+        }
+        if (permission == LocationPermission.deniedForever) {
+          gpsError = 'Location permanently denied. Enable in Settings.';
+          break;
+        }
+        final position = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+        ).timeout(const Duration(seconds: 10));
+        pickup = LatLng(position.latitude, position.longitude);
+        break;
+      } catch (e) {
+        if (attempt < maxRetries - 1) {
+          await Future<void>.delayed(Duration(seconds: attempt + 1));
+          continue;
+        }
+        gpsError = 'Could not get location. Please enable GPS.';
+      }
+    }
+
+    if (pickup == null) {
+      if (mounted && gpsError != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(gpsError!),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+      return;
     }
 
     _ridePickupLatLng = pickup;
