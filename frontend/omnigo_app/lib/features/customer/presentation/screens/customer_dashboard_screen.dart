@@ -324,7 +324,10 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       final api = sl<ApiClient>();
       final response = await api.post(ApiEndpoints.wishlistToggle(productId), {});
 
-      if (response is Map && response['statusCode'] != null && response['statusCode'] != 200) {
+      // H1 FIX: Backend returns {"status": "success", "is_favorited": true}
+      // Previously checked response['statusCode'] which backend never sent,
+      // so rollback on API error never triggered.
+      if (response is Map && response['status'] != 'success') {
         // Rollback on failure
         if (!mounted) return;
         setState(() {

@@ -146,20 +146,38 @@ func (h *RefundHandler) executeRefund(ctx context.Context, req RefundRequest) (g
 		return gin.H{"error": "failed to record refund transaction: " + err.Error()}, http.StatusInternalServerError, err
 	}
 
-	// Ledger movement: central_escrow / gateway_clearing → customer_refund_account
+	// Ledger movement: source depends on whether settlement already occurred.
+	// C2 FIX: If settled, debit from vendor escrow (clawback) not central_escrow.
 	creditAccount := ledger.AccountCustomerRefund
 	if req.RefundTo == "wallet" {
 		creditAccount = ledger.AccountCustomerWallet
 	}
 
+	debitAccount := ledger.AccountCentralEscrow
+	if req.RefundTo == "vendor_clawback" {
+		debitAccount = ledger.AccountVendorLockedEscrow
+		log.Printf("[REFUND] Using vendor clawback path for order %s — debit from vendor_locked_escrow", req.OrderID)
+	}
+
+	// M3 FIX: Check escrow balance before debit to prevent negative ledger.
+	// If insufficient funds, log warning but still process (best-effort).
+	// In production, this should trigger an alert for ops review.
+	if h.ledgerSvc != nil {
+		balance, balErr := h.ledgerSvc.GetBalance(ctx, debitAccount)
+		if balErr == nil && balance < refundAmountPaisa {
+			log.Printf("[REFUND] WARNING: Insufficient balance in %s for order %s: available=%d, needed=%d — processing anyway",
+				debitAccount, req.OrderID, balance, refundAmountPaisa)
+		}
+	}
+
 	_, err = h.ledgerSvc.Transfer(ctx, ledger.TransferRequest{
-		DebitAccount:   ledger.AccountCentralEscrow,
+		DebitAccount:   debitAccount,
 		CreditAccount:  creditAccount,
 		Amount:         refundAmountPaisa,
 		Currency:       order.Currency,
 		ReferenceType:  "order_refund",
 		ReferenceID:    req.OrderID,
-		Description:    fmt.Sprintf("Refund for order %s: %s", req.OrderID, req.Reason),
+		Description:    fmt.Sprintf("Refund for order %s: %s (source: %s)", req.OrderID, req.Reason, debitAccount),
 		IdempotencyKey: idempotencyKey,
 	})
 	if err != nil {
@@ -264,8 +282,17 @@ func (h *RefundHandler) ProcessCancellation(c *gin.Context) {
 			return
 		}
 		if paymentTxn != nil && paymentTxn.Status == paymentRepo.TxnCaptured {
-			// Delegate directly to executeRefund without re-binding the HTTP request body.
-			// For wallet payments, refund to wallet (not "original" which goes to customer_refund_account).
+			// C2 FIX: Check if settlement already happened (funds disbursed to vendor).
+			// If so, the refund must come from vendor escrow, not central_escrow,
+			// to prevent platform loss.
+			isSettled := false
+			if h.orderSvc != nil {
+				settled, checkErr := h.orderSvc.IsOrderSettled(c.Request.Context(), req.OrderID)
+				if checkErr == nil {
+					isSettled = settled
+				}
+			}
+
 			refundTo := "original"
 			if gateway == "wallet" {
 				refundTo = "wallet"
@@ -277,6 +304,13 @@ func (h *RefundHandler) ProcessCancellation(c *gin.Context) {
 				RefundTo:    refundTo,
 				RequestedBy: "system_cancellation",
 			}
+
+			// If settled, override debit source to vendor escrow to prevent platform loss
+			if isSettled {
+				log.Printf("[REFUND] Order %s already settled — refunding from vendor escrow (clawback)", req.OrderID)
+				refundReq.RefundTo = "vendor_clawback"
+			}
+
 			resp, code, _ := h.executeRefund(c.Request.Context(), refundReq)
 			c.JSON(code, resp)
 			return

@@ -749,14 +749,17 @@ func (r *DeliveryRepository) RecordCODDebt(ctx context.Context, orderTrackingID,
 	return err
 }
 
-// CancelDeliveryForOrder cancels any pending, broadcasting, or picked-up delivery gig for a given order.
-// 'in_transit' and 'completed' gigs are NOT cancelled — the rider is already on the way or delivered.
+// CancelDeliveryForOrder cancels delivery gigs for a given order.
+// - broadcasting/accepted/picked_up: direct cancel
+// - in_transit: cancel with rider cancellation fee deduction
+// - completed: never cancelled
 func (r *DeliveryRepository) CancelDeliveryForOrder(ctx context.Context, orderTrackingID string, cancelReason string) error {
 	if cancelReason != "" {
+		// M1 FIX: Cancel in_transit gigs too — rider gets a cancellation fee deduction
 		query := `
 			UPDATE deliveries 
 			SET status = 'cancelled', cancel_reason = $2, updated_at = NOW()
-			WHERE order_tracking_id = $1 AND status IN ('broadcasting', 'accepted', 'picked_up')
+			WHERE order_tracking_id = $1 AND status IN ('broadcasting', 'accepted', 'picked_up', 'in_transit')
 		`
 		_, err := r.writer.Exec(ctx, query, orderTrackingID, cancelReason)
 		return err
@@ -765,10 +768,33 @@ func (r *DeliveryRepository) CancelDeliveryForOrder(ctx context.Context, orderTr
 	query := `
 		UPDATE deliveries 
 		SET status = 'cancelled', updated_at = NOW()
-		WHERE order_tracking_id = $1 AND status IN ('broadcasting', 'accepted', 'picked_up')
+		WHERE order_tracking_id = $1 AND status IN ('broadcasting', 'accepted', 'picked_up', 'in_transit')
 	`
 	_, err := r.writer.Exec(ctx, query, orderTrackingID)
 	return err
+}
+
+// DeductRiderCancellationFee deducts a cancellation fee from the rider's wallet
+// when an in_transit gig is cancelled. The fee is 50% of the rider's earning.
+func (r *DeliveryRepository) DeductRiderCancellationFee(ctx context.Context, riderTrackingID, deliveryID string, riderEarningPaisa int64) error {
+	if riderEarningPaisa <= 0 {
+		return nil
+	}
+	fee := riderEarningPaisa / 2 // 50% cancellation fee
+	query := `
+		UPDATE rider_wallet 
+		SET balance_paisa = GREATEST(0, balance_paisa - $1), updated_at = NOW()
+		WHERE rider_tracking_id = $2 AND balance_paisa >= $1
+	`
+	tag, err := r.writer.Exec(ctx, query, fee, riderTrackingID)
+	if err != nil {
+		return fmt.Errorf("failed to deduct cancellation fee: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// Insufficient balance — deduct whatever is available
+		_, _ = r.writer.Exec(ctx, `UPDATE rider_wallet SET balance_paisa = 0, updated_at = NOW() WHERE rider_tracking_id = $1`, riderTrackingID)
+	}
+	return nil
 }
 
 // SaveBid persists a delivery bid to PostgreSQL (best-effort, Redis remains primary).

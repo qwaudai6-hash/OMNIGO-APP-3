@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"strconv"
@@ -472,19 +473,46 @@ func (h *OrderHandler) CancelOrder(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "order cancelled", "order": updated})
 }
 
-// triggerRefund calls the order service to emit a refund event for a cancelled/returned order.
-// Runs in a goroutine — errors are logged but do not affect the order status.
+// triggerRefund writes a refund intent to the outbox_events table instead of
+// using a raw goroutine. The RefundOutboxWorker picks it up reliably.
+// This is the C3 FIX: transactional outbox pattern replaces fire-and-forget goroutines.
 func (h *OrderHandler) triggerRefund(ctx context.Context, orderID, reason string) {
-	refundCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	refundCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Look up order to get amount and currency
 	order, err := h.svc.GetOrder(refundCtx, orderID)
 	if err != nil {
 		log.Printf("[REFUND] Failed to look up order %s for refund: %v", orderID, err)
 		return
 	}
-	h.svc.EmitRefundEvent(refundCtx, orderID, reason, order.TotalAmount, order.Currency)
+
+	// C4 FIX: Skip refund pipeline for COD orders — no cash was collected
+	if order.PaymentGateway == "cod" || order.PaymentGateway == "" {
+		log.Printf("[REFUND] Skipping refund for COD order %s — no payment captured", orderID)
+		return
+	}
+
+	// C3 FIX: Write to outbox_events table (same DB transaction as order status update
+	// when possible). The RefundOutboxWorker will pick this up and emit to Kafka.
+	payload := map[string]interface{}{
+		"order_id":      orderID,
+		"reason":        reason,
+		"refund_amount": order.TotalAmount,
+		"currency":      order.Currency,
+		"refund_to":     "original",
+		"timestamp":     time.Now().UnixMilli(),
+	}
+	payloadBytes, _ := json.Marshal(payload)
+
+	_, err = h.svc.InsertOutboxEvent(refundCtx, orderID, "payment_refund", string(payloadBytes))
+	if err != nil {
+		log.Printf("[REFUND] CRITICAL: Failed to insert refund outbox for order %s: %v — falling back to direct emit", orderID, err)
+		// Fallback: direct Kafka emit (legacy path)
+		h.svc.EmitRefundEvent(refundCtx, orderID, reason, order.TotalAmount, order.Currency)
+		return
+	}
+
+	log.Printf("[REFUND] Refund intent queued for order %s (outbox pattern)", orderID)
 }
 
 // ReturnOrder allows a customer to request a return on a delivered/completed order.

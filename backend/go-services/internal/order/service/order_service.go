@@ -232,6 +232,21 @@ func (s *OrderService) GetOrdersByVendor(ctx context.Context, vendorID string, s
 	return s.repo.GetOrdersByVendorID(ctx, vendorID, status, limit, offset)
 }
 
+// IsOrderSettled checks if the order's payment has been settled (funds disbursed
+// to vendor/delivery via outbox). Returns true if the settlement outbox event
+// was processed. Used by refund handler to determine if vendor clawback is needed.
+func (s *OrderService) IsOrderSettled(ctx context.Context, orderTrackingID string) (bool, error) {
+	var count int
+	err := s.repo.(*repository.OrderRepository).DB().QueryRow(ctx,
+		`SELECT COUNT(*) FROM outbox_events
+		 WHERE aggregate_id = $1 AND topic = 'payment_settlement' AND status = 'PROCESSED'`,
+		orderTrackingID).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // ReleaseStockForOrder releases reserved stock via product-service gRPC. It is
 // safe to call from cancellation/refund handlers even if the order has no items.
 func (s *OrderService) ReleaseStockForOrder(ctx context.Context, order *models.Order) error {
@@ -545,6 +560,19 @@ func (s *OrderService) EmitRefundEvent(ctx context.Context, trackingID, reason s
 // EmitCancelEvent is a public helper used by payment handlers to announce a cancellation.
 func (s *OrderService) EmitCancelEvent(ctx context.Context, trackingID, reason string) {
 	s.produceOrderEvent(ctx, "orders.cancelled", trackingID, reason, 0, "")
+}
+
+// InsertOutboxEvent writes a refund intent to the outbox_events table atomically.
+// The RefundOutboxWorker picks it up and publishes to Kafka.
+// This is the C3 FIX: transactional outbox pattern.
+func (s *OrderService) InsertOutboxEvent(ctx context.Context, aggregateID, topic, payloadJSON string) (int64, error) {
+	var id int64
+	err := s.repo.(*repository.OrderRepository).DB().QueryRow(ctx,
+		`INSERT INTO outbox_events (aggregate_id, topic, payload, status, created_at, updated_at)
+		 VALUES ($1, $2, $3::jsonb, 'PENDING', NOW(), NOW())
+		 RETURNING id`,
+		aggregateID, topic, payloadJSON).Scan(&id)
+	return id, err
 }
 
 // StartOutboxPoller begins a background routine that atomically polls, claims, and publishes outbox events

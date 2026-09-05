@@ -709,7 +709,15 @@ func (s *DeliveryService) EstimateDeliveryFee(ctx context.Context, storeTrackID 
 	// Get store coordinates
 	lat, lng, err := s.repo.GetStoreCoordinates(ctx, storeTrackID)
 	if err != nil || (lat == 0 && lng == 0) {
-		return 0, 0, 0, fmt.Errorf("store coordinates not found")
+		// H3 FIX: Use haversine fallback instead of returning hardcoded 50 PKR.
+		// Calculate rough estimate from order dropoff to platform default (Karachi center).
+		defaultLat, defaultLng := 24.8607, 67.0011 // Karachi default
+		fallbackKm := haversineKm(defaultLat, defaultLng, dropoffLat, dropoffLng)
+		baseFare := envFloat("DELIVERY_BASE_FARE", 50.0)
+		perKmRate := envFloat("DELIVERY_PER_KM_RATE", 15.0)
+		totalFare := baseFare + (perKmRate * fallbackKm)
+		adminComm := totalFare * (envFloat("DELIVERY_COMMISSION_PERCENT", 5.0) / 100.0)
+		return totalFare, adminComm, totalFare - adminComm, nil
 	}
 
 	km, _, _, _ := s.estimateDistanceAndETA(ctx, lng, lat, dropoffLng, dropoffLat)
