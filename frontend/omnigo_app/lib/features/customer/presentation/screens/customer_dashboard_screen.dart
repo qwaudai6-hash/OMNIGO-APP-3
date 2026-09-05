@@ -1458,7 +1458,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   }
 
   Widget _buildOrdersTab() {
-    return const MyOrdersScreen();
+    return MyOrdersScreen(customerTrackingId: widget.trackingId);
   }
 
   Widget _buildTrackingItem(

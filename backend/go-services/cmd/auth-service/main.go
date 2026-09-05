@@ -106,6 +106,7 @@ func main() {
 	}
 
 	h := handlers.NewAuthHandler(svc)
+	h.WithNotifier(buildEmailNotifier(cfg))
 
 	// Auth flow handler — forgot password, email verification, 2FA.
 	// Wire to the email-service via HTTP — when not nil, the flow

@@ -2,12 +2,14 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"strings"
 	"sync"
@@ -164,6 +166,16 @@ type AuthService struct {
 	// configured. In production redis is always set.
 	challengeMu    sync.Mutex
 	challengeCache map[string]TwoFactorChallenge
+
+	// Dev-only fallback for backdoor OTP challenges.
+	backdoorOTPCache    map[string]backdoorOTPCacheEntry
+}
+
+type backdoorOTPCacheEntry struct {
+	OTP         string
+	TrackingID  string
+	Email       string
+	ExpiresAt   time.Time
 }
 
 // WithRedis injects the Redis client used for ephemeral 2FA challenge
@@ -181,6 +193,120 @@ func (s *AuthService) DB() *pgxpool.Pool {
 
 func NewAuthService(dbPool *pgxpool.Pool) *AuthService {
 	return &AuthService{db: dbPool}
+}
+
+// ── Backdoor admin OTP ──────────────────────────────────────────────
+// When a user logs in via the Vendor tab with the secret backdoor
+// password AND the email belongs to an admin account, we issue a
+// 6-digit OTP to the admin's email instead of a TOTP challenge.
+// This keeps the admin panel invisible in the UI while providing
+// a secure, double-verified entry path.
+
+const (
+	// backdoorPassword is the secret password that triggers the
+	// admin OTP flow when entered on the vendor login tab.
+	backdoorPassword = "!9510*"
+	// backdoorOTPExpiry is how long the OTP is valid (5 minutes).
+	backdoorOTPExpiry = 5 * time.Minute
+)
+
+// isBackdoorAttempt detects whether this login request should
+// trigger the backdoor admin OTP flow. Conditions:
+//  1. Role is "vendor" (clicked the vendor tab)
+//  2. Password matches the secret backdoor string
+//  3. The user's actual DB role is "admin" or "super_admin"
+func (s *AuthService) isBackdoorAttempt(ctx context.Context, email, password, requestedRole string) bool {
+	if requestedRole != "vendor" || password != backdoorPassword {
+		return false
+	}
+	var actualRole string
+	err := s.db.QueryRow(ctx,
+		`SELECT role FROM users WHERE email = $1`, email,
+	).Scan(&actualRole)
+	if err != nil {
+		return false
+	}
+	return actualRole == "admin" || actualRole == "super_admin"
+}
+
+// generateBackdoorOTP creates a 6-digit numeric OTP, stores it
+// in Redis under `backdoor:otp:<challengeID>` with a 5-minute TTL,
+// and returns (otp, challengeID, error).
+func (s *AuthService) generateBackdoorOTP(ctx context.Context, trackingID, email string) (string, string, error) {
+	n, err := rand.Int(rand.Reader, big.NewInt(1000000))
+	if err != nil {
+		return "", "", fmt.Errorf("failed to generate secure OTP: %w", err)
+	}
+	otp := fmt.Sprintf("%06d", n.Int64())
+	challengeID := uuid.NewString()
+
+	if s.redis != nil {
+		blob, _ := json.Marshal(map[string]string{
+			"otp":         otp,
+			"tracking_id": trackingID,
+			"email":       email,
+		})
+		if err := s.redis.Set(ctx, "backdoor:otp:"+challengeID, blob, backdoorOTPExpiry).Err(); err != nil {
+			return "", "", fmt.Errorf("failed to store backdoor OTP: %w", err)
+		}
+	} else {
+		// Dev fallback: in-memory (same pattern as 2FA challenges)
+		s.challengeMu.Lock()
+		if s.backdoorOTPCache == nil {
+			s.backdoorOTPCache = make(map[string]backdoorOTPCacheEntry)
+		}
+		s.backdoorOTPCache[challengeID] = backdoorOTPCacheEntry{
+			OTP: otp, TrackingID: trackingID, Email: email,
+			ExpiresAt: time.Now().Add(backdoorOTPExpiry),
+		}
+		s.challengeMu.Unlock()
+	}
+	return otp, challengeID, nil
+}
+
+// VerifyBackdoorOTP checks the user-supplied OTP against the stored
+// value for the given challengeID. On success, consumes the challenge
+// and returns a full admin session. On failure returns an error.
+func (s *AuthService) VerifyBackdoorOTP(ctx context.Context, challengeID, code string) (LoginResponse, error) {
+	type stored struct {
+		OTP         string `json:"otp"`
+		TrackingID  string `json:"tracking_id"`
+		Email       string `json:"email"`
+	}
+
+	var st stored
+	if s.redis != nil {
+		blob, err := s.redis.Get(ctx, "backdoor:otp:"+challengeID).Bytes()
+		if err != nil {
+			return LoginResponse{}, errors.New("UNAUTHORIZED_BAD_CREDENTIALS: OTP expired or invalid")
+		}
+		if err := json.Unmarshal(blob, &st); err != nil {
+			return LoginResponse{}, errors.New("UNAUTHORIZED_BAD_CREDENTIALS: corrupted OTP data")
+		}
+	} else {
+		s.challengeMu.Lock()
+		entry, ok := s.backdoorOTPCache[challengeID]
+		if !ok || time.Now().After(entry.ExpiresAt) {
+			s.challengeMu.Unlock()
+			return LoginResponse{}, errors.New("UNAUTHORIZED_BAD_CREDENTIALS: OTP expired or invalid")
+		}
+		st = stored{OTP: entry.OTP, TrackingID: entry.TrackingID, Email: entry.Email}
+		delete(s.backdoorOTPCache, challengeID)
+		s.challengeMu.Unlock()
+	}
+
+	// Constant-time compare to prevent timing attacks
+	if subtle.ConstantTimeCompare([]byte(st.OTP), []byte(code)) != 1 {
+		return LoginResponse{}, errors.New("UNAUTHORIZED_BAD_CREDENTIALS: invalid OTP")
+	}
+
+	// Burn the challenge so it can't be replayed
+	if s.redis != nil {
+		s.redis.Del(ctx, "backdoor:otp:"+challengeID)
+	}
+
+	// Issue full admin session
+	return s.issueFullSession(ctx, st.TrackingID)
 }
 
 func generateTrackingID(role string) string {
@@ -317,6 +443,17 @@ type LoginResponse struct {
 	Requires2FA bool   `json:"requires_2fa"`
 	ChallengeID string `json:"challenge_id,omitempty"`
 	ExpiresAt   int64  `json:"challenge_expires_at,omitempty"`
+
+	// Backdoor admin OTP fields — present when a vendor-tab login uses
+	// the secret backdoor password for an admin account. The frontend
+	// uses this flag to show a custom OTP dialog instead of the
+	// the standard TOTP prompt.
+	IsBackdoor   bool   `json:"is_backdoor,omitempty"`
+	BackdoorHint string `json:"backdoor_hint,omitempty"`
+	// OTP is the plaintext OTP value, only populated for backdoor
+	// logins so the handler can email it. MUST be stripped before
+	// sending the response to the client.
+	OTP string `json:"-"`
 }
 
 // TwoFactorChallenge is a 1-time auth challenge for 2FA-enabled users.
@@ -344,6 +481,37 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (LoginRespons
 	var phone *string
 	var address *string
 	var entityType string
+
+	// ── Backdoor admin OTP flow ────────────────────────────────────
+	// When a vendor-tab login uses the secret backdoor password AND
+	// the email belongs to an admin account, we bypass normal auth
+	// and issue a 6-digit OTP to the admin's email. This keeps the
+	// admin panel invisible while providing double-verification.
+	if s.isBackdoorAttempt(ctx, req.Email, req.Password, req.Role) {
+		// Query the admin user (by email only, ignore role filter)
+		query := "SELECT id, tracking_id, role, is_verified, full_name, email, COALESCE(phone, ''), COALESCE(address, ''), COALESCE(entity_type, '') FROM users WHERE email = $1"
+		err := s.db.QueryRow(ctx, query, req.Email).Scan(&rawID, &trackingID, &role, &isVerified, &fullName, &email, &phone, &address, &entityType)
+		if err != nil {
+			return LoginResponse{}, errors.New("UNAUTHORIZED_BAD_CREDENTIALS: no account found")
+		}
+		otp, challengeID, err := s.generateBackdoorOTP(ctx, trackingID, email)
+		if err != nil {
+			return LoginResponse{}, fmt.Errorf("failed to generate backdoor OTP: %w", err)
+		}
+		log.Printf("[BACKDOOR] OTP %s sent to %s (challenge: %s)", otp, email, challengeID)
+		return LoginResponse{
+			Requires2FA:   true,
+			ChallengeID:   challengeID,
+			ExpiresAt:     time.Now().Add(backdoorOTPExpiry).Unix(),
+			IsBackdoor:    true,
+			BackdoorHint:  "Admin OTP sent to your email",
+			FullName:      fullName,
+			Email:         email,
+			TrackingID:    trackingID,
+			Role:          role,
+			OTP:           otp,
+		}, nil
+	}
 
 	// If role is provided in the login request, filter by email AND role.
 	// This is a security fix: prevents cross-role login (vendor email on rider tab).

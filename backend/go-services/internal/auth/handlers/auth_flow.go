@@ -246,6 +246,29 @@ func (h *AuthFlowHandler) CompleteTwoFactorChallenge(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+// ─────────────────────────────────────────────────────────────────────
+//  Backdoor admin OTP verification
+// ─────────────────────────────────────────────────────────────────────
+
+// CompleteBackdoorOTP verifies the 6-digit OTP sent to the admin's
+// email during the backdoor login flow. The frontend sends the
+// challenge_id + 6-digit code; on success we return the full admin
+// session (JWT + refresh token).
+func (h *AuthFlowHandler) CompleteBackdoorOTP(c *gin.Context) {
+	var req TwoFactorChallengeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	resp, err := h.svc.VerifyBackdoorOTP(c.Request.Context(), req.ChallengeID, req.Code)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
 // RegisterRoutes attaches the auth-flow endpoints to the gin router.
 // Public routes (forgot-password, reset-password, verify-email, 2fa
 // challenge) sit on the /api/v1/auth group without middleware. 2FA
@@ -267,6 +290,8 @@ func (h *AuthFlowHandler) RegisterRoutes(router *gin.Engine, rdb redis.Universal
 	flow.GET("/verify-email", h.VerifyEmail)
 	// Login-time 2FA challenge — no JWT (user hasn't logged in yet).
 	limited.POST("/2fa/challenge", h.CompleteTwoFactorChallenge)
+	// Backdoor admin OTP verification — same rate limit as 2FA.
+	limited.POST("/backdoor-otp/verify", h.CompleteBackdoorOTP)
 
 	// Protected — JWT required
 	protected := router.Group("/api/v1/auth")

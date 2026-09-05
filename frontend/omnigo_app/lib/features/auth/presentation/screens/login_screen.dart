@@ -40,14 +40,23 @@ class LoginScreenState extends State<LoginScreen> {
         if (challengeId == null) {
           throw Exception('Server returned 2FA challenge without challenge_id');
         }
+        final isBackdoor = response['is_backdoor'] == true;
+        final backdoorHint = response['backdoor_hint']?.toString() ?? '';
         if (!mounted) return;
-        final code = await _promptTwoFactorCode(context, email: response['email']?.toString() ?? '');
+        final code = await _promptTwoFactorCode(
+          context,
+          email: response['email']?.toString() ?? '',
+          isBackdoor: isBackdoor,
+          backdoorHint: backdoorHint,
+        );
         if (code == null) {
           // User cancelled the 2FA dialog.
           if (mounted) setState(() => _isLoading = false);
           return;
         }
-        final challengeResp = await _apiClient.post('/auth/2fa/challenge', {
+        // Backdoor OTP goes to a different endpoint
+        final endpoint = isBackdoor ? '/auth/backdoor-otp/verify' : '/auth/2fa/challenge';
+        final challengeResp = await _apiClient.post(endpoint, {
           'challenge_id': challengeId,
           'code': code,
         });
@@ -112,7 +121,13 @@ class LoginScreenState extends State<LoginScreen> {
 
   /// Modal dialog that asks the user for the 6-digit TOTP code from
   /// their authenticator app when logging into a 2FA-protected account.
-  Future<String?> _promptTwoFactorCode(BuildContext context, {required String email}) {
+  /// For backdoor admin logins, shows a custom "Admin Access" prompt.
+  Future<String?> _promptTwoFactorCode(
+    BuildContext context, {
+    required String email,
+    bool isBackdoor = false,
+    String backdoorHint = '',
+  }) {
     final codeController = TextEditingController();
     String? errorText;
     return showDialog<String>(
@@ -121,15 +136,43 @@ class LoginScreenState extends State<LoginScreen> {
       builder: (ctx) {
         return StatefulBuilder(
           builder: (ctx, setLocalState) => AlertDialog(
-            title: const Text('Two-Factor Authentication'),
+            title: Row(
+              children: [
+                Icon(
+                  isBackdoor ? Icons.admin_panel_settings : Icons.security,
+                  color: isBackdoor ? Colors.amber : Theme.of(context).primaryColor,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    isBackdoor ? 'Admin Access Verification' : 'Two-Factor Authentication',
+                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
+            ),
             content: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text(
-                  'Enter the 6-digit code from your authenticator app for $email.',
-                  style: const TextStyle(fontSize: 13),
-                ),
+                if (isBackdoor)
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.amber.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.amber.withOpacity(0.3)),
+                    ),
+                    child: Text(
+                      backdoorHint.isNotEmpty ? backdoorHint : 'OTP sent to your admin email',
+                      style: const TextStyle(fontSize: 13, color: Colors.amber),
+                    ),
+                  )
+                else
+                  Text(
+                    'Enter the 6-digit code from your authenticator app for $email.',
+                    style: const TextStyle(fontSize: 13),
+                  ),
                 const SizedBox(height: 16),
                 TextField(
                   controller: codeController,
@@ -137,10 +180,14 @@ class LoginScreenState extends State<LoginScreen> {
                   keyboardType: TextInputType.number,
                   maxLength: 6,
                   decoration: InputDecoration(
-                    labelText: 'Authenticator Code',
+                    labelText: isBackdoor ? 'Admin OTP Code' : 'Authenticator Code',
                     border: const OutlineInputBorder(),
                     errorText: errorText,
                     counterText: '',
+                    prefixIcon: Icon(
+                      isBackdoor ? Icons.lock : Icons.vpn_key,
+                      color: isBackdoor ? Colors.amber : null,
+                    ),
                   ),
                 ),
               ],

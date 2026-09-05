@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -17,11 +18,18 @@ import (
 )
 
 type AuthHandler struct {
-	svc *service.AuthService
+	svc    *service.AuthService
+	notify func(ctx context.Context, to, subject, body string)
 }
 
 func NewAuthHandler(svc *service.AuthService) *AuthHandler {
 	return &AuthHandler{svc: svc}
+}
+
+// WithNotifier injects the email dispatcher for backdoor OTP delivery.
+func (h *AuthHandler) WithNotifier(fn func(ctx context.Context, to, subject, body string)) *AuthHandler {
+	h.notify = fn
+	return h
 }
 
 // extractTrackingID parses the Authorization header using the shared JWT
@@ -90,6 +98,12 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	// the front-end can show the TOTP prompt. The full session is only
 	// returned after /auth/2fa/challenge completes.
 	if resp.Requires2FA {
+		// Backdoor OTP: email the 6-digit code to the admin.
+		if resp.IsBackdoor && h.notify != nil {
+			go h.notify(c.Request.Context(), resp.Email,
+				"Your OMNIGO Admin Access OTP",
+				fmt.Sprintf("Your admin access OTP is: %s\nIt expires in 5 minutes.\n\nDo not share this code with anyone.", resp.OTP))
+		}
 		c.JSON(http.StatusOK, resp)
 		return
 	}
