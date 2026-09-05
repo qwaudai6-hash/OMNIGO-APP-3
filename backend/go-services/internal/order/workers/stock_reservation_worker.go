@@ -96,7 +96,7 @@ func (w *StockReservationWorker) processOrderReservations(ctx context.Context, o
 		OrderTrackingId: orderID,
 	}
 
-	res, err := w.productGRPCClient.ReserveProduct(ctx, grpcReq)
+	res, err := w.productGRPC.ReserveProduct(ctx, grpcReq)
 	if err != nil {
 		log.Printf("[StockReservationWorker] gRPC ReserveProduct failed for order %s: %v", orderID, err)
 		for _, item := range items {
@@ -211,7 +211,7 @@ func (w *StockReservationWorker) ReleaseOrderReservations(ctx context.Context, o
 				}},
 				OrderTrackingId: orderID,
 			}
-			if _, err := w.productGRPCClient.ReleaseProduct(ctx, grpcReq); err != nil {
+			if _, err := w.productGRPC.ReleaseProduct(ctx, grpcReq); err != nil {
 				log.Printf("[StockReservationWorker] Failed to release %s/%s via gRPC: %v", orderID, res.ProductTrackingID, err)
 			}
 			_ = w.repo.ReleaseStockReservation(ctx, orderID, res.ProductTrackingID)

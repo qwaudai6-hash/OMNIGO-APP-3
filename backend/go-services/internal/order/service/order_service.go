@@ -263,7 +263,7 @@ func (s *OrderService) GetOrdersByVendor(ctx context.Context, vendorID string, s
 // was processed. Used by refund handler to determine if vendor clawback is needed.
 func (s *OrderService) IsOrderSettled(ctx context.Context, orderTrackingID string) (bool, error) {
 	var count int
-	err := s.repo.(*repository.OrderRepository).DB().QueryRow(ctx,
+	err := s.repo.DB().QueryRow(ctx,
 		`SELECT COUNT(*) FROM outbox_events
 		 WHERE aggregate_id = $1 AND topic = 'payment_settlement' AND status = 'PROCESSED'`,
 		orderTrackingID).Scan(&count)
@@ -593,7 +593,7 @@ func (s *OrderService) EmitCancelEvent(ctx context.Context, trackingID, reason s
 // This is the C3 FIX: transactional outbox pattern.
 func (s *OrderService) InsertOutboxEvent(ctx context.Context, aggregateID, topic, payloadJSON string) (int64, error) {
 	var id int64
-	err := s.repo.(*repository.OrderRepository).DB().QueryRow(ctx,
+	err := s.repo.DB().QueryRow(ctx,
 		`INSERT INTO outbox_events (aggregate_id, topic, payload, status, created_at, updated_at)
 		 VALUES ($1, $2, $3::jsonb, 'PENDING', NOW(), NOW())
 		 RETURNING id`,
