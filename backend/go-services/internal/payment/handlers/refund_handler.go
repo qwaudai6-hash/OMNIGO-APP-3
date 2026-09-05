@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	orderSvc "github.com/omnigo/backend/internal/order/service"
 	paymentRepo "github.com/omnigo/backend/internal/payment/repository"
 	"github.com/omnigo/backend/internal/payment/service"
+	walletSvc "github.com/omnigo/backend/internal/wallet/service"
 )
 
 // RefundHandler exposes returns/cancellations/refund operations.
@@ -22,15 +24,17 @@ type RefundHandler struct {
 	txnRepo      *paymentRepo.Repository
 	orderRepo    *repository.OrderRepository
 	orderSvc     *orderSvc.OrderService
+	walletSvc    *walletSvc.CustomerWalletService
 }
 
-func NewRefundHandler(orchestrator *service.Orchestrator, ledgerSvc *ledger.Service, txnRepo *paymentRepo.Repository, orderRepo *repository.OrderRepository, orderSvc *orderSvc.OrderService) *RefundHandler {
+func NewRefundHandler(orchestrator *service.Orchestrator, ledgerSvc *ledger.Service, txnRepo *paymentRepo.Repository, orderRepo *repository.OrderRepository, orderSvc *orderSvc.OrderService, walletSvc *walletSvc.CustomerWalletService) *RefundHandler {
 	return &RefundHandler{
 		orchestrator: orchestrator,
 		ledgerSvc:    ledgerSvc,
 		txnRepo:      txnRepo,
 		orderRepo:    orderRepo,
 		orderSvc:     orderSvc,
+		walletSvc:    walletSvc,
 	}
 }
 
@@ -108,6 +112,16 @@ func (h *RefundHandler) executeRefund(ctx context.Context, req RefundRequest) (g
 			if err := h.orchestrator.Refund(ctx, gateway, gatewayTxnID, float64(refundAmountPaisa)/100.0); err != nil {
 				return gin.H{"error": "gateway refund failed: " + err.Error()}, http.StatusBadGateway, err
 			}
+		}
+	}
+
+	// Wallet refund: credit back to customer's wallet balance.
+	// For wallet payments, there is no external gateway to refund —
+	// the money came from the wallet, so we credit it back directly.
+	if gateway == "wallet" && h.walletSvc != nil {
+		if err := h.walletSvc.CreditFunds(ctx, order.UserTrackID, fmt.Sprintf("refund:%s", req.OrderID), refundAmountPaisa); err != nil {
+			log.Printf("[REFUND] WARNING: wallet credit failed for order %s: %v", req.OrderID, err)
+			// Non-fatal: ledger transfer still happens below, but wallet balance won't reflect
 		}
 	}
 
@@ -251,11 +265,16 @@ func (h *RefundHandler) ProcessCancellation(c *gin.Context) {
 		}
 		if paymentTxn != nil && paymentTxn.Status == paymentRepo.TxnCaptured {
 			// Delegate directly to executeRefund without re-binding the HTTP request body.
+			// For wallet payments, refund to wallet (not "original" which goes to customer_refund_account).
+			refundTo := "original"
+			if gateway == "wallet" {
+				refundTo = "wallet"
+			}
 			refundReq := RefundRequest{
 				OrderID:     req.OrderID,
 				Reason:      req.Reason,
 				Amount:      order.TotalAmount,
-				RefundTo:    "original",
+				RefundTo:    refundTo,
 				RequestedBy: "system_cancellation",
 			}
 			resp, code, _ := h.executeRefund(c.Request.Context(), refundReq)

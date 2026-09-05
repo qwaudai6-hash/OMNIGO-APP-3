@@ -1,8 +1,11 @@
 package handlers
 
 import (
+	"context"
+	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/omnigo/backend/internal/order/models"
@@ -403,6 +406,7 @@ func (h *OrderHandler) callerCanReadOrder(order *models.Order, callerID, role st
 
 // CancelOrder allows a customer to cancel their own order before it is shipped.
 // Valid source states: pending, paid, accepted.
+// If the order is paid, a refund is triggered (wallet → wallet credit, gateway → gateway refund).
 func (h *OrderHandler) CancelOrder(c *gin.Context) {
 	trackingID := c.Param("tracking_id")
 	if trackingID == "" {
@@ -441,9 +445,24 @@ func (h *OrderHandler) CancelOrder(c *gin.Context) {
 		return
 	}
 
+	// Check if order is in a cancellable state (before shipment)
+	if order.Status != "pending" && order.Status != "paid" && order.Status != "accepted" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+			"error":   "ORDER_NOT_CANCELLABLE",
+			"message": "order cannot be cancelled in its current state: " + order.Status,
+		})
+		return
+	}
+
 	if err := h.svc.UpdateOrderStatus(c.Request.Context(), trackingID, "cancelled"); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	// Trigger refund for paid orders (wallet → wallet credit, gateway → gateway refund).
+	// This is a best-effort async call — the order is already cancelled regardless.
+	if order.Status == "paid" || order.PaymentStatus == "paid" {
+		go h.triggerRefund(c.Request.Context(), trackingID, "customer_cancelled")
 	}
 
 	// Emit orders.cancelled so delivery-service cancels the gig and frees the rider.
@@ -451,6 +470,21 @@ func (h *OrderHandler) CancelOrder(c *gin.Context) {
 
 	updated, _ := h.svc.GetOrder(c.Request.Context(), trackingID)
 	c.JSON(http.StatusOK, gin.H{"status": "order cancelled", "order": updated})
+}
+
+// triggerRefund calls the order service to emit a refund event for a cancelled/returned order.
+// Runs in a goroutine — errors are logged but do not affect the order status.
+func (h *OrderHandler) triggerRefund(ctx context.Context, orderID, reason string) {
+	refundCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Look up order to get amount and currency
+	order, err := h.svc.GetOrder(refundCtx, orderID)
+	if err != nil {
+		log.Printf("[REFUND] Failed to look up order %s for refund: %v", orderID, err)
+		return
+	}
+	h.svc.EmitRefundEvent(refundCtx, orderID, reason, order.TotalAmount, order.Currency)
 }
 
 // ReturnOrder allows a customer to request a return on a delivered/completed order.
@@ -495,6 +529,9 @@ func (h *OrderHandler) ReturnOrder(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	// Trigger refund for returned orders (wallet → wallet credit, gateway → gateway refund).
+	go h.triggerRefund(c.Request.Context(), trackingID, "customer_return")
 
 	updated, _ := h.svc.GetOrder(c.Request.Context(), trackingID)
 	c.JSON(http.StatusOK, gin.H{"status": "return requested", "order": updated})
