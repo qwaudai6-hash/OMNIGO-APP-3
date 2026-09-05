@@ -125,12 +125,6 @@ func main() {
 	router.RedirectTrailingSlash = false
 	router.Use(sentrygin.New(sentrygin.Options{Repanic: true}))
 
-	// BUG-IMAGE-1 FIX: Serve KYC documents uploaded by riders/vendors.
-	// Without this, /uploads/kyc/*.jpg URLs returned by UploadKYC and
-	// VendorVerify handlers would 404 when accessed through the gateway.
-	os.MkdirAll("./uploads/kyc", 0755)
-	router.Static("/uploads", "./uploads")
-
 	// Security middleware: CORS + rate limiting (auth endpoints: 30 req/min stricter)
 	router.Use(middleware.CORS())
 	router.Use(middleware.RateLimit(rdb, 30, time.Minute))
@@ -141,7 +135,7 @@ func main() {
 	})
 	router.GET("/readyz", health.DBPool(db.Writer))
 
-	h.RegisterRoutes(router)
+	h.RegisterRoutes(router, rdb)
 	flowH.RegisterRoutes(router, rdb)
 
 	// 6. Start Server with Graceful Shutdown

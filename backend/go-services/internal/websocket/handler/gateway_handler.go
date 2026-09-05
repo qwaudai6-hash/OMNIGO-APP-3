@@ -25,7 +25,11 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
 		if origin == "" {
-			return true
+			// Reject requests with no Origin header. Browser-initiated
+			// WebSocket upgrades always include Origin; native clients
+			// should send at least a synthetic origin. The JWT auth
+			// layer already runs before this point.
+			return false
 		}
 		u, err := url.Parse(origin)
 		if err != nil || u.Hostname() == "" {

@@ -409,9 +409,10 @@ func main() {
 	startTigerBeetleIfConfigured()
 
 	// Initialize fallback keys if not explicitly provided in environment
+	// SECURITY: Panic on missing critical secrets — never use hardcoded fallbacks
+	// that could be exploited by anyone with source code access.
 	if strings.TrimSpace(os.Getenv("JWT_SECRET_KEY")) == "" {
-		_ = os.Setenv("JWT_SECRET_KEY", "csiPLQIJqstuH6rIa6ulOdjl30RMYqwfk2cwTPoj2nAVHykMdWixUJnwVt6NovAyUDMqLoryPxQOSPM6jr6MlQ==")
-		log.Println("ℹ Using default production JWT_SECRET_KEY")
+		log.Fatal("FATAL: JWT_SECRET_KEY is not set. Generate with: openssl rand -base64 64. Add it to Railway env vars.")
 	}
 	if strings.TrimSpace(os.Getenv("HMAC_SECRET")) == "" {
 		// Generate a random HMAC secret for this process lifetime instead of
@@ -430,24 +431,21 @@ func main() {
 		log.Println("ℹ Derived 64-hex HMAC_TOKEN_ENCRYPTION_KEY from HMAC_SECRET")
 	}
 	if strings.TrimSpace(os.Getenv("ADMIN_API_KEY_ENCRYPTION_KEY")) == "" {
-		_ = os.Setenv("ADMIN_API_KEY_ENCRYPTION_KEY", "/N6AKevpb5gqQ7TpEndfYJ9bHvBU54hQV8I2w+ealsQ=")
-		log.Println("ℹ Using default production ADMIN_API_KEY_ENCRYPTION_KEY")
+		log.Fatal("FATAL: ADMIN_API_KEY_ENCRYPTION_KEY is not set. Generate with: openssl rand -base64 32. Add it to Railway env vars.")
 	}
 	if strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS")) == "" {
-		_ = os.Setenv("CORS_ALLOWED_ORIGINS", "https://omnigo-app-3-production.up.railway.app,https://omnigo-app-production.up.railway.app")
-		log.Println("ℹ Using default production CORS_ALLOWED_ORIGINS")
+		log.Fatal("FATAL: CORS_ALLOWED_ORIGINS is not set. Add your production domain to Railway env vars.")
 	}
 	if strings.TrimSpace(os.Getenv("REDIS_ADDRS")) == "" {
 		if redisURL := os.Getenv("REDIS_URL"); redisURL != "" {
 			_ = os.Setenv("REDIS_ADDRS", redisURL)
 			log.Println("ℹ Using Railway Redis from REDIS_URL")
 		} else {
-			_ = os.Setenv("REDIS_ADDRS", "redis.railway.internal:6379")
-			log.Println("ℹ Using Railway Internal Redis (redis.railway.internal:6379)")
+			log.Fatal("FATAL: REDIS_ADDRS is not set. Add Redis address to Railway env vars.")
 		}
 	}
 	if strings.TrimSpace(os.Getenv("KAFKA_BROKERS")) == "" {
-		_ = os.Setenv("KAFKA_BROKERS", "kafka.railway.internal:9092")
+		log.Println("WARNING: KAFKA_BROKERS not set — Kafka features disabled")
 	}
 
 	// PayFast return URL validation — required for hosted checkout redirects.

@@ -57,8 +57,8 @@ func (s *AuthService) RequestPasswordReset(ctx context.Context, email string) (s
 // ConfirmPasswordReset validates the token, marks it used, and updates
 // the password hash. The token is one-time only.
 func (s *AuthService) ConfirmPasswordReset(ctx context.Context, token, newPassword string) error {
-	if len(newPassword) < 6 {
-		return errors.New("password must be at least 6 characters")
+	if len(newPassword) < 8 {
+		return errors.New("password must be at least 8 characters")
 	}
 	tokenHash := sha256Hex(token)
 
@@ -202,7 +202,10 @@ func (s *AuthService) IsEmailVerified(ctx context.Context, trackingID string) (b
 // enabled until the user verifies their first code via
 // Verify2FAEnrollment.
 func (s *AuthService) Enroll2FA(ctx context.Context, trackingID string) (string, string, error) {
-	secret := generateBase32Secret(20)
+	secret, err := generateBase32Secret(20)
+	if err != nil {
+		return "", "", err
+	}
 	cipher, err := encryptForStorage(secret)
 	if err != nil {
 		return "", "", err
@@ -334,13 +337,13 @@ var hashPlainPassword func(plain string) (string, error)
 
 // generateBase32Secret returns a 20-byte random secret encoded as
 // base32 (RFC 4648, no padding). Used as TOTP shared secret.
-func generateBase32Secret(byteLen int) string {
+func generateBase32Secret(byteLen int) (string, error) {
 	enc := base32.StdEncoding.WithPadding(base32.NoPadding)
 	b := make([]byte, byteLen)
 	if _, err := rand.Read(b); err != nil {
-		return strings.Repeat("A", 32)
+		return "", fmt.Errorf("failed to generate TOTP secret: %w", err)
 	}
-	return strings.TrimRight(enc.EncodeToString(b), "=")
+	return strings.TrimRight(enc.EncodeToString(b), "="), nil
 }
 
 // verifyTOTP returns true if the 6-digit code matches the secret.
@@ -420,9 +423,8 @@ func loadEncryptionKey() []byte {
 		sum := sha256.Sum256([]byte(jwtSecret))
 		return sum[:]
 	}
-	// Deterministic fallback for dev/testing
-	sum := sha256.Sum256([]byte("omnigo-platform-secure-token-key-2026"))
-	return sum[:]
+	// No encryption key available — refuse to start with an insecure key.
+	panic("FATAL: no encryption key available. Set HMAC_TOKEN_ENCRYPTION_KEY, HMAC_SECRET, or JWT_SECRET_KEY env var")
 }
 
 var totpEncryptionKey []byte

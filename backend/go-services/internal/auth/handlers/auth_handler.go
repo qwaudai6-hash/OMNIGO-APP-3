@@ -9,12 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/omnigo/backend/internal/auth/service"
 	sharedAuth "github.com/omnigo/backend/internal/shared/auth"
 	"github.com/omnigo/backend/internal/shared/middleware"
+	"github.com/redis/go-redis/v9"
 )
 
 type AuthHandler struct {
@@ -314,6 +316,9 @@ func (h *AuthHandler) VendorVerify(c *gin.Context) {
 		if err != nil {
 			return ""
 		}
+		if fileHeader.Size > 10*1024*1024 {
+			return ""
+		}
 		ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
 		if !allowedKYCExtensions[ext] {
 			return ""
@@ -356,12 +361,13 @@ func (h *AuthHandler) VendorVerify(c *gin.Context) {
 //   - PATCH /profile
 //   - PUT  /kyc           (vendor or rider)
 //   - PUT  /vendor/verify (vendor only — RoleRequired below)
-func (h *AuthHandler) RegisterRoutes(router *gin.Engine) {
+func (h *AuthHandler) RegisterRoutes(router *gin.Engine, rdb redis.UniversalClient) {
 	auth := router.Group("/api/v1/auth")
 	{
-		// Public
-		auth.POST("/register", h.Register)
-		auth.POST("/login", h.Login)
+		// Public — rate limited: 10 req / 5 min per IP
+		limited := auth.Group("", middleware.RateLimit(rdb, 10, 5*time.Minute))
+		limited.POST("/register", h.Register)
+		limited.POST("/login", h.Login)
 		auth.POST("/refresh", h.Refresh)
 
 		// Protected — any authenticated user
@@ -380,6 +386,10 @@ func (h *AuthHandler) RegisterRoutes(router *gin.Engine) {
 			vendorOnly.PUT("/vendor/verify", h.VendorVerify)
 		}
 	}
+
+	// Protected KYC document download — registered on the root router so
+	// the gateway's /uploads/kyc prefix routes here correctly.
+	router.GET("/uploads/kyc/:filename", middleware.JWTAuth(), h.DownloadKYC)
 }
 
 // Logout handles POST /api/v1/auth/logout
@@ -434,4 +444,36 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, resp)
+}
+
+// DownloadKYC serves a KYC document only if the requesting user owns it.
+// GET /api/v1/auth/uploads/kyc/:filename
+func (h *AuthHandler) DownloadKYC(c *gin.Context) {
+	trackingID, err := h.extractTrackingID(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized: missing or invalid credentials"})
+		return
+	}
+
+	filename := c.Param("filename")
+	if filename == "" || filename == "." || filename == ".." || strings.Contains(filename, "/") || strings.Contains(filename, "\\") || strings.Contains(filename, "..") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid filename"})
+		return
+	}
+
+	expectedPrefix := "/uploads/kyc/" + filename
+	allowed := h.svc.UserOwnsKYCFile(c.Request.Context(), trackingID, expectedPrefix)
+	if !allowed {
+		c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+		return
+	}
+
+	filePath := filepath.Join("./uploads/kyc", filename)
+	info, err := os.Stat(filePath)
+	if err != nil || info.IsDir() {
+		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+		return
+	}
+
+	c.File(filePath)
 }

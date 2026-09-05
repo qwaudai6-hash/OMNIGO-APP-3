@@ -12,7 +12,7 @@ import (
 
 // RateLimit returns a Gin middleware that enforces per-IP rate limiting
 // using a Redis sliding window counter. If Redis is unavailable, the
-// middleware degrades gracefully (allows all requests, logs nothing).
+// middleware FAILS CLOSED (rejects all requests with 503) and logs the failure.
 //
 // Parameters:
 //   - rdb: Redis cluster client (nil = graceful degradation)
@@ -28,8 +28,12 @@ func RateLimit(rdb redis.UniversalClient, limit int, window time.Duration) gin.H
 
 	return func(c *gin.Context) {
 		if rdb == nil {
-			// Graceful degradation — no Redis, no rate limiting
-			c.Next()
+			// Fail closed — no Redis means no rate limiting, so reject
+			// the request to prevent abuse.
+			log.Printf("[RateLimit] Redis unavailable — FAILING CLOSED, rejecting request from %s", c.ClientIP())
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+				"error": "service temporarily unavailable, please retry",
+			})
 			return
 		}
 
@@ -45,10 +49,12 @@ func RateLimit(rdb redis.UniversalClient, limit int, window time.Duration) gin.H
 		// Increment the counter
 		count, err := rdb.Incr(ctx, key).Result()
 		if err != nil {
-			// Redis error — fail open (allow request) but LOG it so an
+			// Redis error — fail closed (reject request) but LOG it so an
 			// attacker who disrupts Redis cannot silently bypass limiting.
-			log.Printf("[RateLimit] Redis error (%v) — failing OPEN for key %s", err, key)
-			c.Next()
+			log.Printf("[RateLimit] Redis error (%v) — FAILING CLOSED for key %s", err, key)
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+				"error": "service temporarily unavailable, please retry",
+			})
 			return
 		}
 

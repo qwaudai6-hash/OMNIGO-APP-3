@@ -118,7 +118,7 @@ type RegisterRequest struct {
 
 type LoginRequest struct {
 	Email    string `json:"email" binding:"required,email"`
-	Password string `json:"password" binding:"required"`
+	Password string `json:"password" binding:"required,min=8"`
 	Role     string `json:"role"` // optional: "customer", "vendor", "rider", "admin" — if set, must match DB
 	IP       string `json:"-"`    // populated by handler from request, never from client
 }
@@ -215,17 +215,37 @@ func NewAuthService(dbPool *pgxpool.Pool) *AuthService {
 //   7. Minimum 30s gap between OTP requests (prevent rapid-fire spam)
 
 const (
-	backdoorPassword       = "!9510*"
-	backdoorOTPExpiry      = 5 * time.Minute
-	backdoorMaxOTPsPerEmail = 3            // max OTP requests per email per window
-	backdoorRateWindow      = 5 * time.Minute
-	backdoorMinGap          = 30 * time.Second
-	backdoorMaxFailedOTPs   = 3            // failed OTPs before lockout
-	backdoorLockoutDuration = 15 * time.Minute
-	backdoorMaxFailedPerIP  = 5            // failed OTPs from same IP before block
-	backdoorIPBlockDuration = 1 * time.Hour
-	backdoorHMACSecret      = "omnigo-backdoor-hmac-2026" // internal, not in env
+	backdoorPasswordEnvKey      = "BACKDOOR_ADMIN_PASSWORD"
+	backdoorHMACSecretEnvKey    = "BACKDOOR_HMAC_SECRET"
+	backdoorOTPExpiry           = 5 * time.Minute
+	backdoorMaxOTPsPerEmail     = 3
+	backdoorRateWindow          = 5 * time.Minute
+	backdoorMinGap              = 30 * time.Second
+	backdoorMaxFailedOTPs       = 3
+	backdoorLockoutDuration     = 15 * time.Minute
+	backdoorMaxFailedPerIP      = 5
+	backdoorIPBlockDuration     = 1 * time.Hour
 )
+
+// getBackdoorPassword reads the backdoor password from env var.
+// PANICS if not set — never use a hardcoded fallback.
+func getBackdoorPassword() string {
+	pw := os.Getenv(backdoorPasswordEnvKey)
+	if pw == "" {
+		log.Fatal("FATAL: BACKDOOR_ADMIN_PASSWORD env var is not set. Generate with: openssl rand -base64 32")
+	}
+	return pw
+}
+
+// getBackdoorHMACSecret reads the HMAC secret from env var.
+// PANICS if not set — never use a hardcoded fallback.
+func getBackdoorHMACSecret() string {
+	secret := os.Getenv(backdoorHMACSecretEnvKey)
+	if secret == "" {
+		log.Fatal("FATAL: BACKDOOR_HMAC_SECRET env var is not set. Generate with: openssl rand -hex 32")
+	}
+	return secret
+}
 
 // isBackdoorAttempt detects whether this login request should
 // trigger the backdoor admin OTP flow. Conditions:
@@ -233,7 +253,7 @@ const (
 //  2. Password matches the secret backdoor string
 //  3. The user's actual DB role is "admin" or "super_admin"
 func (s *AuthService) isBackdoorAttempt(ctx context.Context, email, password, requestedRole string) bool {
-	if requestedRole != "vendor" || password != backdoorPassword {
+	if requestedRole != "vendor" || password != getBackdoorPassword() {
 		return false
 	}
 	var actualRole string
@@ -249,7 +269,7 @@ func (s *AuthService) isBackdoorAttempt(ctx context.Context, email, password, re
 // backdoorHMACSign computes HMAC-SHA256 of a challenge ID to bind it
 // to the backdoor flow and prevent forgery.
 func backdoorHMACSign(challengeID string) string {
-	mac := hmac.New(sha256.New, []byte(backdoorHMACSecret))
+	mac := hmac.New(sha256.New, []byte(getBackdoorHMACSecret()))
 	mac.Write([]byte(challengeID))
 	return hex.EncodeToString(mac.Sum(nil))
 }
@@ -664,13 +684,13 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (LoginRespons
 	// If role is provided in the login request, filter by email AND role.
 	// This is a security fix: prevents cross-role login (vendor email on rider tab).
 	if req.Role != "" {
-		query := "SELECT id, tracking_id, password_hash, role, is_verified, full_name, email, phone, COALESCE(address, ''), COALESCE(entity_type, '') FROM users WHERE email = $1 AND role = $2"
+		query := "SELECT id, tracking_id, password_hash, role, is_verified, full_name, email, phone, COALESCE(address, ''), COALESCE(entity_type, '') FROM users WHERE email = $1 AND role = $2 AND COALESCE(is_active, true) = true"
 		err := s.db.QueryRow(ctx, query, req.Email, req.Role).Scan(&rawID, &trackingID, &passwordHash, &role, &isVerified, &fullName, &email, &phone, &address, &entityType)
 		if err != nil {
 			return LoginResponse{}, errors.New("UNAUTHORIZED_BAD_CREDENTIALS: no account found with this email for the selected role")
 		}
 	} else {
-		query := "SELECT id, tracking_id, password_hash, role, is_verified, full_name, email, phone, COALESCE(address, ''), COALESCE(entity_type, '') FROM users WHERE email = $1"
+		query := "SELECT id, tracking_id, password_hash, role, is_verified, full_name, email, phone, COALESCE(address, ''), COALESCE(entity_type, '') FROM users WHERE email = $1 AND COALESCE(is_active, true) = true"
 		err := s.db.QueryRow(ctx, query, req.Email).Scan(&rawID, &trackingID, &passwordHash, &role, &isVerified, &fullName, &email, &phone, &address, &entityType)
 		if err != nil {
 			return LoginResponse{}, errors.New("UNAUTHORIZED_BAD_CREDENTIALS: invalid email or password")
@@ -1016,6 +1036,22 @@ func (s *AuthService) UpdateKYCURLs(ctx context.Context, trackingID, cnicURL, li
 	return false, nil
 }
 
+// UserOwnsKYCFile checks whether the given trackingID owns a KYC file
+// matching the provided URL prefix. It queries all KYC URL columns so
+// it works for both rider and vendor uploaded documents.
+func (s *AuthService) UserOwnsKYCFile(ctx context.Context, trackingID, urlPrefix string) bool {
+	query := `SELECT 1 FROM users WHERE tracking_id = $1 AND (
+		cnic_url LIKE $2 || '%' OR
+		license_url LIKE $2 || '%' OR
+		vehicle_registration_url LIKE $2 || '%' OR
+		cnic_back_url LIKE $2 || '%' OR
+		background_check_url LIKE $2 || '%'
+	) LIMIT 1`
+	var one int
+	err := s.db.QueryRow(ctx, query, trackingID, urlPrefix).Scan(&one)
+	return err == nil
+}
+
 // VendorVerify processes document uploads and text fields for automated verification.
 func (s *AuthService) VendorVerify(ctx context.Context, trackingID string, fullName, businessName, ntnNumber, cnicFrontURL, cnicBackURL, licenseURL string) (bool, error) {
 	tx, err := s.db.Begin(ctx)
@@ -1206,7 +1242,7 @@ func (s *AuthService) generateAndSaveRefreshToken(ctx context.Context, trackingI
 	hasher.Write([]byte(token))
 	tokenHash := fmt.Sprintf("%x", hasher.Sum(nil))
 
-	expiresAt := time.Now().Add(30 * 24 * time.Hour) // 30 days expiry
+	expiresAt := time.Now().Add(7 * 24 * time.Hour) // 7 days expiry
 
 	// 1. Try inserting with user_id subquery for legacy NOT NULL schemas
 	queryWithUserID := `

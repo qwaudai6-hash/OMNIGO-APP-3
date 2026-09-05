@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -163,12 +164,20 @@ func (h *CheckoutHandler) CreateCheckout(c *gin.Context) {
 				adminRevenue = split.AdminRevenue
 			}
 
-			metadata := fmt.Sprintf(`{"customer_id":"%s","amount_paisa":%d}`, req.CustomerID, amountPaisa)
+			metadataJSON, marshalErr := json.Marshal(map[string]interface{}{
+				"customer_id":  req.CustomerID,
+				"amount_paisa": amountPaisa,
+			})
+			if marshalErr != nil {
+				log.Printf("CRITICAL: failed to marshal payment metadata for order %s: %v", req.OrderID, marshalErr)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "payment processing failed"})
+				return
+			}
 			_, err = tx.Exec(c.Request.Context(), `
 				INSERT INTO payment_transactions (transaction_id, order_tracking_id, gateway, gateway_txn_id, amount, currency, status, kind, idempotency_key, metadata, created_at, updated_at)
 				VALUES ($1, $2, 'wallet', $3, $4, 'PKR', 'settlement_pending', 'payment', $5, $6::jsonb, NOW(), NOW())
 				ON CONFLICT (idempotency_key) DO NOTHING
-			`, internalTxnID, req.OrderID, txnID, float64(amountPaisa)/100.0, fmt.Sprintf("wallet:%s", req.OrderID), metadata)
+			`, internalTxnID, req.OrderID, txnID, float64(amountPaisa)/100.0, fmt.Sprintf("wallet:%s", req.OrderID), string(metadataJSON))
 			if err != nil {
 				log.Printf("CRITICAL: Wallet deducted but payment_transactions insert failed for order %s: %v", req.OrderID, err)
 				refundErr := h.walletSvc.RefundForFailedPayment(c.Request.Context(), req.CustomerID, req.OrderID, amountPaisa)

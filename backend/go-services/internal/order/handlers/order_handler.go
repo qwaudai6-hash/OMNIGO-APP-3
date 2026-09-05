@@ -509,6 +509,9 @@ func (h *OrderHandler) GetMyOrders(c *gin.Context) {
 	}
 
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	if limit > 500 {
+		limit = 50
+	}
 	status := c.Query("status")
 
 	orders, err := h.svc.GetOrdersByCustomer(c.Request.Context(), callerID, limit, status)

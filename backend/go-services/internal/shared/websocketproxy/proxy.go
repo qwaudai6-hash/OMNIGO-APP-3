@@ -42,12 +42,16 @@ func loadAllowedOrigins() {
 		raw = os.Getenv("CORS_ALLOWED_ORIGINS")
 	}
 	allowedOriginsRaw.Store(raw)
+	env := os.Getenv("APP_ENV")
 	switch {
-	case raw == "":
+	case raw == "", raw == "*":
+		if env != "development" && env != "" {
+			panic("FATAL: WS_ALLOWED_ORIGINS must be set in production (APP_ENV=" + env + "). " +
+				"An open WebSocket origin policy is a security risk. " +
+				"Example: WS_ALLOWED_ORIGINS=https://omnigo-app-production.up.railway.app," +
+				"https://store.omnigo.pk")
+		}
 		allowedOriginsMode.Store(modeReflect)
-	case raw == "*":
-		allowedOriginsMode.Store(modeReflect)
-		allowedOriginsRaw.Store("*")
 	default:
 		allowedOriginsMode.Store(modeAllow)
 		parts := strings.Split(raw, ",")
@@ -85,15 +89,14 @@ func originAllowed(origin string) bool {
 	return false
 }
 
-// upgrader is intentionally permissive about WebSocket headers but strict
-// about Origin (handled in originAllowed above).
+// upgrader enforces origin policy via originAllowed so that even direct
+// callers of upgrader.Upgrade are protected.
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	// We do our own Origin check in Proxy before calling Upgrade. The
-	// default CheckOrigin is the gorilla "permit all" — DO NOT trust it
-	// alone.
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin: func(r *http.Request) bool {
+		return originAllowed(r.Header.Get("Origin"))
+	},
 }
 
 // IsWebSocketRequest reports whether r is a WebSocket upgrade request.
