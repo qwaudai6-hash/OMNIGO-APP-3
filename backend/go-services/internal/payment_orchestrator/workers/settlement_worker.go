@@ -258,12 +258,17 @@ func (w *SettlementWorker) processSingleSettlement(ctx context.Context, eventID 
 	defer tx.Rollback(ctx)
 
 	// 1. Lock/Update orders FIRST (Global lock order: orders -> payment_transactions)
-	_, err = tx.Exec(ctx,
-		`UPDATE orders SET status = 'paid', payment_status = 'paid', updated_at = NOW() WHERE order_tracking_id = $1`,
+	// H4 FIX: Add status guard to prevent double-payment if same outbox event processed twice
+	result, err := tx.Exec(ctx,
+		`UPDATE orders SET status = 'paid', payment_status = 'paid', updated_at = NOW() WHERE order_tracking_id = $1 AND status != 'paid'`,
 		payload.OrderID,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update order to paid: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		// Order already paid — skip silently (idempotent)
+		return nil
 	}
 
 	// 2. Update payment_transactions SECOND
