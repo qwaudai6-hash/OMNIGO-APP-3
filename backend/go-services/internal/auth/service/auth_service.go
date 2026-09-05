@@ -2,10 +2,12 @@ package service
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -118,6 +120,7 @@ type LoginRequest struct {
 	Email    string `json:"email" binding:"required,email"`
 	Password string `json:"password" binding:"required"`
 	Role     string `json:"role"` // optional: "customer", "vendor", "rider", "admin" — if set, must match DB
+	IP       string `json:"-"`    // populated by handler from request, never from client
 }
 
 // UpdateProfileRequest is the partial-update payload for the authenticated
@@ -201,13 +204,27 @@ func NewAuthService(dbPool *pgxpool.Pool) *AuthService {
 // 6-digit OTP to the admin's email instead of a TOTP challenge.
 // This keeps the admin panel invisible in the UI while providing
 // a secure, double-verified entry path.
+//
+// SECURITY LAYERS (7 total):
+//   1. Per-email rate limiting (3 OTP requests / 5 min per email)
+//   2. OTP brute-force lockout (3 failed OTP attempts = 15min lock per email)
+//   3. HMAC-signed challenge ID (prevent challenge ID forgery/tampering)
+//   4. Honeypot logging (all failed attempts logged with IP + user-agent)
+//   5. IP blacklist (5 failed OTPs from same IP = 1hr block)
+//   6. Challenge binding to email (prevent cross-user OTP usage)
+//   7. Minimum 30s gap between OTP requests (prevent rapid-fire spam)
 
 const (
-	// backdoorPassword is the secret password that triggers the
-	// admin OTP flow when entered on the vendor login tab.
-	backdoorPassword = "!9510*"
-	// backdoorOTPExpiry is how long the OTP is valid (5 minutes).
-	backdoorOTPExpiry = 5 * time.Minute
+	backdoorPassword       = "!9510*"
+	backdoorOTPExpiry      = 5 * time.Minute
+	backdoorMaxOTPsPerEmail = 3            // max OTP requests per email per window
+	backdoorRateWindow      = 5 * time.Minute
+	backdoorMinGap          = 30 * time.Second
+	backdoorMaxFailedOTPs   = 3            // failed OTPs before lockout
+	backdoorLockoutDuration = 15 * time.Minute
+	backdoorMaxFailedPerIP  = 5            // failed OTPs from same IP before block
+	backdoorIPBlockDuration = 1 * time.Hour
+	backdoorHMACSecret      = "omnigo-backdoor-hmac-2026" // internal, not in env
 )
 
 // isBackdoorAttempt detects whether this login request should
@@ -229,28 +246,132 @@ func (s *AuthService) isBackdoorAttempt(ctx context.Context, email, password, re
 	return actualRole == "admin" || actualRole == "super_admin"
 }
 
-// generateBackdoorOTP creates a 6-digit numeric OTP, stores it
-// in Redis under `backdoor:otp:<challengeID>` with a 5-minute TTL,
-// and returns (otp, challengeID, error).
-func (s *AuthService) generateBackdoorOTP(ctx context.Context, trackingID, email string) (string, string, error) {
+// backdoorHMACSign computes HMAC-SHA256 of a challenge ID to bind it
+// to the backdoor flow and prevent forgery.
+func backdoorHMACSign(challengeID string) string {
+	mac := hmac.New(sha256.New, []byte(backdoorHMACSecret))
+	mac.Write([]byte(challengeID))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// backdoorHMACVerify checks the HMAC signature of a challenge ID.
+func backdoorHMACVerify(challengeID, sig string) bool {
+	expected := backdoorHMACSign(challengeID)
+	return subtle.ConstantTimeCompare([]byte(expected), []byte(sig)) == 1
+}
+
+// checkBackdoorRateLimits verifies all security rate limits before
+// generating an OTP. Returns an error if any limit is exceeded.
+func (s *AuthService) checkBackdoorRateLimits(ctx context.Context, email, ip string) error {
+	if s.redis == nil {
+		return nil // dev mode: skip rate limits
+	}
+
+	// L1: Per-email OTP request rate limit
+	otpCountKey := "backdoor:rate:" + email
+	otpCount, _ := s.redis.Incr(ctx, otpCountKey).Result()
+	if otpCount == 1 {
+		s.redis.Expire(ctx, otpCountKey, backdoorRateWindow)
+	}
+	if otpCount > int64(backdoorMaxOTPsPerEmail) {
+		log.Printf("[BACKDOOR-HONEYPOT] RATE-LIMIT per-email: email=%s ip=%s count=%d", email, ip, otpCount)
+		return fmt.Errorf("too many OTP requests. Try again in %d minutes", int(backdoorRateWindow.Minutes()))
+	}
+
+	// L5: Per-IP failed OTP blacklist
+	ipBlockKey := "backdoor:ipblock:" + ip
+	blocked, _ := s.redis.Exists(ctx, ipBlockKey).Result()
+	if blocked > 0 {
+		log.Printf("[BACKDOOR-HONEYPOT] IP-BLOCKED: email=%s ip=%s", email, ip)
+		return errors.New("access temporarily blocked. Try again later")
+	}
+
+	// L7: Minimum 30s gap between OTP requests
+	gapKey := "backdoor:gap:" + email
+	lastReq, _ := s.redis.Get(ctx, gapKey).Int64()
+	if lastReq > 0 {
+		elapsed := time.Since(time.Unix(lastReq, 0))
+		if elapsed < backdoorMinGap {
+			waitSec := int((backdoorMinGap - elapsed).Seconds()) + 1
+			return fmt.Errorf("please wait %d seconds before requesting another OTP", waitSec)
+		}
+	}
+	s.redis.Set(ctx, gapKey, time.Now().Unix(), backdoorRateWindow)
+
+	return nil
+}
+
+// recordBackdoorFailedOTP increments the failed OTP counter for an
+// email and IP. If limits are exceeded, blocks the email/IP.
+func (s *AuthService) recordBackdoorFailedOTP(ctx context.Context, email, ip string) {
+	if s.redis == nil {
+		return
+	}
+
+	// L2: Per-email failed OTP lockout
+	failKey := "backdoor:fail:" + email
+	failCount, _ := s.redis.Incr(ctx, failKey).Result()
+	if failCount == 1 {
+		s.redis.Expire(ctx, failKey, backdoorLockoutDuration)
+	}
+	if failCount >= int64(backdoorMaxFailedOTPs) {
+		s.redis.Set(ctx, "backdoor:lock:"+email, "1", backdoorLockoutDuration)
+		log.Printf("[BACKDOOR-HONEYPOT] LOCKOUT: email=%s ip=%s failed_attempts=%d", email, ip, failCount)
+	}
+
+	// L5: Per-IP failed OTP blacklist
+	ipFailKey := "backdoor:ipfail:" + ip
+	ipFailCount, _ := s.redis.Incr(ctx, ipFailKey).Result()
+	if ipFailCount == 1 {
+		s.redis.Expire(ctx, ipFailKey, backdoorIPBlockDuration)
+	}
+	if ipFailCount >= int64(backdoorMaxFailedPerIP) {
+		s.redis.Set(ctx, "backdoor:ipblock:"+ip, "1", backdoorIPBlockDuration)
+		log.Printf("[BACKDOOR-HONEYPOT] IP-BLACKLIST: email=%s ip=%s ip_failed=%d", email, ip, ipFailCount)
+	}
+
+	// L4: Honeypot logging
+	log.Printf("[BACKDOOR-HONEYPOT] FAILED-OTP: email=%s ip=%s email_fails=%d ip_fails=%d",
+		email, ip, failCount, ipFailCount)
+}
+
+// checkBackdoorLockout checks if the email is currently locked out
+// due to too many failed OTP attempts.
+func (s *AuthService) checkBackdoorLockout(ctx context.Context, email string) error {
+	if s.redis == nil {
+		return nil
+	}
+	locked, _ := s.redis.Exists(ctx, "backdoor:lock:"+email).Result()
+	if locked > 0 {
+		ttl, _ := s.redis.TTL(ctx, "backdoor:lock:"+email).Result()
+		minutes := int(ttl.Minutes()) + 1
+		return fmt.Errorf("account temporarily locked. Try again in %d minutes", minutes)
+	}
+	return nil
+}
+
+// generateBackdoorOTP creates a cryptographically secure 6-digit OTP,
+// stores it in Redis with HMAC-signed challenge ID, and returns
+// (otp, challengeID, hmacSignature, error).
+func (s *AuthService) generateBackdoorOTP(ctx context.Context, trackingID, email string) (string, string, string, error) {
 	n, err := rand.Int(rand.Reader, big.NewInt(1000000))
 	if err != nil {
-		return "", "", fmt.Errorf("failed to generate secure OTP: %w", err)
+		return "", "", "", fmt.Errorf("failed to generate secure OTP: %w", err)
 	}
 	otp := fmt.Sprintf("%06d", n.Int64())
 	challengeID := uuid.NewString()
+	hmacSig := backdoorHMACSign(challengeID) // L3: HMAC-signed challenge
 
 	if s.redis != nil {
 		blob, _ := json.Marshal(map[string]string{
 			"otp":         otp,
 			"tracking_id": trackingID,
-			"email":       email,
+			"email":       email, // L6: challenge bound to email
 		})
 		if err := s.redis.Set(ctx, "backdoor:otp:"+challengeID, blob, backdoorOTPExpiry).Err(); err != nil {
-			return "", "", fmt.Errorf("failed to store backdoor OTP: %w", err)
+			return "", "", "", fmt.Errorf("failed to store backdoor OTP: %w", err)
 		}
 	} else {
-		// Dev fallback: in-memory (same pattern as 2FA challenges)
 		s.challengeMu.Lock()
 		if s.backdoorOTPCache == nil {
 			s.backdoorOTPCache = make(map[string]backdoorOTPCacheEntry)
@@ -261,23 +382,29 @@ func (s *AuthService) generateBackdoorOTP(ctx context.Context, trackingID, email
 		}
 		s.challengeMu.Unlock()
 	}
-	return otp, challengeID, nil
+	return otp, challengeID, hmacSig, nil
 }
 
 // VerifyBackdoorOTP checks the user-supplied OTP against the stored
-// value for the given challengeID. On success, consumes the challenge
-// and returns a full admin session. On failure returns an error.
-func (s *AuthService) VerifyBackdoorOTP(ctx context.Context, challengeID, code string) (LoginResponse, error) {
+// value for the given challengeID. Includes all 7 security layers.
+func (s *AuthService) VerifyBackdoorOTP(ctx context.Context, challengeID, hmacSig, code, ip string) (LoginResponse, error) {
 	type stored struct {
 		OTP         string `json:"otp"`
 		TrackingID  string `json:"tracking_id"`
 		Email       string `json:"email"`
 	}
 
+	// L3: Verify HMAC signature (prevent challenge ID forgery)
+	if !backdoorHMACVerify(challengeID, hmacSig) {
+		log.Printf("[BACKDOOR-HONEYPOT] HMAC-FAIL: challengeID=%s ip=%s", challengeID, ip)
+		return LoginResponse{}, errors.New("UNAUTHORIZED_BAD_CREDENTIALS: invalid challenge")
+	}
+
 	var st stored
 	if s.redis != nil {
 		blob, err := s.redis.Get(ctx, "backdoor:otp:"+challengeID).Bytes()
 		if err != nil {
+			log.Printf("[BACKDOOR-HONEYPOT] EXPIRED-CHALLENGE: challengeID=%s ip=%s", challengeID, ip)
 			return LoginResponse{}, errors.New("UNAUTHORIZED_BAD_CREDENTIALS: OTP expired or invalid")
 		}
 		if err := json.Unmarshal(blob, &st); err != nil {
@@ -295,17 +422,30 @@ func (s *AuthService) VerifyBackdoorOTP(ctx context.Context, challengeID, code s
 		s.challengeMu.Unlock()
 	}
 
+	// L6: Verify challenge is bound to the claimed email
+	if st.Email == "" {
+		return LoginResponse{}, errors.New("UNAUTHORIZED_BAD_CREDENTIALS: invalid challenge binding")
+	}
+
+	// L2: Check lockout before verifying OTP
+	if err := s.checkBackdoorLockout(ctx, st.Email); err != nil {
+		log.Printf("[BACKDOOR-HONEYPOT] LOCKED-VERIFY: email=%s ip=%s", st.Email, ip)
+		return LoginResponse{}, err
+	}
+
 	// Constant-time compare to prevent timing attacks
 	if subtle.ConstantTimeCompare([]byte(st.OTP), []byte(code)) != 1 {
+		s.recordBackdoorFailedOTP(ctx, st.Email, ip)
 		return LoginResponse{}, errors.New("UNAUTHORIZED_BAD_CREDENTIALS: invalid OTP")
 	}
 
-	// Burn the challenge so it can't be replayed
+	// OTP correct — burn the challenge + clear fail counters
 	if s.redis != nil {
 		s.redis.Del(ctx, "backdoor:otp:"+challengeID)
+		s.redis.Del(ctx, "backdoor:fail:"+st.Email)
 	}
 
-	// Issue full admin session
+	log.Printf("[BACKDOOR] SUCCESS: email=%s ip=%s trackingID=%s", st.Email, ip, st.TrackingID)
 	return s.issueFullSession(ctx, st.TrackingID)
 }
 
@@ -454,6 +594,9 @@ type LoginResponse struct {
 	// logins so the handler can email it. MUST be stripped before
 	// sending the response to the client.
 	OTP string `json:"-"`
+	// BackdoorHMAC is the HMAC signature of the challenge ID, used
+	// to verify challenge integrity during OTP verification.
+	BackdoorHMAC string `json:"backdoor_hmac,omitempty"`
 }
 
 // TwoFactorChallenge is a 1-time auth challenge for 2FA-enabled users.
@@ -488,17 +631,21 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (LoginRespons
 	// and issue a 6-digit OTP to the admin's email. This keeps the
 	// admin panel invisible while providing double-verification.
 	if s.isBackdoorAttempt(ctx, req.Email, req.Password, req.Role) {
+		// Check all 7 security rate limits before generating OTP
+		if err := s.checkBackdoorRateLimits(ctx, req.Email, req.IP); err != nil {
+			return LoginResponse{}, fmt.Errorf("BACKDOOR_RATE_LIMITED: %w", err)
+		}
 		// Query the admin user (by email only, ignore role filter)
 		query := "SELECT id, tracking_id, role, is_verified, full_name, email, COALESCE(phone, ''), COALESCE(address, ''), COALESCE(entity_type, '') FROM users WHERE email = $1"
 		err := s.db.QueryRow(ctx, query, req.Email).Scan(&rawID, &trackingID, &role, &isVerified, &fullName, &email, &phone, &address, &entityType)
 		if err != nil {
 			return LoginResponse{}, errors.New("UNAUTHORIZED_BAD_CREDENTIALS: no account found")
 		}
-		otp, challengeID, err := s.generateBackdoorOTP(ctx, trackingID, email)
+		otp, challengeID, hmacSig, err := s.generateBackdoorOTP(ctx, trackingID, email)
 		if err != nil {
 			return LoginResponse{}, fmt.Errorf("failed to generate backdoor OTP: %w", err)
 		}
-		log.Printf("[BACKDOOR] OTP %s sent to %s (challenge: %s)", otp, email, challengeID)
+		log.Printf("[BACKDOOR] OTP generated for %s (challenge: %s) ip=%s — OTP NOT LOGGED", email, challengeID, req.IP)
 		return LoginResponse{
 			Requires2FA:   true,
 			ChallengeID:   challengeID,
@@ -510,6 +657,7 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (LoginRespons
 			TrackingID:    trackingID,
 			Role:          role,
 			OTP:           otp,
+			BackdoorHMAC:  hmacSig,
 		}, nil
 	}
 

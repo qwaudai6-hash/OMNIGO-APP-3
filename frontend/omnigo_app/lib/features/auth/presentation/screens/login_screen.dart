@@ -42,6 +42,7 @@ class LoginScreenState extends State<LoginScreen> {
         }
         final isBackdoor = response['is_backdoor'] == true;
         final backdoorHint = response['backdoor_hint']?.toString() ?? '';
+        final backdoorHmac = response['backdoor_hmac']?.toString() ?? '';
         if (!mounted) return;
         final code = await _promptTwoFactorCode(
           context,
@@ -50,16 +51,19 @@ class LoginScreenState extends State<LoginScreen> {
           backdoorHint: backdoorHint,
         );
         if (code == null) {
-          // User cancelled the 2FA dialog.
           if (mounted) setState(() => _isLoading = false);
           return;
         }
-        // Backdoor OTP goes to a different endpoint
+        // Backdoor OTP goes to a different endpoint with HMAC signature
         final endpoint = isBackdoor ? '/auth/backdoor-otp/verify' : '/auth/2fa/challenge';
-        final challengeResp = await _apiClient.post(endpoint, {
+        final payload = <String, dynamic>{
           'challenge_id': challengeId,
           'code': code,
-        });
+        };
+        if (isBackdoor) {
+          payload['hmac'] = backdoorHmac;
+        }
+        final challengeResp = await _apiClient.post(endpoint, payload);
         await _completeLogin(challengeResp);
         return;
       }

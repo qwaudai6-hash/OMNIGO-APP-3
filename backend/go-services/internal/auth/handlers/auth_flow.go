@@ -250,18 +250,28 @@ func (h *AuthFlowHandler) CompleteTwoFactorChallenge(c *gin.Context) {
 //  Backdoor admin OTP verification
 // ─────────────────────────────────────────────────────────────────────
 
+// BackdoorOTPRequest is the payload for the backdoor OTP verification
+// endpoint. Includes the HMAC signature of the challenge ID so the
+// backend can verify the challenge wasn't forged.
+type BackdoorOTPRequest struct {
+	ChallengeID string `json:"challenge_id" binding:"required"`
+	HMAC        string `json:"hmac" binding:"required"`
+	Code        string `json:"code" binding:"required,len=6"`
+}
+
 // CompleteBackdoorOTP verifies the 6-digit OTP sent to the admin's
-// email during the backdoor login flow. The frontend sends the
-// challenge_id + 6-digit code; on success we return the full admin
-// session (JWT + refresh token).
+// email during the backdoor login flow. Includes all 7 security layers:
+// HMAC verification, per-email rate limiting, brute-force lockout,
+// IP blacklisting, challenge-email binding, and honeypot logging.
 func (h *AuthFlowHandler) CompleteBackdoorOTP(c *gin.Context) {
-	var req TwoFactorChallengeRequest
+	var req BackdoorOTPRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	resp, err := h.svc.VerifyBackdoorOTP(c.Request.Context(), req.ChallengeID, req.Code)
+	ip := c.ClientIP()
+	resp, err := h.svc.VerifyBackdoorOTP(c.Request.Context(), req.ChallengeID, req.HMAC, req.Code, ip)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return

@@ -77,6 +77,8 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	// Normalize email to lowercase
 	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+	// Inject client IP for backdoor security logging (never from client)
+	req.IP = c.ClientIP()
 
 	resp, err := h.svc.Login(c.Request.Context(), req)
 	if err != nil {
