@@ -170,6 +170,24 @@ func (s *RiderWalletService) CreditDelivery(ctx context.Context, riderTrackingID
 		}
 	}
 
+	// Move admin commission from central_escrow to admin_revenue so it doesn't
+	// sit orphaned in central_escrow forever.
+	if s.ledger != nil && adminCommissionPaisa > 0 {
+		idempotencyKey := fmt.Sprintf("delivery:admin_comm:%s", deliveryID)
+		if _, err := s.ledger.Transfer(ctx, ledger.TransferRequest{
+			DebitAccount:   ledger.AccountCentralEscrow,
+			CreditAccount:  ledger.AccountAdminRevenue,
+			Amount:         adminCommissionPaisa,
+			Currency:       "PKR",
+			ReferenceType:  "delivery_commission",
+			ReferenceID:    deliveryID,
+			Description:    fmt.Sprintf("Delivery admin commission from central_escrow: %d paisa", adminCommissionPaisa),
+			IdempotencyKey: idempotencyKey,
+		}); err != nil {
+			fmt.Printf("[RiderWallet] Warning: admin commission ledger transfer failed for delivery %s: %v\n", deliveryID, err)
+		}
+	}
+
 	return nil
 }
 

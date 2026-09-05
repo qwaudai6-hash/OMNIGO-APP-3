@@ -25,6 +25,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   bool _isLoading = false;
   late final String _checkoutSessionNonce;
   String? _createdOrderTrackingId;
+  double _deliveryFee = 0.0;
+  bool _deliveryFeeLoading = false;
 
   // Real delivery location — fetched from GPS
   String _deliveryAddress = 'Fetching your location...';
@@ -155,6 +157,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           _deliveryAddress = address;
           _isFetchingLocation = false;
         });
+        _estimateDeliveryFee();
       }
     } catch (e) {
       if (mounted) {
@@ -162,6 +165,41 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           _locationError = 'Failed to get location: $e';
           _isFetchingLocation = false;
         });
+      }
+    }
+  }
+
+  Future<void> _estimateDeliveryFee() async {
+    if (_deliveryLocation == null) return;
+    final cart = context.read<CartProvider>();
+    final storeId = cart.currentStoreId;
+    if (storeId == null || storeId.isEmpty) return;
+
+    setState(() => _deliveryFeeLoading = true);
+    try {
+      final resp = await sl<ApiClient>().post(
+        ApiEndpoints.deliveryEstimateFee(),
+        {
+          'vendor_store_tracking_id': storeId,
+          'dropoff_lat': _deliveryLocation!.latitude,
+          'dropoff_lng': _deliveryLocation!.longitude,
+        },
+      );
+      if (mounted && resp != null) {
+        final fee = (resp['delivery_fee'] is num) ? (resp['delivery_fee'] as num).toDouble() : 50.0;
+        setState(() {
+          _deliveryFee = fee;
+          _deliveryFeeLoading = false;
+        });
+        cart.setDeliveryFee(fee);
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _deliveryFee = 50.0;
+          _deliveryFeeLoading = false;
+        });
+        cart.setDeliveryFee(50.0);
       }
     }
   }
@@ -643,11 +681,13 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                         ],
                       ),
                       const SizedBox(height: 8),
-                      const Row(
+                      Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          Text('Delivery Fee', style: TextStyle(color: Colors.grey)),
-                          Text('Free Delivery', style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold)),
+                          const Text('Delivery Fee', style: TextStyle(color: Colors.grey)),
+                          _deliveryFeeLoading
+                              ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                              : Text('PKR ${_deliveryFee.toStringAsFixed(0)}', style: const TextStyle(color: Colors.green, fontWeight: FontWeight.bold)),
                         ],
                       ),
                       const Divider(),
@@ -657,6 +697,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                           const Text('Total', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
                           Text('PKR ${cart.totalAmount.toStringAsFixed(0)}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Colors.redAccent)),
                         ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '* Delivery fee (PKR ${_deliveryFee.toStringAsFixed(0)}) is included by the platform — no extra charge to you',
+                        style: TextStyle(fontSize: 11, color: Colors.grey[600]),
                       ),
                     ],
                   ),

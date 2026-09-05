@@ -9,13 +9,21 @@ class CartProvider extends ChangeNotifier {
   // #35: Simple mutex pattern for _saveToStorage to prevent concurrent writes
   bool _isSaving = false;
   bool _pendingSave = false;
+  double _deliveryFee = 0.0;
 
   Map<String, CartItem> get items => {..._items};
 
   int get itemCount => _items.values.fold(0, (sum, item) => sum + item.quantity);
   double get totalAmount => _items.values.fold(0.0, (sum, item) => sum + (item.price * item.quantity));
+  double get deliveryFee => _deliveryFee;
+  double get grandTotal => totalAmount + _deliveryFee;
 
   String? get currentStoreId => _items.values.isNotEmpty ? _items.values.first.storeTrackingId : null;
+
+  void setDeliveryFee(double fee) {
+    _deliveryFee = fee;
+    notifyListeners();
+  }
 
   bool isDifferentStore(String storeTrackingId) {
     if (_items.isEmpty) return false;

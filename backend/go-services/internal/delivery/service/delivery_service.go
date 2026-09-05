@@ -125,8 +125,19 @@ func (s *DeliveryService) StartKafkaConsumer(ctx context.Context) {
 					if orderID != "" {
 						log.Printf("[Delivery] Order %s cancelled. Cancelling active/pending delivery gigs.", orderID)
 						if err := s.repo.CancelDeliveryForOrder(ctx, orderID, "Order cancelled by customer/vendor"); err != nil {
-							// BUG-07 FIX: Log error for ops visibility instead of silently discarding.
 							log.Printf("[Delivery] CRITICAL: Failed to cancel delivery for order %s: %v — rider may still see active delivery", orderID, err)
+						}
+						// Notify affected riders via Redis Stream so they see the gig disappear
+						if s.streams != nil {
+							gig, _ := s.repo.GetGigByOrderTrackingID(ctx, orderID)
+							if gig != nil && gig.RiderTrackingID != "" {
+								_ = s.streams.Publish(ctx, StreamRiderEvents, map[string]interface{}{
+									"event":             "gig_cancelled",
+									"gig_id":            gig.TrackingID,
+									"order_tracking_id": orderID,
+									"reason":            cancelPayload.Reason,
+								})
+							}
 						}
 					}
 				}
@@ -690,6 +701,32 @@ func (s *DeliveryService) EstimateRide(ctx context.Context, req *models.RideEsti
 		Geometry:    coords,
 		RouteSource: routeSource,
 	}, nil
+}
+
+// EstimateDeliveryFee returns the estimated delivery fee for a store → dropoff pair.
+// Used by the checkout screen to show the real delivery fee before order creation.
+func (s *DeliveryService) EstimateDeliveryFee(ctx context.Context, storeTrackID string, dropoffLat, dropoffLng float64) (float64, float64, float64, error) {
+	// Get store coordinates
+	lat, lng, err := s.repo.GetStoreCoordinates(ctx, storeTrackID)
+	if err != nil || (lat == 0 && lng == 0) {
+		return 0, 0, 0, fmt.Errorf("store coordinates not found")
+	}
+
+	km, _, _, _ := s.estimateDistanceAndETA(ctx, lng, lat, dropoffLng, dropoffLat)
+
+	baseFare := envFloat("DELIVERY_BASE_FARE", 50.0)
+	perKmRate := envFloat("DELIVERY_PER_KM_RATE", 15.0)
+	nightMultiplier := 1.0
+	hour := time.Now().Hour()
+	if hour >= 23 || hour <= 6 {
+		nightMultiplier = envFloat("DELIVERY_NIGHT_MULTIPLIER", 1.5)
+	}
+
+	totalFare := (baseFare + (perKmRate * km)) * nightMultiplier
+	adminComm := totalFare * (envFloat("DELIVERY_COMMISSION_PERCENT", 5.0) / 100.0)
+	riderEarning := totalFare - adminComm
+
+	return totalFare, adminComm, riderEarning, nil
 }
 
 func (s *DeliveryService) estimateDistanceAndETA(ctx context.Context, pickupLng, pickupLat, dropoffLng, dropoffLat float64) (km, seconds float64, coords [][]float64, err error) {

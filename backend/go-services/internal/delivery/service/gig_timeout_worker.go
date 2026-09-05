@@ -177,6 +177,26 @@ func (w *GigTimeoutWorker) cancelGigAndOrder(ctx context.Context, gigTrackingID,
 				fmt.Printf("[GigTimeout] Warning: Failed to produce orders.cancelled for %s: %v\n", orderTrackingID, err)
 			}
 		})
+
+		// Also emit refund event so payment service can refund the customer.
+		// The payment service will check order status and skip if not paid.
+		refundEvent := map[string]interface{}{
+			"order_tracking_id": orderTrackingID,
+			"reason":            "no_rider_available",
+			"refund_amount":     0, // 0 = full refund
+			"timestamp":         time.Now().UnixMilli(),
+		}
+		refundBytes, _ := json.Marshal(refundEvent)
+		refundRecord := &kgo.Record{
+			Topic: "orders.refunded",
+			Key:   []byte(orderTrackingID),
+			Value: refundBytes,
+		}
+		w.kafka.Produce(ctx, refundRecord, func(_ *kgo.Record, err error) {
+			if err != nil {
+				fmt.Printf("[GigTimeout] Warning: Failed to produce orders.refunded for %s: %v\n", orderTrackingID, err)
+			}
+		})
 	}
 
 	log.Printf("[GigTimeout] Cancelled gig %s and order %s (no rider available after timeout)", gigTrackingID, orderTrackingID)

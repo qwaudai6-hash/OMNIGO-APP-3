@@ -149,6 +149,39 @@ func (h *DeliveryHandler) EstimateRide(c *gin.Context) {
 	c.JSON(http.StatusOK, estimates)
 }
 
+// EstimateDeliveryFee returns the estimated delivery fee for a store → dropoff pair.
+// POST /api/v1/delivery/estimate-fee  { "vendor_store_tracking_id": "...", "dropoff_lat": 0, "dropoff_lng": 0 }
+func (h *DeliveryHandler) EstimateDeliveryFee(c *gin.Context) {
+	var req struct {
+		VendorStoreTrackID string  `json:"vendor_store_tracking_id" binding:"required"`
+		DropoffLat         float64 `json:"dropoff_lat" binding:"required"`
+		DropoffLng         float64 `json:"dropoff_lng" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	fee, adminComm, riderEarning, err := h.svc.EstimateDeliveryFee(c.Request.Context(), req.VendorStoreTrackID, req.DropoffLat, req.DropoffLng)
+	if err != nil {
+		// Return default estimate on failure rather than blocking checkout
+		c.JSON(http.StatusOK, gin.H{
+			"delivery_fee":    50.0,
+			"admin_commission": 2.5,
+			"rider_earning":    47.5,
+			"estimated":       false,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"delivery_fee":    fmt.Sprintf("%.0f", fee),
+		"admin_commission": fmt.Sprintf("%.0f", adminComm),
+		"rider_earning":    fmt.Sprintf("%.0f", riderEarning),
+		"estimated":       true,
+	})
+}
+
 // RegisterRoutes attaches the handlers to the gin router
 func (h *DeliveryHandler) RegisterRoutes(router *gin.Engine) {
 	// Serve static files from uploads folder
@@ -167,6 +200,7 @@ func (h *DeliveryHandler) RegisterRoutes(router *gin.Engine) {
 		}
 
 		// Authenticated delivery queries & disputes
+		delivery.POST("/estimate-fee", h.EstimateDeliveryFee)
 		delivery.GET("/gig/:id/route", h.GetRoute)
 		delivery.POST("/gig/dispute", h.DisputeGig)
 		delivery.GET("/surge-heatmap", h.GetSurgeHeatmap)

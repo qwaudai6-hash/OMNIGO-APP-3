@@ -749,13 +749,14 @@ func (r *DeliveryRepository) RecordCODDebt(ctx context.Context, orderTrackingID,
 	return err
 }
 
-// CancelDeliveryForOrder cancels any pending or broadcasting delivery gig for a given order
+// CancelDeliveryForOrder cancels any pending, broadcasting, or picked-up delivery gig for a given order.
+// 'in_transit' and 'completed' gigs are NOT cancelled — the rider is already on the way or delivered.
 func (r *DeliveryRepository) CancelDeliveryForOrder(ctx context.Context, orderTrackingID string, cancelReason string) error {
 	if cancelReason != "" {
 		query := `
 			UPDATE deliveries 
 			SET status = 'cancelled', cancel_reason = $2, updated_at = NOW()
-			WHERE order_tracking_id = $1 AND status IN ('broadcasting', 'accepted')
+			WHERE order_tracking_id = $1 AND status IN ('broadcasting', 'accepted', 'picked_up')
 		`
 		_, err := r.writer.Exec(ctx, query, orderTrackingID, cancelReason)
 		return err
@@ -764,7 +765,7 @@ func (r *DeliveryRepository) CancelDeliveryForOrder(ctx context.Context, orderTr
 	query := `
 		UPDATE deliveries 
 		SET status = 'cancelled', updated_at = NOW()
-		WHERE order_tracking_id = $1 AND status IN ('broadcasting', 'accepted')
+		WHERE order_tracking_id = $1 AND status IN ('broadcasting', 'accepted', 'picked_up')
 	`
 	_, err := r.writer.Exec(ctx, query, orderTrackingID)
 	return err

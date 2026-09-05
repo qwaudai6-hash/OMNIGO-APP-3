@@ -268,6 +268,7 @@ class ApiEndpoints {
       '$deliveryBase/delivery/gig/upload-proof';
   static String deliveryGigDispute() => '$deliveryBase/delivery/gig/dispute';
   static String deliveryLocationUpdate() => '$deliveryBase/delivery/location';
+  static String deliveryEstimateFee() => '$deliveryBase/delivery/estimate-fee';
   static String rideEstimate() => '$deliveryBase/ride/estimate';
 
   // ── Ride Lifecycle (NEW — Week 1, B11) ────────────────────────────

@@ -159,9 +159,11 @@ func (h *CheckoutHandler) CreateCheckout(c *gin.Context) {
 
 			adminRevenue := int64(0)
 			vendorHoldPaisa := int64(0)
+			deliveryEscrowPaisa := int64(0)
 			if split != nil {
 				vendorHoldPaisa = split.VendorEscrow
 				adminRevenue = split.AdminRevenue
+				deliveryEscrowPaisa = split.DeliveryEscrow
 			}
 
 			metadataJSON, marshalErr := json.Marshal(map[string]interface{}{
@@ -193,7 +195,7 @@ func (h *CheckoutHandler) CreateCheckout(c *gin.Context) {
 
 			eventPayload := fmt.Sprintf(
 				`{"internal_txn_id":"%s","order_id":"%s","gateway":"wallet","gateway_txn_id":"%s","store_id":"%s","vendor_tracking_id":"%s","delivery_tracking_id":"%s","total_amount_paisa":%d,"currency":"PKR","admin_revenue_paisa":%d,"vendor_escrow_paisa":%d,"delivery_escrow_paisa":%d,"idempotency_key":"%s","transfers":[{"debit_account":"gateway_clearing","credit_account":"admin_revenue","amount_paisa":%d,"idempotency":"wallet:%s:admin"},{"debit_account":"gateway_clearing","credit_account":"vendor_locked_escrow","amount_paisa":%d,"idempotency":"wallet:%s:vendor"},{"debit_account":"gateway_clearing","credit_account":"central_escrow","amount_paisa":%d,"idempotency":"wallet:%s:delivery"}]}`,
-				internalTxnID, req.OrderID, txnID, order.VendorStoreTrackID, order.VendorTrackID, "", amountPaisa, adminRevenue, vendorHoldPaisa, 0, fmt.Sprintf("wallet:%s", req.OrderID), adminRevenue, fmt.Sprintf("wallet:%s:admin", req.OrderID), vendorHoldPaisa, fmt.Sprintf("wallet:%s:vendor", req.OrderID), 0, fmt.Sprintf("wallet:%s:delivery", req.OrderID),
+				internalTxnID, req.OrderID, txnID, order.VendorStoreTrackID, order.VendorTrackID, "", amountPaisa, adminRevenue, vendorHoldPaisa, deliveryEscrowPaisa, fmt.Sprintf("wallet:%s", req.OrderID), adminRevenue, fmt.Sprintf("wallet:%s:admin", req.OrderID), vendorHoldPaisa, fmt.Sprintf("wallet:%s:vendor", req.OrderID), deliveryEscrowPaisa, fmt.Sprintf("wallet:%s:delivery", req.OrderID),
 			)
 
 			_, err = tx.Exec(c.Request.Context(), `
