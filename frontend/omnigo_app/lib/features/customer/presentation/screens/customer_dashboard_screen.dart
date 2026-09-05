@@ -39,6 +39,7 @@ class CustomerDashboardScreen extends StatefulWidget {
 
 class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   int _currentIndex = 0;
+  final GlobalKey<WishlistScreenState> _wishlistKey = GlobalKey<WishlistScreenState>();
   MapLibreMapController? _mapController;
   // Default to Pakistan's centroid (≈ Rahim Yar Khan) — neutral, not
   // Lahore-specific. This is only shown for the few seconds before the
@@ -1841,6 +1842,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
 
   Widget _buildWishlistTab() {
     return WishlistScreen(
+      key: _wishlistKey,
       customerTrackingId: widget.trackingId,
       onNavigateToCatalog: (index) => setState(() => _currentIndex = index),
     );
@@ -1886,6 +1888,10 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
           setState(() {
             _currentIndex = index;
           });
+          // Refresh wishlist when tab is selected
+          if (index == 2) {
+            _wishlistKey.currentState?.fetchWishlist();
+          }
         }
       },
       child: Icon(

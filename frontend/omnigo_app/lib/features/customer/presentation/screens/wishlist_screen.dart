@@ -31,10 +31,10 @@ class WishlistScreenState extends State<WishlistScreen> {
   @override
   void initState() {
     super.initState();
-    _fetchWishlist();
+    fetchWishlist();
   }
 
-  Future<void> _fetchWishlist() async {
+  Future<void> fetchWishlist() async {
     setState(() {
       _isLoading = true;
       _errorMessage = null;
@@ -132,43 +132,48 @@ class WishlistScreenState extends State<WishlistScreen> {
                                 Text(_errorMessage!, textAlign: TextAlign.center, style: const TextStyle(color: Colors.grey)),
                                 const SizedBox(height: 24),
                                 ElevatedButton(
-                                  onPressed: _fetchWishlist,
+                                  onPressed: fetchWishlist,
                                   style: ElevatedButton.styleFrom(backgroundColor: AppTheme.blackAccent),
                                   child: const Text('Retry'),
                                 ),
                               ],
                             ),
                           )
-                        : _favoriteProducts.isEmpty
-                            ? Center(
-                                child: Column(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: [
-                                    const Icon(Icons.favorite_border_rounded, size: 64, color: Colors.grey),
-                                    const SizedBox(height: 16),
-                                    const Text('No favorites yet.',
-                                        style: TextStyle(color: Colors.grey, fontSize: 16),),
-                                    const SizedBox(height: 8),
-                                    const Text('Tap the heart icon on products to save them here.',
-                                        style: TextStyle(color: Colors.grey, fontSize: 13),),
-                                    const SizedBox(height: 24),
-                                    ElevatedButton(
-                                      onPressed: () {
-                                        if (widget.onNavigateToCatalog != null) {
-                                          widget.onNavigateToCatalog!(1);
-                                        }
-                                      },
-                                      style: ElevatedButton.styleFrom(backgroundColor: AppTheme.blackAccent),
-                                      child: const Text('Browse Catalog'),
-                                    ),
-                                  ],
-                                ),
-                              )
-                            : RefreshIndicator(
-                                onRefresh: _fetchWishlist,
-                                color: AppTheme.limeAccent,
-                                child: GridView.builder(
-                                  itemCount: _favoriteProducts.length,
+                        : RefreshIndicator(
+                            onRefresh: fetchWishlist,
+                            color: AppTheme.limeAccent,
+                            child: _favoriteProducts.isEmpty
+                                ? ListView(
+                                    children: [
+                                      SizedBox(height: MediaQuery.of(context).size.height * 0.15),
+                                      const Icon(Icons.favorite_border_rounded, size: 64, color: Colors.grey),
+                                      const SizedBox(height: 16),
+                                      const Center(
+                                        child: Text('No favorites yet.',
+                                            style: TextStyle(color: Colors.grey, fontSize: 16)),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      const Center(
+                                        child: Text('Pull down to refresh, or tap the heart on products.',
+                                            style: TextStyle(color: Colors.grey, fontSize: 13)),
+                                      ),
+                                      const SizedBox(height: 24),
+                                      Center(
+                                        child: ElevatedButton(
+                                          onPressed: () {
+                                            if (widget.onNavigateToCatalog != null) {
+                                              widget.onNavigateToCatalog!(1);
+                                            }
+                                          },
+                                          style: ElevatedButton.styleFrom(backgroundColor: AppTheme.blackAccent),
+                                          child: const Text('Browse Catalog'),
+                                        ),
+                                      ),
+                                    ],
+                                  )
+                                : GridView.builder(
+                                    physics: const AlwaysScrollableScrollPhysics(),
+                                    itemCount: _favoriteProducts.length,
                                   gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                                     crossAxisCount: 2,
                                     crossAxisSpacing: 14,
