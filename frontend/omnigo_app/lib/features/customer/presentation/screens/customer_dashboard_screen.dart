@@ -447,6 +447,18 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         }
       }
     });
+
+    // H4: When order transitions to shipped/in_transit, fetch route polyline for the map.
+    if (['shipped', 'in_transit'].contains(newStatus)) {
+      final hasRider = _customerOrders.any(
+        (o) => (o['rider_tracking_id'] as String?)?.isNotEmpty == true,
+      );
+      if (hasRider && (_activeDeliveryOrderId == null || _activeDeliveryOrderId != orderId)) {
+        _activeDeliveryOrderId = orderId;
+        _fetchDeliveryRoute(orderId);
+      }
+    }
+
     debugPrint('[OrderWS] Order $orderId status updated to $newStatus (real-time)');
   }
 
