@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'dart:io';
@@ -726,6 +727,11 @@ class _VendorProfileTabState extends State<VendorProfileTab> {
   Map<String, dynamic>? _storeData;
   bool _isLoading = true;
 
+  // Store location state for in-app editing
+  double? _storeLat;
+  double? _storeLng;
+  bool _isUpdatingLocation = false;
+
   // Verification Form State
   File? _cnicFrontFile;
   File? _cnicBackFile;
@@ -756,12 +762,101 @@ class _VendorProfileTabState extends State<VendorProfileTab> {
       if (mounted) {
         setState(() {
           _storeData = data;
+          _storeLat = (data['latitude'] as num?)?.toDouble();
+          _storeLng = (data['longitude'] as num?)?.toDouble();
           _isLoading = false;
         });
       }
     } catch (e) {
       if (mounted) setState(() => _isLoading = false);
       debugPrint('Error fetching store info for profile: $e');
+    }
+  }
+
+  // Vendor can update their store location (GPS-based)
+  Future<void> _updateStoreLocation() async {
+    if (_isUpdatingLocation) return;
+    setState(() => _isUpdatingLocation = true);
+
+    double? newLat;
+    double? newLng;
+    String? error;
+
+    const maxRetries = 3;
+    for (int attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        final bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+        if (!serviceEnabled) {
+          error = 'Location services disabled. Please enable GPS.';
+          break;
+        }
+        LocationPermission permission = await Geolocator.checkPermission();
+        if (permission == LocationPermission.denied) {
+          permission = await Geolocator.requestPermission();
+          if (permission == LocationPermission.denied) {
+            if (attempt < maxRetries - 1) {
+              await Future<void>.delayed(Duration(seconds: attempt + 1));
+              continue;
+            }
+            error = 'Location permission denied.';
+            break;
+          }
+        }
+        if (permission == LocationPermission.deniedForever) {
+          error = 'Location permanently denied. Enable in Settings.';
+          break;
+        }
+        final position = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+        ).timeout(const Duration(seconds: 10));
+        newLat = position.latitude;
+        newLng = position.longitude;
+        break;
+      } catch (e) {
+        if (attempt < maxRetries - 1) {
+          await Future<void>.delayed(Duration(seconds: attempt + 1));
+          continue;
+        }
+        error = 'Could not get location. Please try again.';
+      }
+    }
+
+    if (newLat == null || newLng == null) {
+      setState(() => _isUpdatingLocation = false);
+      if (mounted && error != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(error!), backgroundColor: Colors.red, behavior: SnackBarBehavior.floating),
+        );
+      }
+      return;
+    }
+
+    try {
+      await sl<ApiClient>().patch(
+        '/vendor/stores/me',
+        {'latitude': newLat, 'longitude': newLng},
+      );
+      if (mounted) {
+        setState(() {
+          _storeLat = newLat;
+          _storeLng = newLng;
+          _isUpdatingLocation = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Store location updated!'),
+            backgroundColor: Colors.green,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } catch (e) {
+      setState(() => _isUpdatingLocation = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to update location: $e'), backgroundColor: Colors.red, behavior: SnackBarBehavior.floating),
+        );
+      }
     }
   }
 
@@ -1008,6 +1103,68 @@ class _VendorProfileTabState extends State<VendorProfileTab> {
                     _buildInfoRow('Vendor ID', widget.vendorTrackingId),
                     const SizedBox(height: 12),
                     _buildInfoRow('Store ID', storeTrackingId),
+                    const SizedBox(height: 12),
+                    // Store location row — vendor can update this
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Store Location', style: TextStyle(color: Colors.grey.shade500, fontSize: 11)),
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                _storeLat != null && _storeLng != null
+                                    ? '${_storeLat!.toStringAsFixed(5)}, ${_storeLng!.toStringAsFixed(5)}'
+                                    : 'Not Set — Tap Update',
+                                style: const TextStyle(color: Colors.white, fontSize: 13, fontFamily: 'monospace', fontWeight: FontWeight.bold),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            GestureDetector(
+                              onTap: _isUpdatingLocation ? null : _updateStoreLocation,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                                decoration: BoxDecoration(
+                                  color: _isUpdatingLocation ? Colors.grey.shade700 : Colors.limeAccent,
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    if (_isUpdatingLocation)
+                                      const SizedBox(
+                                        width: 12,
+                                        height: 12,
+                                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                                      )
+                                    else
+                                      const Icon(Icons.my_location, size: 13, color: Colors.black),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      _isUpdatingLocation ? 'Updating...' : 'Update',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.bold,
+                                        color: _isUpdatingLocation ? Colors.white : Colors.black,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        if (_storeLat == null || _storeLng == null)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Text(
+                              '⚠️ Set location so customers & riders can find you',
+                              style: TextStyle(color: Colors.orange.shade300, fontSize: 11),
+                            ),
+                          ),
+                      ],
+                    ),
                     const SizedBox(height: 12),
                     if (_storeData?['commission_rate'] != null)
                       _buildInfoRow('Commission Rate', '${(_storeData!['commission_rate'] as num).toDouble().toStringAsFixed(1)}%'),

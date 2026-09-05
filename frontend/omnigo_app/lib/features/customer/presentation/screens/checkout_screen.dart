@@ -9,6 +9,7 @@ import '../../../../core/services/cart_provider.dart';
 import '../../../../core/network/api_client.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/di/service_locator.dart';
+import '../../../shared/presentation/widgets/map_libre_map_widget.dart';
 import '../widgets/payfast_card_sheet.dart';
 import 'order_success_screen.dart';
 
@@ -35,11 +36,37 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   bool _isFetchingLocation = true;
   String? _locationError;
 
+  // Vendor store location — shown in Order Summary so customer knows which store
+  String? _storeName;
+  String? _storeAddress;
+  double? _storeLat;
+  double? _storeLng;
+
   @override
   void initState() {
     super.initState();
     _checkoutSessionNonce = '${DateTime.now().millisecondsSinceEpoch}_${UniqueKey().toString()}';
     _fetchCurrentLocation();
+    _fetchVendorStoreInfo();
+  }
+
+  Future<void> _fetchVendorStoreInfo() async {
+    final cart = context.read<CartProvider>();
+    final storeId = cart.currentStoreId;
+    if (storeId == null) return;
+    try {
+      final data = await sl<ApiClient>().get('/vendor/stores/me') as Map<String, dynamic>;
+      if (mounted) {
+        setState(() {
+          _storeName = (data['store_name'] as String?) ?? 'Store';
+          _storeAddress = (data['address'] as String?) ?? '';
+          _storeLat = (data['latitude'] as num?)?.toDouble();
+          _storeLng = (data['longitude'] as num?)?.toDouble();
+        });
+      }
+    } catch (e) {
+      debugPrint('Could not fetch vendor store info: $e');
+    }
   }
 
   // Helper: Cancel order on payment failure
@@ -261,6 +288,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         'delivery_fee_paisa': (_deliveryFee * 100).round(),
         // H3: routing audit trail
         'routing_status': _routingStatus,
+        // H4: Store location for rider pickup / audit trail
+        if (_storeLat != null) 'store_lat': _storeLat,
+        if (_storeLng != null) 'store_lng': _storeLng,
       };
 
       final response = await apiClient.post(ApiEndpoints.orderCheckout(), payload);
@@ -682,6 +712,64 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      // H4: Vendor store location — small map so customer knows which store
+                      if (_storeLat != null && _storeLng != null) ...[
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.blue.shade50,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: Colors.blue.shade200),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Icon(Icons.store, size: 16, color: Colors.blue.shade700),
+                                  const SizedBox(width: 6),
+                                  Expanded(
+                                    child: Text(
+                                      _storeName ?? 'Store',
+                                      style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blue.shade700, fontSize: 13),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              if (_storeAddress != null && _storeAddress!.isNotEmpty) ...[
+                                const SizedBox(height: 4),
+                                Text(
+                                  _storeAddress!,
+                                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ],
+                              const SizedBox(height: 8),
+                              SizedBox(
+                                height: 120,
+                                width: double.infinity,
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: MapLibreMapWidget(
+                                    initialCenter: LatLng(_storeLat!, _storeLng!),
+                                    initialZoom: 15,
+                                    myLocationEnabled: false,
+                                    myLocationTrackingMode: MyLocationTrackingMode.none,
+                                    markers: {
+                                      'store': MarkerData(
+                                        position: LatLng(_storeLat!, _storeLng!),
+                                        iconImage: 'location_dot',
+                                      ),
+                                    },
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                      ],
                       ...cart.items.values.map((item) => Padding(
                         padding: const EdgeInsets.only(bottom: 8.0),
                         child: Row(
@@ -691,7 +779,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                             Text('PKR ${(item.price * item.quantity).toStringAsFixed(0)}', style: const TextStyle(fontWeight: FontWeight.bold)),
                           ],
                         ),
-                      ),),
+                      )),
                       const Divider(),
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
