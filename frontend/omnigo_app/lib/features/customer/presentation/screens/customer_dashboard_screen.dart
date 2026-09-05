@@ -17,7 +17,6 @@ import '../../data/models/product.dart';
 import 'product_details_screen.dart';
 import 'edit_profile_screen.dart';
 import 'wishlist_screen.dart';
-import 'order_detail_screen.dart';
 import 'cart_screen.dart';
 import '../widgets/vehicle_selector_sheet.dart';
 import 'customer_wallet_screen.dart';
@@ -90,6 +89,12 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   LatLng? _rideDropoffLatLng;
   bool _isEstimatingRide = false;
   Timer? _estimateSafetyTimer;
+
+  // ── Delivery Route Tracking (Active Order on Map) ──────────────────
+  List<LatLng> _deliveryRoutePolyline = [];
+  double? _deliveryEtaSeconds;
+  double? _deliveryDistanceMeters;
+  String? _activeDeliveryOrderId;
 
   @override
   void initState() {
@@ -429,6 +434,16 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         if ((_customerOrders[i]['order_tracking_id']?.toString() ?? _customerOrders[i]['id']?.toString()) == orderId) {
           _customerOrders[i] = Map<String, dynamic>.from(_customerOrders[i] as Map) ..['status'] = newStatus;
           break;
+        }
+      }
+
+      // H4: If the active delivery order reached a terminal state, clear the route.
+      if (_activeDeliveryOrderId != null && orderId == _activeDeliveryOrderId) {
+        if (['delivered', 'completed', 'cancelled', 'failed'].contains(newStatus)) {
+          _deliveryRoutePolyline = [];
+          _activeDeliveryOrderId = null;
+          _deliveryEtaSeconds = null;
+          _deliveryDistanceMeters = null;
         }
       }
     });
@@ -828,6 +843,32 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         if (hasActiveOrder) {
           _connectRiderTelemetry();
         }
+
+        // H4: Find first active delivery order with a rider and load route polyline.
+        final deliveryOrder = _customerOrders.cast<Map<String, dynamic>?>().firstWhere(
+          (o) {
+            final status = o?['status']?.toString() ?? '';
+            final hasRider = (o?['rider_tracking_id'] as String?)?.isNotEmpty == true;
+            return hasRider && (status == 'shipped' || status == 'in_transit');
+          },
+          orElse: () => null,
+        );
+
+        if (deliveryOrder != null) {
+          final orderId = deliveryOrder['order_tracking_id']?.toString() ??
+              deliveryOrder['id']?.toString() ?? '';
+          if (orderId.isNotEmpty) {
+            _activeDeliveryOrderId = orderId;
+            _fetchDeliveryRoute(orderId);
+          }
+        } else {
+          setState(() {
+            _deliveryRoutePolyline = [];
+            _activeDeliveryOrderId = null;
+            _deliveryEtaSeconds = null;
+            _deliveryDistanceMeters = null;
+          });
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -836,6 +877,46 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         });
         debugPrint('Error fetching customer orders: $e');
       }
+    }
+  }
+
+  Future<void> _fetchDeliveryRoute(String orderId) async {
+    try {
+      final response = await ApiClient().get(
+        ApiEndpoints.deliveryGigRouteCustomer(orderId),
+      );
+      if (response is! Map<String, dynamic>) return;
+
+      final route = response['route'] as Map<String, dynamic>?;
+      if (route == null) return;
+
+      final coords = route['coordinates'] as List<dynamic>?;
+      final distance = route['distance_meters'] as num?;
+      final duration = route['duration_seconds'] as num?;
+
+      if (coords == null || coords.isEmpty) return;
+
+      final List<LatLng> points = coords.map<LatLng>((c) {
+        final double lng = (c[0] as num).toDouble();
+        final double lat = (c[1] as num).toDouble();
+        return LatLng(lat, lng);
+      }).toList();
+
+      if (!mounted) return;
+      setState(() {
+        _deliveryRoutePolyline = points;
+        _deliveryDistanceMeters = distance?.toDouble();
+        _deliveryEtaSeconds = duration?.toDouble();
+      });
+
+      if (_mapController != null && points.isNotEmpty) {
+        // Pan to the first point of the route (rider's current location)
+        _mapController!.animateCamera(
+          CameraUpdate.newLatLng(points.first),
+        );
+      }
+    } catch (e) {
+      debugPrint('[DeliveryRoute] Failed to fetch route for order $orderId: $e');
     }
   }
 
@@ -1385,9 +1466,11 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
               initialCenter: _mapCenter,
               initialZoom: 13.0,
               markers: merged,
-              polylines: _rideRoutePolyline.isNotEmpty
-                  ? [_rideRoutePolyline]
-                  : const [],
+              polylines: _deliveryRoutePolyline.isNotEmpty
+                  ? [_deliveryRoutePolyline]
+                  : (_rideRoutePolyline.isNotEmpty
+                      ? [_rideRoutePolyline]
+                      : const []),
               onMapCreated: (controller) {
                 _mapController = controller;
               },
@@ -1446,6 +1529,43 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         ),
       ),
       ),
+        // H4: Delivery ETA + distance banner (shown when rider is en route)
+        if (_deliveryEtaSeconds != null && _activeDeliveryOrderId != null)
+          Positioned(
+            bottom: 48,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                child: Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFCAFF33),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.local_shipping_outlined,
+                          color: Colors.black, size: 18),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          'Estimated arrival: ~${(_deliveryEtaSeconds! / 60).round()} min'
+                          '${_deliveryDistanceMeters != null ? ' • ${(_deliveryDistanceMeters! / 1000).toStringAsFixed(1)} km away' : ''}',
+                          style: const TextStyle(
+                            color: Colors.black,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
         // Live rider tracking status banner
         Positioned(
           bottom: 0,

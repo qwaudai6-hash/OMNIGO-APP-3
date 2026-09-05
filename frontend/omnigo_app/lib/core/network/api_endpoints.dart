@@ -264,6 +264,8 @@ class ApiEndpoints {
   static String deliveryGigCancel() => '$deliveryBase/delivery/gig/cancel';
   static String deliveryGigRoute(String gigId) =>
       '$deliveryBase/delivery/gig/$gigId/route';
+  static String deliveryGigRouteCustomer(String orderId) =>
+      '$deliveryBase/delivery/gig/by-order/$orderId/route-customer';
   static String deliveryGigUploadProof() =>
       '$deliveryBase/delivery/gig/upload-proof';
   static String deliveryGigDispute() => '$deliveryBase/delivery/gig/dispute';
