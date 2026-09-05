@@ -305,8 +305,20 @@ class VendorLiveMapScreenState extends State<VendorLiveMapScreen> {
           ValueListenableBuilder<Map<String, MarkerData>>(
             valueListenable: _liveMarkersNotifier,
             builder: (context, currentMarkers, _) {
+              if (_storeLocation == null) {
+                return const Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      CircularProgressIndicator(),
+                      SizedBox(height: 16),
+                      Text('Fetching store location...'),
+                    ],
+                  ),
+                );
+              }
               return MapLibreMapWidget(
-                initialCenter: _storeLocation ?? const LatLng(31.5204, 74.3587),
+                initialCenter: _storeLocation,
                 initialZoom: 14.5,
                 myLocationEnabled: false,
                 markers: currentMarkers,

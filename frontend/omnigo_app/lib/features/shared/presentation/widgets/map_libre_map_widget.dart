@@ -210,7 +210,7 @@ class _MapLibreMapWidgetState extends State<MapLibreMapWidget> {
     return MapLibreMap(
       styleString: _styleUrl,
       initialCameraPosition: CameraPosition(
-        target: widget.initialCenter ?? const LatLng(31.5204, 74.3587), // Lahore
+        target: widget.initialCenter ?? const LatLng(0, 0),
         zoom: widget.initialZoom,
       ),
       myLocationEnabled: widget.myLocationEnabled,

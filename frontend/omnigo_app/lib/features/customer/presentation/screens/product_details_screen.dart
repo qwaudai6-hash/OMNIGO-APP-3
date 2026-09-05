@@ -398,7 +398,7 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
         },
       );
       if (resp != null) {
-        final fee = (resp['delivery_fee'] is num) ? (resp['delivery_fee'] as num).toDouble() : 50.0;
+        final fee = (resp['delivery_fee'] is num) ? (resp['delivery_fee'] as num).toDouble() : 0.0;
         final routing = (resp['routing_status'] as String?) ?? 'DYNAMIC_CALCULATED';
         setState(() {
           _deliveryFee = fee;
@@ -407,7 +407,7 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
       }
     } catch (e) {
       setState(() {
-        _deliveryFee = 50.0;
+        _deliveryFee = 0.0;
         _routingStatus = 'FAILED_CALCULATION';
       });
     }
