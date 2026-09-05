@@ -11,6 +11,7 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'core/services/cart_provider.dart';
 import 'core/services/session_registry.dart';
 import 'core/services/notification_service.dart';
+import 'core/network/api_client.dart';
 import 'core/network/websocket_client.dart';
 import 'core/theme/app_theme.dart';
 import 'core/di/service_locator.dart';
@@ -82,6 +83,15 @@ void main() async {
   if (SessionRegistry.instance.isLoggedIn) {
     unawaited(SessionRegistry.instance.registerFCMToken());
   }
+
+  // Global 401 handler: when refresh fails, navigate to login from any screen
+  ApiClient.onSessionExpired = () {
+    final ctx = NotificationService.navigatorKey.currentContext;
+    if (ctx != null) {
+      SessionRegistry.instance.clear();
+      Navigator.of(ctx).pushNamedAndRemoveUntil('/', (route) => false);
+    }
+  };
 
   await SentryFlutter.init(
     (options) {

@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	sharedAuth "github.com/omnigo/backend/internal/shared/auth"
+	"github.com/omnigo/backend/internal/shared/middleware"
 	"github.com/omnigo/backend/internal/wishlist/service"
 )
 
@@ -16,18 +16,9 @@ func NewWishlistHandler(svc *service.WishlistService) *WishlistHandler {
 	return &WishlistHandler{svc: svc}
 }
 
-// extractCustomerTrackingID parses the Authorization header using shared JWT parser.
-func (h *WishlistHandler) extractCustomerTrackingID(c *gin.Context) (string, error) {
-	return sharedAuth.ExtractTrackingIDFromHeader(c.GetHeader("Authorization"))
-}
-
 // ToggleFavorite handles POST /api/v1/wishlist/:product_id
 func (h *WishlistHandler) ToggleFavorite(c *gin.Context) {
-	customerID, err := h.extractCustomerTrackingID(c)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
-		return
-	}
+	customerID := middleware.GetTrackingID(c)
 
 	productID := c.Param("product_id")
 	if productID == "" {
@@ -50,11 +41,7 @@ func (h *WishlistHandler) ToggleFavorite(c *gin.Context) {
 
 // ListFavorites handles GET /api/v1/wishlist
 func (h *WishlistHandler) ListFavorites(c *gin.Context) {
-	customerID, err := h.extractCustomerTrackingID(c)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
-		return
-	}
+	customerID := middleware.GetTrackingID(c)
 
 	productIDs, err := h.svc.ListFavorites(c.Request.Context(), customerID)
 	if err != nil {
@@ -70,11 +57,7 @@ func (h *WishlistHandler) ListFavorites(c *gin.Context) {
 
 // RemoveFavorite handles DELETE /api/v1/wishlist/:product_id
 func (h *WishlistHandler) RemoveFavorite(c *gin.Context) {
-	customerID, err := h.extractCustomerTrackingID(c)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
-		return
-	}
+	customerID := middleware.GetTrackingID(c)
 
 	productID := c.Param("product_id")
 	if productID == "" {
@@ -92,7 +75,7 @@ func (h *WishlistHandler) RemoveFavorite(c *gin.Context) {
 
 // RegisterRoutes registers wishlist endpoints on the Gin engine
 func (h *WishlistHandler) RegisterRoutes(router *gin.Engine) {
-	wl := router.Group("/api/v1/wishlist")
+	wl := router.Group("/api/v1/wishlist", middleware.JWTAuth())
 	{
 		wl.POST("/:product_id", h.ToggleFavorite)
 		wl.GET("", h.ListFavorites)

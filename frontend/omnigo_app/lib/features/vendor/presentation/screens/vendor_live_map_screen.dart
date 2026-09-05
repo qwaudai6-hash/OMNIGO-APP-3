@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:http/http.dart' as http;
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/network/api_client.dart';
 import '../../../../core/network/websocket_client.dart';
@@ -201,14 +200,8 @@ class VendorLiveMapScreenState extends State<VendorLiveMapScreen> {
 
   Future<void> _loadActiveGigRoute(String orderId) async {
     try {
-      final token = SessionRegistry.instance.token ?? '';
-      final response = await http.get(
-        Uri.parse(ApiEndpoints.deliveryGigRoute(orderId)),
-        headers: {'Authorization': 'Bearer $token'},
-      ).timeout(const Duration(seconds: 8));
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final data = await sl<ApiClient>().get(ApiEndpoints.deliveryGigRoute(orderId));
+      if (data is Map<String, dynamic>) {
         final coordsList = data['coordinates'] as List<dynamic>?;
         if (coordsList != null && coordsList.isNotEmpty) {
           final List<LatLng> points = coordsList

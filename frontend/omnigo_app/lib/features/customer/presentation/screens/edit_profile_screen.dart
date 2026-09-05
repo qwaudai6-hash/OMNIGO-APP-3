@@ -1,11 +1,8 @@
 import 'dart:async';
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import '../../../../core/theme/app_theme.dart';
-import '../../../../core/network/api_endpoints.dart';
+import '../../../../core/network/api_client.dart';
 import '../../../../core/services/session_registry.dart';
 
 /// EditProfileScreen allows the authenticated customer to update their
@@ -54,9 +51,6 @@ class EditProfileScreenState extends State<EditProfileScreen> {
     unawaited(HapticFeedback.mediumImpact());
 
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-
       // Build partial-update body — only send fields that changed.
       final body = <String, dynamic>{};
 
@@ -79,52 +73,31 @@ class EditProfileScreenState extends State<EditProfileScreen> {
         return;
       }
 
-      final response = await http
-          .patch(
-            Uri.parse('${ApiEndpoints.authBase}/auth/profile'),
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': 'Bearer $token',
-            },
-            body: jsonEncode(body),
-          )
-          .timeout(const Duration(seconds: 10));
+      final data = await ApiClient().patch('/auth/profile', body);
 
       if (!mounted) return;
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
-        // Refresh the in-memory + persistent session cache.
-        await SessionRegistry.instance.updateProfile(
-          fullName: data['full_name']?.toString(),
-          phone: data['phone']?.toString(),
-          address: data['address']?.toString(),
-        );
+      // Refresh the in-memory + persistent session cache.
+      await SessionRegistry.instance.updateProfile(
+        fullName: data['full_name']?.toString(),
+        phone: data['phone']?.toString(),
+        address: data['address']?.toString(),
+      );
 
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Profile updated successfully!'),
-            backgroundColor: Colors.green,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-        Navigator.pop(context, true);
-      } else {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Update failed (${response.statusCode}): ${response.body}'),
-            backgroundColor: Colors.redAccent,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Profile updated successfully!'),
+          backgroundColor: Colors.green,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      Navigator.pop(context, true);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Network error: $e'),
+            content: Text('Update failed: $e'),
             backgroundColor: Colors.redAccent,
             behavior: SnackBarBehavior.floating,
           ),

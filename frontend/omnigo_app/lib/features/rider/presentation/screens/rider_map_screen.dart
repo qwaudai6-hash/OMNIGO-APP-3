@@ -660,24 +660,12 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
     const maxRetries = 2;
     for (int attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        final uri = Uri.parse(ApiEndpoints.deliveryGigUploadProof());
-        final request = http.MultipartRequest('POST', uri);
-        final token = SessionRegistry.instance.token ?? '';
-        if (token.isNotEmpty) {
-          request.headers['Authorization'] = 'Bearer $token';
-        }
-        request.files.add(await http.MultipartFile.fromPath('photo', imageFile.path));
-        final streamedResponse = await request.send().timeout(const Duration(seconds: 30));
-        final response = await http.Response.fromStream(streamedResponse);
-        if (response.statusCode == 200) {
-          final data = jsonDecode(response.body) as Map<String, dynamic>;
-          return data['photo_url'] as String?;
-        }
-        if (response.statusCode >= 500 && attempt < maxRetries) {
-          await Future<void>.delayed(Duration(seconds: attempt + 1));
-          continue;
-        }
-        debugPrint('Upload failed (${response.statusCode}): ${response.body}');
+        final data = await _apiClient.multipartPost(
+          ApiEndpoints.deliveryGigUploadProof(),
+          {},
+          [await http.MultipartFile.fromPath('photo', imageFile.path)],
+        ) as Map<String, dynamic>;
+        return data['photo_url'] as String?;
       } catch (e) {
         debugPrint('Upload error (attempt ${attempt + 1}): $e');
         if (attempt < maxRetries) {
@@ -1605,37 +1593,27 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
 
     setState(() => _isUploadingDocs = true);
     try {
-      final request = http.MultipartRequest(
-        'PUT',
-        Uri.parse(ApiEndpoints.authKycUpload()),
-      );
-      final token = SessionRegistry.instance.token ?? widget.trackingId;
-      request.headers['Authorization'] = 'Bearer $token';
+      final data = await _apiClient.multipartPut(
+        ApiEndpoints.authKycUpload(),
+        {},
+        [
+          await http.MultipartFile.fromPath('cnic', _cnicFile!.path),
+          await http.MultipartFile.fromPath('license', _licenseFile!.path),
+          await http.MultipartFile.fromPath('vehicle_registration', _vehicleRegFile!.path),
+        ],
+      ) as Map<String, dynamic>;
 
-      request.files.add(await http.MultipartFile.fromPath('cnic', _cnicFile!.path));
-      request.files.add(await http.MultipartFile.fromPath('license', _licenseFile!.path));
-      request.files.add(await http.MultipartFile.fromPath('vehicle_registration', _vehicleRegFile!.path));
-
-      final response = await request.send().timeout(const Duration(seconds: 30));
-      final body = await response.stream.bytesToString();
-      debugPrint('KYC upload response: $body');
-      
-      if (response.statusCode == 200) {
-        final data = jsonDecode(body);
-        if (data['is_verified'] == true) {
-          await SessionRegistry.instance.saveSession(
-            token: SessionRegistry.instance.token!,
-            role: SessionRegistry.instance.role!,
-            trackingId: SessionRegistry.instance.trackingId!,
-            isVerified: true,
-          );
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Verification successful! You can now go online.', style: TextStyle(color: Colors.white)), backgroundColor: Colors.green));
-            setState(() {});
-          }
+      if (data['is_verified'] == true) {
+        await SessionRegistry.instance.saveSession(
+          token: SessionRegistry.instance.token!,
+          role: SessionRegistry.instance.role!,
+          trackingId: SessionRegistry.instance.trackingId!,
+          isVerified: true,
+        );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Verification successful! You can now go online.', style: TextStyle(color: Colors.white)), backgroundColor: Colors.green));
+          setState(() {});
         }
-      } else {
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Upload failed: ${response.statusCode}')));
       }
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Network Error: $e')));
@@ -2149,20 +2127,12 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
   Future<void> _fetchCodDebts() async {
     setState(() => _isLoadingCodDebts = true);
     try {
-      final token = SessionRegistry.instance.token ?? '';
-      final res = await http.get(
-        Uri.parse(ApiEndpoints.codDebts(widget.trackingId)),
-        headers: {'Authorization': 'Bearer $token'},
-      ).timeout(const Duration(seconds: 8));
-
-      if (res.statusCode == 200 && mounted) {
-        final data = jsonDecode(res.body) as Map<String, dynamic>;
+      final data = await _apiClient.get(ApiEndpoints.codDebts(widget.trackingId)) as Map<String, dynamic>;
+      if (mounted) {
         setState(() {
           _codDebts = (data['debts'] as List<dynamic>?) ?? [];
           _isLoadingCodDebts = false;
         });
-      } else {
-        if (mounted) setState(() => _isLoadingCodDebts = false);
       }
     } catch (e) {
       debugPrint('Failed to fetch COD debts: $e');
@@ -2172,14 +2142,8 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
 
   Future<void> _fetchWalletSummary() async {
     try {
-      final token = SessionRegistry.instance.token ?? '';
-      final res = await http.get(
-        Uri.parse(ApiEndpoints.riderWallet(widget.trackingId)),
-        headers: {'Authorization': 'Bearer $token'},
-      ).timeout(const Duration(seconds: 8));
-
-      if (res.statusCode == 200 && mounted) {
-        final data = jsonDecode(res.body) as Map<String, dynamic>;
+      final data = await _apiClient.get(ApiEndpoints.riderWallet(widget.trackingId)) as Map<String, dynamic>;
+      if (mounted) {
         setState(() {
           _walletSummary = data;
         });
@@ -2328,53 +2292,32 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                 final dialogNavigator = Navigator.of(ctx);
                 setDialogState(() => isSubmitting = true);
                 try {
-                  final token = SessionRegistry.instance.token ?? '';
-                  final payNowUrl = Uri.parse(ApiEndpoints.codPayNow());
-                  final res = await http.post(
-                    payNowUrl,
-                    headers: {
-                      'Authorization': 'Bearer $token',
-                      'Content-Type': 'application/json',
-                    },
-                    body: jsonEncode({
+                  final respBody = await _apiClient.post(
+                    ApiEndpoints.codPayNow(),
+                    {
                       'cod_debt_id': codDebtId,
                       'gateway': selectedGateway,
-                    }),
-                  ).timeout(const Duration(seconds: 10));
+                    },
+                  ) as Map<String, dynamic>;
 
-                  if (res.statusCode == 200) {
-                    // FIX C9: Removed client-fabricated settlement call.
-                    // The backend handles settlement via the payment gateway's
-                    // webhook callback. The client should NOT fabricate
-                    // transaction_id or webhook_event_id — these must come
-                    // from the actual payment gateway.
-                    // Decode the response to get the deep link for payment.
-                    final respBody = jsonDecode(res.body) as Map<String, dynamic>;
-                    final deepLink = respBody['deep_link'] as String?;
-                    if (deepLink != null && deepLink.isNotEmpty) {
-                      final uri = Uri.parse(deepLink);
-                      if (await canLaunchUrl(uri)) {
-                        await launchUrl(uri, mode: LaunchMode.externalApplication);
-                      }
+                  final deepLink = respBody['deep_link'] as String?;
+                  if (deepLink != null && deepLink.isNotEmpty) {
+                    final uri = Uri.parse(deepLink);
+                    if (await canLaunchUrl(uri)) {
+                      await launchUrl(uri, mode: LaunchMode.externalApplication);
                     }
+                  }
 
-                    if (mounted) {
-                      dialogNavigator.pop();
-                      messenger.showSnackBar(
-                        SnackBar(
-                          content: Text('Payment initiated via ${selectedGateway.toUpperCase()}. Complete payment in the ${selectedGateway} app.'),
-                          backgroundColor: Colors.green,
-                        ),
-                      );
-                      _fetchCodDebts();
-                      _fetchWalletSummary();
-                    }
-                  } else {
-                    if (mounted) {
-                      messenger.showSnackBar(
-                        SnackBar(content: Text('Gateway Error: ${res.body}')),
-                      );
-                    }
+                  if (mounted) {
+                    dialogNavigator.pop();
+                    messenger.showSnackBar(
+                      SnackBar(
+                        content: Text('Payment initiated via ${selectedGateway.toUpperCase()}. Complete payment in the ${selectedGateway} app.'),
+                        backgroundColor: Colors.green,
+                      ),
+                    );
+                    _fetchCodDebts();
+                    _fetchWalletSummary();
                   }
                 } catch (e) {
                   if (mounted) {

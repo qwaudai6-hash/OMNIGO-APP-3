@@ -9,6 +9,10 @@ import 'dart:io';
 class ApiClient {
   static HttpClient? _secureHttpClient;
 
+  /// Global callback invoked when refresh fails and session is expired.
+  /// Wire this in main.dart to navigate to login screen.
+  static Function()? onSessionExpired;
+
   /// Creates a production-grade secure HttpClient with SSL Certificate Pinning options.
   static HttpClient getSecureHttpClient({List<int>? trustedCertBytes, bool enablePinning = false}) {
     if (_secureHttpClient != null) return _secureHttpClient!;
@@ -80,16 +84,27 @@ class ApiClient {
           return true;
         }
       }
-      // #32: If refresh fails, reset the completer so next caller can retry
+      // Refresh failed — clear stale tokens so next request doesn't loop
+      await _clearSession();
       completer.complete(false);
       return false;
     } catch (_) {
-      // #32: Reset on exception too
+      // Reset on exception too
       completer.complete(false);
       return false;
     } finally {
-      // #32: Always reset after completing so subsequent callers can create a new refresh
       _refreshCompleter = null;
+    }
+  }
+
+  /// Clear stale tokens from SharedPreferences when refresh fails.
+  Future<void> _clearSession() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('jwt_token');
+      await prefs.remove('refresh_token');
+    } catch (_) {
+      // Best effort — don't crash
     }
   }
 
@@ -174,11 +189,15 @@ class ApiClient {
       headers: await _getHeaders(),
     ).timeout(_requestTimeout);
     // Auto-refresh on 401 (skip for auth endpoints)
-    if (response.statusCode == 401 && !endpoint.contains('/auth/') && await _refreshToken()) {
-      response = await http.get(
-        uri,
-        headers: await _getHeaders(),
-      ).timeout(_requestTimeout);
+    if (response.statusCode == 401 && !endpoint.contains('/auth/')) {
+      if (await _refreshToken()) {
+        response = await http.get(
+          uri,
+          headers: await _getHeaders(),
+        ).timeout(_requestTimeout);
+      } else {
+        onSessionExpired?.call();
+      }
     }
     return _processResponse(response);
   }
@@ -202,6 +221,8 @@ class ApiClient {
           headers: await _getHeaders(),
           body: jsonEncode(body),
         ).timeout(_requestTimeout);
+      } else {
+        onSessionExpired?.call();
       }
     }
     return _processResponse(response);
@@ -222,6 +243,8 @@ class ApiClient {
           headers: await _getHeaders(),
           body: jsonEncode(body),
         ).timeout(_requestTimeout);
+      } else {
+        onSessionExpired?.call();
       }
     }
     return _processResponse(response);
@@ -234,14 +257,16 @@ class ApiClient {
       headers: await _getHeaders(),
       body: jsonEncode(body),
     ).timeout(_requestTimeout);
-    // SP-FL-04: same /auth/ guard as post()/put()/delete() — refreshing on a
-    // failed auth-endpoint response causes an infinite refresh loop.
-    if (response.statusCode == 401 && !endpoint.contains('/auth/') && await _refreshToken()) {
-      response = await http.patch(
-        uri,
-        headers: await _getHeaders(),
-        body: jsonEncode(body),
-      ).timeout(_requestTimeout);
+    if (response.statusCode == 401 && !endpoint.contains('/auth/')) {
+      if (await _refreshToken()) {
+        response = await http.patch(
+          uri,
+          headers: await _getHeaders(),
+          body: jsonEncode(body),
+        ).timeout(_requestTimeout);
+      } else {
+        onSessionExpired?.call();
+      }
     }
     return _processResponse(response);
   }
@@ -252,11 +277,77 @@ class ApiClient {
       uri,
       headers: await _getHeaders(),
     ).timeout(_requestTimeout);
-    if (response.statusCode == 401 && !endpoint.contains('/auth/') && await _refreshToken()) {
-      response = await http.delete(
-        uri,
-        headers: await _getHeaders(),
-      ).timeout(_requestTimeout);
+    if (response.statusCode == 401 && !endpoint.contains('/auth/')) {
+      if (await _refreshToken()) {
+        response = await http.delete(
+          uri,
+          headers: await _getHeaders(),
+        ).timeout(_requestTimeout);
+      } else {
+        onSessionExpired?.call();
+      }
+    }
+    return _processResponse(response);
+  }
+
+  /// Upload multipart form data (images, files).
+  Future<dynamic> multipartPost(String endpoint, Map<String, String> fields, List<http.MultipartFile> files) async {
+    final uri = _buildUri(endpoint);
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('jwt_token') ?? '';
+
+    var request = http.MultipartRequest('POST', uri);
+    request.headers['Authorization'] = 'Bearer $token';
+    request.fields.addAll(fields);
+    request.files.addAll(files);
+
+    var streamedResponse = await request.send().timeout(_requestTimeout);
+    var response = await http.Response.fromStream(streamedResponse);
+
+    if (response.statusCode == 401 && !endpoint.contains('/auth/')) {
+      if (await _refreshToken()) {
+        final newPrefs = await SharedPreferences.getInstance();
+        final newToken = newPrefs.getString('jwt_token') ?? '';
+        var retryRequest = http.MultipartRequest('POST', uri);
+        retryRequest.headers['Authorization'] = 'Bearer $newToken';
+        retryRequest.fields.addAll(fields);
+        retryRequest.files.addAll(files);
+        streamedResponse = await retryRequest.send().timeout(_requestTimeout);
+        response = await http.Response.fromStream(streamedResponse);
+      } else {
+        onSessionExpired?.call();
+      }
+    }
+    return _processResponse(response);
+  }
+
+  /// Upload multipart form data via PUT.
+  Future<dynamic> multipartPut(String endpoint, Map<String, String> fields, List<http.MultipartFile> files) async {
+    final uri = _buildUri(endpoint);
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('jwt_token') ?? '';
+
+    var request = http.MultipartRequest('PUT', uri);
+    request.headers['Authorization'] = 'Bearer $token';
+    request.fields.addAll(fields);
+    request.files.addAll(files);
+
+    var streamedResponse = await request.send().timeout(_requestTimeout);
+    var response = await http.Response.fromStream(streamedResponse);
+
+    if (response.statusCode == 401 && !endpoint.contains('/auth/')) {
+      if (await _refreshToken()) {
+        final newPrefs = await SharedPreferences.getInstance();
+        final newToken = newPrefs.getString('jwt_token') ?? '';
+        var retryRequest = http.MultipartRequest('PUT', uri);
+        retryRequest.headers['Authorization'] = 'Bearer $newToken';
+        retryRequest.fields.addAll(fields);
+        retryRequest.files.addAll(files);
+        streamedResponse = await retryRequest.send().timeout(_requestTimeout);
+        response = await http.Response.fromStream(streamedResponse);
+      } else {
+        onSessionExpired?.call();
+      }
     }
     return _processResponse(response);
   }

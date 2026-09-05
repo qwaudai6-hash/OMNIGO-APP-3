@@ -1,8 +1,6 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../../../../core/network/api_client.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/theme/app_theme.dart';
 
@@ -29,25 +27,15 @@ class _RiderWalletScreenState extends State<RiderWalletScreen> {
   Future<void> _fetchWallet() async {
     setState(() { _isLoading = true; _errorMessage = null; });
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
+      final walletFuture = _fetchWithRetry(ApiEndpoints.riderWallet(widget.trackingId));
+      final codDebtsFuture = _fetchWithRetry(ApiEndpoints.codDebts(widget.trackingId));
 
-      // Fetch wallet and COD debts in parallel with retry
-      final walletFuture = _fetchWithRetry(ApiEndpoints.riderWallet(widget.trackingId), token);
-      final codDebtsFuture = _fetchWithRetry(ApiEndpoints.codDebts(widget.trackingId), token);
-
-      final responses = await Future.wait([walletFuture, codDebtsFuture]);
+      final results = await Future.wait([walletFuture, codDebtsFuture]);
 
       if (mounted) {
-        if (responses[0].statusCode == 200) {
-          final decoded = jsonDecode(responses[0].body);
-          if (decoded is Map<String, dynamic>) _wallet = decoded;
-        }
-        if (responses[1].statusCode == 200) {
-          final decoded = jsonDecode(responses[1].body);
-          if (decoded is Map<String, dynamic>) {
-            _codDebts = (decoded['debts'] as List<dynamic>?) ?? <dynamic>[];
-          }
+        if (results[0] is Map<String, dynamic>) _wallet = results[0];
+        if (results[1] is Map<String, dynamic>) {
+          _codDebts = (results[1]['debts'] as List<dynamic>?) ?? <dynamic>[];
         }
         setState(() => _isLoading = false);
       }
@@ -61,14 +49,10 @@ class _RiderWalletScreenState extends State<RiderWalletScreen> {
     }
   }
 
-  Future<http.Response> _fetchWithRetry(String url, String token, {int maxRetries = 2}) async {
+  Future<dynamic> _fetchWithRetry(String endpoint, {int maxRetries = 2}) async {
     for (int attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        final res = await http.get(
-          Uri.parse(url),
-          headers: {'Authorization': 'Bearer $token'},
-        ).timeout(const Duration(seconds: 8));
-        if (res.statusCode < 500 || attempt == maxRetries) return res;
+        return await ApiClient().get(endpoint);
       } catch (e) {
         if (attempt == maxRetries) rethrow;
         await Future<void>.delayed(Duration(seconds: attempt + 1));
@@ -79,23 +63,15 @@ class _RiderWalletScreenState extends State<RiderWalletScreen> {
 
   Future<void> _payNow(String codDebtId, String gateway) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-
-      final response = await http.post(
-        Uri.parse(ApiEndpoints.codPayNow()),
-        headers: {
-          'Authorization': 'Bearer $token',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
+      final data = await ApiClient().post(
+        ApiEndpoints.codPayNow(),
+        {
           'cod_debt_id': codDebtId,
           'gateway': gateway,
-        }),
-      ).timeout(const Duration(seconds: 8));
+        },
+      );
 
-      if (response.statusCode == 200 && mounted) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
+      if (mounted) {
         final deepLink = (data['deep_link'] as String?) ?? '';
 
         if (deepLink.isNotEmpty) {

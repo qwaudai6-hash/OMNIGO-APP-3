@@ -1,8 +1,6 @@
 import 'dart:async';
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:io';
 import '../../../../core/network/api_endpoints.dart';
@@ -206,23 +204,13 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
 
     setState(() => _isHandoverInProgress = true);
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-
-      // Upload the photo to the existing proof upload endpoint. It returns
-      // a public URL we can store as the handover_photo_url.
-      final uploadReq = http.MultipartRequest(
-        'POST',
-        Uri.parse(ApiEndpoints.uploadProof()),
+      final photoFile = await http.MultipartFile.fromPath('photo', photo.path);
+      final uploadData = await sl<ApiClient>().multipartPost(
+        ApiEndpoints.uploadProof(),
+        {},
+        [photoFile],
       );
-      uploadReq.headers['Authorization'] = 'Bearer $token';
-      uploadReq.files.add(await http.MultipartFile.fromPath('photo', photo.path));
-      final uploadResp = await uploadReq.send().timeout(const Duration(seconds: 15));
-      final uploadBody = await uploadResp.stream.bytesToString();
-      if (uploadResp.statusCode != 200) {
-        throw Exception('Photo upload failed: ${uploadResp.statusCode}');
-      }
-      final photoUrl = (jsonDecode(uploadBody) as Map<String, dynamic>)['photo_url']?.toString();
+      final photoUrl = (uploadData as Map<String, dynamic>)['photo_url']?.toString();
 
       // POST the handover. The vendor gets a one-tap audit record; the
       // rider receives an in-app + push notification that the order is
@@ -811,41 +799,35 @@ class _VendorProfileTabState extends State<VendorProfileTab> {
 
     setState(() => _isUploadingDocs = true);
     try {
-      final request = http.MultipartRequest(
-        'PUT',
-        Uri.parse('${ApiEndpoints.authBase}/auth/vendor/verify'),
+      final fields = <String, String>{
+        'full_name': _fullNameController.text.trim(),
+        'business_name': _businessNameController.text.trim(),
+        'ntn_number': _ntnController.text.trim(),
+      };
+
+      final files = <http.MultipartFile>[];
+      if (_cnicFrontFile != null) files.add(await http.MultipartFile.fromPath('cnic_front', _cnicFrontFile!.path));
+      if (_cnicBackFile != null) files.add(await http.MultipartFile.fromPath('cnic_back', _cnicBackFile!.path));
+      if (_licenseFile != null) files.add(await http.MultipartFile.fromPath('license_cert', _licenseFile!.path));
+
+      final data = await sl<ApiClient>().multipartPut(
+        '${ApiEndpoints.authBase}/auth/vendor/verify',
+        fields,
+        files,
       );
-      request.headers['Authorization'] = 'Bearer ${SessionRegistry.instance.token}';
       
-      request.fields['full_name'] = _fullNameController.text.trim();
-      request.fields['business_name'] = _businessNameController.text.trim();
-      request.fields['ntn_number'] = _ntnController.text.trim();
-
-      if (_cnicFrontFile != null) request.files.add(await http.MultipartFile.fromPath('cnic_front', _cnicFrontFile!.path));
-      if (_cnicBackFile != null) request.files.add(await http.MultipartFile.fromPath('cnic_back', _cnicBackFile!.path));
-      if (_licenseFile != null) request.files.add(await http.MultipartFile.fromPath('license_cert', _licenseFile!.path));
-
-      final response = await request.send().timeout(const Duration(seconds: 30));
-      final bodyStr = await response.stream.bytesToString();
-      
-      if (response.statusCode == 200) {
-        final data = jsonDecode(bodyStr) as Map<String, dynamic>;
-        final isVer = (data['is_verified'] as bool?) ?? false;
-        if (isVer) {
-          await SessionRegistry.instance.saveSession(
-            token: SessionRegistry.instance.token!,
-            role: SessionRegistry.instance.role!,
-            trackingId: SessionRegistry.instance.trackingId!,
-            isVerified: true,
-            entityType: SessionRegistry.instance.entityType,
-          );
-          if (!mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Congratulations! Your shop is now officially live.')));
-          setState(() {}); // trigger rebuild
-        }
-      } else {
+      final isVer = (data as Map<String, dynamic>)['is_verified'] as bool? ?? false;
+      if (isVer) {
+        await SessionRegistry.instance.saveSession(
+          token: SessionRegistry.instance.token!,
+          role: SessionRegistry.instance.role!,
+          trackingId: SessionRegistry.instance.trackingId!,
+          isVerified: true,
+          entityType: SessionRegistry.instance.entityType,
+        );
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Verification failed: ${response.statusCode}')));
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Congratulations! Your shop is now officially live.')));
+        setState(() {}); // trigger rebuild
       }
     } catch (e) {
       debugPrint('Verification error: $e');

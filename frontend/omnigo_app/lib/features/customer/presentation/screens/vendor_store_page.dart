@@ -1,10 +1,9 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/network/api_endpoints.dart';
+import '../../../../core/network/api_client.dart';
+import '../../../../core/di/service_locator.dart';
 import '../../../../core/services/cart_provider.dart';
 import '../../data/models/product.dart';
 import 'product_details_screen.dart';
@@ -76,15 +75,8 @@ class _VendorStorePageState extends State<VendorStorePage>
 
   Future<void> _fetchVendorRating() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-      final resp = await http.get(
-        Uri.parse(ApiEndpoints.ratingForUser(widget.storeTrackingId)),
-        headers: {'Authorization': 'Bearer $token'},
-      ).timeout(const Duration(seconds: 8));
-
-      if (resp.statusCode == 200 && mounted) {
-        final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      final data = await sl<ApiClient>().get(ApiEndpoints.ratingForUser(widget.storeTrackingId)) as Map<String, dynamic>;
+      if (mounted) {
         setState(() {
           _avgRating = (data['average_rating'] as num?)?.toDouble() ?? 0.0;
           _totalRatings = (data['total_ratings'] as num?)?.toInt() ?? 0;
@@ -110,16 +102,10 @@ class _VendorStorePageState extends State<VendorStorePage>
 
   Future<void> _fetchStore() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-      final resp = await http.get(
-        Uri.parse(ApiEndpoints.vendorStore(widget.storeTrackingId)),
-        headers: {'Authorization': 'Bearer $token'},
-      ).timeout(const Duration(seconds: 10));
-
-      if (resp.statusCode == 200 && mounted) {
+      final data = await sl<ApiClient>().get(ApiEndpoints.vendorStore(widget.storeTrackingId));
+      if (mounted) {
         setState(() {
-          _storeData = jsonDecode(resp.body) as Map<String, dynamic>;
+          _storeData = data as Map<String, dynamic>;
         });
       }
     } catch (_) {}
@@ -127,30 +113,19 @@ class _VendorStorePageState extends State<VendorStorePage>
 
   Future<void> _fetchProducts() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-      // Use the public product list, filtered by store
-      final uri = Uri.parse(
+      final raw = await sl<ApiClient>().get(
         '${ApiEndpoints.productBase}/products?store_id=${widget.storeTrackingId}&limit=60',
       );
-      final resp = await http.get(
-        uri,
-        headers: {'Authorization': 'Bearer $token'},
-      ).timeout(const Duration(seconds: 10));
-
-      if (resp.statusCode == 200 && mounted) {
-        final raw = jsonDecode(resp.body);
-        final list = raw is List
-            ? raw
-            : (raw as Map<String, dynamic>)['products'] as List? ?? [];
+      final list = raw is List
+          ? raw
+          : (raw as Map<String, dynamic>)['products'] as List? ?? [];
+      if (mounted) {
         setState(() {
           _allProducts =
               list.map((e) => Product.fromJson(e as Map<String, dynamic>)).toList();
           _filtered = _allProducts;
           _isLoadingProducts = false;
         });
-      } else if (mounted) {
-        setState(() => _isLoadingProducts = false);
       }
     } catch (_) {
       if (mounted) setState(() => _isLoadingProducts = false);

@@ -17,7 +17,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	orderModels "github.com/omnigo/backend/internal/order/models"
 	"github.com/omnigo/backend/internal/payment/payfast"
-	sharedAuth "github.com/omnigo/backend/internal/shared/auth"
 	"github.com/omnigo/backend/internal/shared/messaging"
 	"github.com/omnigo/backend/internal/shared/middleware"
 	"github.com/omnigo/backend/internal/wallet/service"
@@ -431,11 +430,8 @@ func (h *WalletHandler) GetRiderWallet(c *gin.Context) {
 	}
 
 	targetID := c.Param("tracking_id")
-	requesterID, role, err := sharedAuth.ParseJWTFromHeader(c.GetHeader("Authorization"))
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
-		return
-	}
+	requesterID := middleware.GetTrackingID(c)
+	role := middleware.GetRole(c)
 	if role != "admin" && requesterID != targetID {
 		c.JSON(http.StatusForbidden, gin.H{"error": "can only view your own wallet"})
 		return
@@ -458,11 +454,7 @@ func (h *WalletHandler) DepositCOD(c *gin.Context) {
 	}
 
 	targetID := c.Param("tracking_id")
-	_, role, err := sharedAuth.ParseJWTFromHeader(c.GetHeader("Authorization"))
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
-		return
-	}
+	role := middleware.GetRole(c)
 	if role != "admin" {
 		c.JSON(http.StatusForbidden, gin.H{"error": "only admins can manually clear rider cash float"})
 		return
@@ -541,11 +533,7 @@ func (h *WalletHandler) GetCustomerWallet(c *gin.Context) {
 	}
 
 	targetID := c.Param("tracking_id")
-	requesterID, _, err := sharedAuth.ParseJWTFromHeader(c.GetHeader("Authorization"))
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
-		return
-	}
+	requesterID := middleware.GetTrackingID(c)
 	if requesterID != targetID {
 		c.JSON(http.StatusForbidden, gin.H{"error": "can only view your own wallet"})
 		return
@@ -568,11 +556,7 @@ func (h *WalletHandler) LoadCustomerWallet(c *gin.Context) {
 		return
 	}
 
-	requesterID, _, err := sharedAuth.ParseJWTFromHeader(c.GetHeader("Authorization"))
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
-		return
-	}
+	requesterID := middleware.GetTrackingID(c)
 
 	var req struct {
 		Amount           float64 `json:"amount"`

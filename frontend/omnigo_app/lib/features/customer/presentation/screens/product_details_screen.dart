@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_stripe/flutter_stripe.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
+import 'package:omnigo_app/core/network/api_client.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
@@ -33,6 +34,14 @@ class ProductDetailsScreen extends StatefulWidget {
 class ProductDetailsScreenState extends State<ProductDetailsScreen> {
   bool _isCheckoutProcessing = false;
   int _quantity = 1;
+  double _deliveryFee = 0.0;
+  String _routingStatus = 'DYNAMIC_CALCULATED';
+
+  // Customer GPS location for accurate delivery fee + rider dropoff
+  double _customerLat = 0.0;
+  double _customerLng = 0.0;
+  bool _isFetchingLocation = false;
+  String? _locationError;
 
   // ── Review state ─────────────────────────────────────────────────
   List<dynamic> _reviews = [];
@@ -63,6 +72,8 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
     _fetchReviews();
     _fetchAIRecommendations();
     _fetchStoreInfo();
+    // H4: Fetch customer GPS on screen load for accurate delivery fee
+    _fetchCustomerLocation();
   }
 
   @override
@@ -91,20 +102,12 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
 
     setState(() => _isLoadingStore = true);
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-      final resp = await http.get(
-        Uri.parse(ApiEndpoints.vendorStore(storeId)),
-        headers: {'Authorization': 'Bearer $token'},
-      ).timeout(const Duration(seconds: 8));
-
-      if (resp.statusCode == 200 && mounted) {
+      final result = await ApiClient().get('/stores/$storeId');
+      if (mounted) {
         setState(() {
-          _storeInfo = jsonDecode(resp.body) as Map<String, dynamic>;
+          _storeInfo = result as Map<String, dynamic>;
           _isLoadingStore = false;
         });
-      } else if (mounted) {
-        setState(() => _isLoadingStore = false);
       }
     } catch (_) {
       if (mounted) setState(() => _isLoadingStore = false);
@@ -117,25 +120,13 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
 
     setState(() => _isLoadingRecommendations = true);
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-
-      final response = await http.get(
-        Uri.parse(ApiEndpoints.productRecommendations(prodId)),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-      ).timeout(const Duration(seconds: 5));
-
-      if (response.statusCode == 200 && mounted) {
-        final data = jsonDecode(response.body) as List<dynamic>;
+      final result = await ApiClient().get('/products/$prodId/recommendations');
+      if (mounted) {
+        final data = result as List<dynamic>;
         setState(() {
           _recommendations = data.map((e) => Product.fromJson(e as Map<String, dynamic>)).toList();
           _isLoadingRecommendations = false;
         });
-      } else if (mounted) {
-        setState(() => _isLoadingRecommendations = false);
       }
     } catch (e) {
       if (mounted) setState(() => _isLoadingRecommendations = false);
@@ -195,33 +186,21 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
 
     try {
       final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
       final customerTrackingId = prefs.getString('tracking_id') ?? '';
 
-      final response = await http.post(
-        Uri.parse(ApiEndpoints.reviewCreate()),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-        body: jsonEncode({
-          'product_tracking_id': prodId,
-          'customer_tracking_id': customerTrackingId,
-          'rating': rating,
-          'comment': comment,
-        }),
-      ).timeout(const Duration(seconds: 8));
+      await ApiClient().post('/reviews/', {
+        'product_tracking_id': prodId,
+        'customer_tracking_id': customerTrackingId,
+        'rating': rating,
+        'comment': comment,
+      });
 
-      if (response.statusCode == 201 && mounted) {
-        Navigator.pop(context); // close review dialog
+      if (mounted) {
+        Navigator.pop(context);
         unawaited(_fetchReviewSummary());
         unawaited(_fetchReviews());
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Review submitted!'), backgroundColor: Colors.green),
-        );
-      } else if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Review failed: ${response.statusCode}'), backgroundColor: Colors.redAccent),
         );
       }
     } catch (e) {
@@ -318,19 +297,126 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
     ).then((_) => commentController.dispose());
   }
 
+  // H4: Fetch customer GPS with retry guards — accurate location for delivery fee + rider dropoff
+  Future<void> _fetchCustomerLocation() async {
+    setState(() {
+      _isFetchingLocation = true;
+      _locationError = null;
+    });
+
+    const maxRetries = 3;
+    double? lastLat;
+    double? lastLng;
+
+    for (int attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        final bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+        if (!serviceEnabled) {
+          setState(() {
+            _locationError = 'Location services are disabled. Please enable GPS.';
+            _isFetchingLocation = false;
+          });
+          return;
+        }
+
+        LocationPermission permission = await Geolocator.checkPermission();
+        if (permission == LocationPermission.denied) {
+          permission = await Geolocator.requestPermission();
+          if (permission == LocationPermission.denied) {
+            if (attempt < maxRetries - 1) {
+              await Future<void>.delayed(Duration(seconds: attempt + 1));
+              continue;
+            }
+            setState(() {
+              _locationError = 'Location permission denied. Please enable in Settings.';
+              _isFetchingLocation = false;
+            });
+            return;
+          }
+        }
+
+        if (permission == LocationPermission.deniedForever) {
+          setState(() {
+            _locationError = 'Location permanently denied. Enable in Settings.';
+            _isFetchingLocation = false;
+          });
+          return;
+        }
+
+        final position = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+        ).timeout(const Duration(seconds: 10));
+
+        lastLat = position.latitude;
+        lastLng = position.longitude;
+
+        setState(() {
+          _customerLat = position.latitude;
+          _customerLng = position.longitude;
+          _isFetchingLocation = false;
+          _locationError = null;
+        });
+
+        // H4: Estimate delivery fee with actual customer location
+        await _estimateDeliveryFee(_customerLat, _customerLng);
+        return;
+      } catch (e) {
+        if (attempt < maxRetries - 1) {
+          await Future<void>.delayed(Duration(seconds: attempt + 1));
+          continue;
+        }
+        // Last known good position? Use it but flag as fallback
+        if (lastLat != null && lastLng != null) {
+          setState(() {
+            _customerLat = lastLat!;
+            _customerLng = lastLng!;
+            _isFetchingLocation = false;
+            _locationError = 'Using last known location. GPS accuracy may be low.';
+          });
+          await _estimateDeliveryFee(_customerLat, _customerLng);
+        } else {
+          setState(() {
+            _locationError = 'Could not get location. Please enable GPS.';
+            _isFetchingLocation = false;
+          });
+        }
+      }
+    }
+  }
+
+  // H4/H3: Estimate delivery fee — uses ACTUAL customer GPS location
+  Future<void> _estimateDeliveryFee(double dropoffLat, double dropoffLng) async {
+    final storeId = widget.product.storeTrackingId;
+    if (storeId.isEmpty) return;
+    try {
+      final resp = await ApiClient().post(
+        ApiEndpoints.deliveryEstimateFee(),
+        {
+          'vendor_store_tracking_id': storeId,
+          'dropoff_lat': dropoffLat,
+          'dropoff_lng': dropoffLng,
+        },
+      );
+      if (resp != null) {
+        final fee = (resp['delivery_fee'] is num) ? (resp['delivery_fee'] as num).toDouble() : 50.0;
+        final routing = (resp['routing_status'] as String?) ?? 'DYNAMIC_CALCULATED';
+        setState(() {
+          _deliveryFee = fee;
+          _routingStatus = routing;
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _deliveryFee = 50.0;
+        _routingStatus = 'FAILED_CALCULATION';
+      });
+    }
+  }
+
   // C-4 FIX: Cancel order on payment failure to release stock
   Future<void> _cancelOrderOnFailure(String orderId, String reason) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-      await http.post(
-        Uri.parse(ApiEndpoints.customerCancelOrder(orderId)),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-        body: jsonEncode({'reason': reason}),
-      );
+      await ApiClient().post('/orders/$orderId/cancel', {'reason': reason});
     } catch (_) {}
   }
 
@@ -345,27 +431,30 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
       _isCheckoutProcessing = true;
     });
 
-    // Fetch GPS location for delivery
-    double dropoffLat = 31.5204;
-    double dropoffLng = 74.3587;
-    try {
-      if (await Geolocator.isLocationServiceEnabled()) {
-        var permission = await Geolocator.checkPermission();
-        if (permission == LocationPermission.denied) {
-          permission = await Geolocator.requestPermission();
-        }
-        if (permission == LocationPermission.whileInUse || permission == LocationPermission.always) {
-          // B3 FIX: Use new LocationSettings API (geolocator 13+ deprecated
-          // desiredAccuracy/timeLimit parameters). Matches other call sites in app.
-          final pos = await Geolocator.getCurrentPosition(
-            locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
-          );
-          dropoffLat = pos.latitude;
-          dropoffLng = pos.longitude;
-        }
+    // H4: Use actual customer GPS — retry if not fetched yet, block if unavailable
+    double dropoffLat = _customerLat;
+    double dropoffLng = _customerLng;
+
+    if (dropoffLat == 0 || dropoffLng == 0) {
+      // Location not fetched yet — retry now with user notification
+      await _fetchCustomerLocation();
+      dropoffLat = _customerLat;
+      dropoffLng = _customerLng;
+    }
+
+    // Final guard: if still no location, block checkout
+    if (dropoffLat == 0 || dropoffLng == 0) {
+      setState(() => _isCheckoutProcessing = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Location required for delivery. Please enable GPS.'),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
       }
-    } catch (_) {
-      // Use default Lahore coords if GPS fails
+      return;
     }
 
     final String nonce = '${widget.product.productTrackingId}_${DateTime.now().millisecondsSinceEpoch}';
@@ -375,54 +464,33 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
     await prefs.setString('pending_order_status', 'PENDING_CONFIRMATION');
 
     try {
-      final url = Uri.parse(ApiEndpoints.orderCheckout());
       final vendorStoreId = widget.product.storeTrackingId;
       final unitPrice = widget.product.basePrice;
       final totalPrice = unitPrice * _quantity;
       final prodId = widget.product.productTrackingId.isNotEmpty ? widget.product.productTrackingId : 'PROD-N/A';
-      final token = prefs.getString('jwt_token') ?? '';
 
       final reqItems = [{
         'product_tracking_id': prodId,
         'quantity': _quantity,
       }];
 
-      // ── Step 1: Place the order FIRST so the backend allocates a real
-      //    ORD- tracking ID. The previous flow created a synthetic nonce
-      //    up-front and passed it to Stripe, which meant the Stripe
-      //    PaymentIntent and the order row had different IDs — the
-      //    webhook couldn't correlate the payment back to the order.
-      final orderResponse = await http.post(
-        url,
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-          'X-Customer-ID': widget.userTrackingId,
-          'X-Store-ID': vendorStoreId,
-          'X-Device-Session-Nonce': nonce,
-        },
-        body: jsonEncode({
-          'user_tracking_id': widget.userTrackingId,
-          'vendor_store_tracking_id': vendorStoreId,
-          'items': reqItems,
-          'total_amount': totalPrice,
-          'currency': 'PKR',
-          'payment_gateway': paymentChoice == 'cash' ? 'cod' : paymentChoice,
-          'device_session_nonce': nonce,
-          'dropoff_lat': dropoffLat,
-          'dropoff_lng': dropoffLng,
-        }),
-      ).timeout(const Duration(seconds: 8));
+      // Step 1: Place the order (ApiClient throws on error)
+      final orderData = await ApiClient().post('/orders/', {
+        'user_tracking_id': widget.userTrackingId,
+        'vendor_store_tracking_id': vendorStoreId,
+        'items': reqItems,
+        'total_amount': totalPrice,
+        'currency': 'PKR',
+        'payment_gateway': paymentChoice == 'cash' ? 'cod' : paymentChoice,
+        'device_session_nonce': nonce,
+        'dropoff_lat': dropoffLat,
+        'dropoff_lng': dropoffLng,
+        // H4: Uber-style — customer pays product + delivery fee
+        'delivery_fee_paisa': (_deliveryFee * 100).round(),
+        // H3: routing audit trail
+        'routing_status': _routingStatus,
+      }) as Map<String, dynamic>;
 
-      if (orderResponse.statusCode != 201) {
-        await prefs.remove('pending_nonce');
-        await prefs.remove('pending_order_product');
-        await prefs.remove('pending_order_status');
-        if (mounted) _showErrorDialog('Failed to create order. Server returned ${orderResponse.statusCode}');
-        return;
-      }
-
-      final orderData = jsonDecode(orderResponse.body) as Map<String, dynamic>;
       final realOrderTrackingId =
           (orderData['order_tracking_id'] ?? orderData['tracking_id'])?.toString();
       if (realOrderTrackingId == null || realOrderTrackingId.isEmpty) {
@@ -432,26 +500,16 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
 
       // ── Step 2: Branch on payment method using the REAL order id.
       if (paymentChoice == 'card') {
-        // Stripe Payment Intent + Payment Sheet keyed off the real order id.
-        final checkoutUrl = Uri.parse(ApiEndpoints.stripeCheckout());
-        final checkoutResponse = await http.post(
-          checkoutUrl,
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer $token',
-          },
-          body: jsonEncode({
+        try {
+          final checkoutData = await ApiClient().post('/payment/checkout', {
             'gateway': 'stripe',
             'customer_id': widget.userTrackingId,
             'store_id': vendorStoreId,
             'order_id': realOrderTrackingId,
             'amount': totalPrice,
             'currency': 'PKR',
-          }),
-        ).timeout(const Duration(seconds: 15));
+          }) as Map<String, dynamic>;
 
-        if (checkoutResponse.statusCode == 200) {
-          final checkoutData = jsonDecode(checkoutResponse.body) as Map<String, dynamic>;
           final clientSecret = checkoutData['client_secret']?.toString();
           if (clientSecret != null && clientSecret.isNotEmpty) {
             try {
@@ -463,10 +521,6 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
                 ),
               );
               await Stripe.instance.presentPaymentSheet();
-              // B9 FIX: After Stripe PaymentSheet succeeds, navigate to
-              // OrderSuccessScreen with pending=true (waiting for webhook to confirm).
-              // Without this fix, user saw unconditional green "Order Placed!" even
-              // though the backend hadn't yet marked the order as paid.
               if (mounted) {
                 await prefs.remove('pending_nonce');
                 await prefs.remove('pending_order_product');
@@ -488,7 +542,6 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
                 setState(() => _isCheckoutProcessing = false);
                 _showErrorDialog('Payment was cancelled or failed: $e');
               }
-              // C-4 FIX: Cancel order on payment failure to release reserved stock
               await _cancelOrderOnFailure(realOrderTrackingId, 'Stripe payment failed: $e');
               await prefs.remove('pending_nonce');
               await prefs.remove('pending_order_product');
@@ -496,14 +549,10 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
               return;
             }
           }
-        } else {
-          // C-4 FIX: Cancel order on Stripe checkout failure to release reserved stock
+        } catch (e) {
           if (mounted) setState(() => _isCheckoutProcessing = false);
-          final errBody = jsonDecode(checkoutResponse.body) as Map<String, dynamic>? ?? {};
-          String errMsg = errBody['error']?.toString() ?? 'Stripe checkout failed. Server returned ${checkoutResponse.statusCode}';
-          if (checkoutResponse.statusCode == 409) {
-            errMsg = 'Order has already been paid. Please refresh to see your order status.';
-            // Show success screen for already paid
+          final msg = e.toString();
+          if (msg.contains('409')) {
             if (mounted) {
               await prefs.remove('pending_nonce');
               await prefs.remove('pending_order_product');
@@ -521,36 +570,23 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
               return;
             }
           }
-          if (mounted) _showErrorDialog(errMsg);
-          await _cancelOrderOnFailure(realOrderTrackingId, 'Stripe checkout failed: ${checkoutResponse.statusCode}');
+          if (mounted) _showErrorDialog('Stripe checkout failed. Please try again.');
+          await _cancelOrderOnFailure(realOrderTrackingId, 'Stripe checkout failed');
           await prefs.remove('pending_nonce');
           await prefs.remove('pending_order_product');
           await prefs.remove('pending_order_status');
           return;
         }
       } else if (paymentChoice == 'wallet') {
-        // Wallet balance checkout: deduct directly via /payment/checkout
-        final walletCheckoutUrl = Uri.parse(ApiEndpoints.stripeCheckout());
-        final walletCheckoutResp = await http.post(
-          walletCheckoutUrl,
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer $token',
-            // Idempotency-Key: a network-level retry of this exact Buy Now
-            // checkout replays the original attempt instead of double-charging.
-            'Idempotency-Key': 'buynow-$nonce',
-          },
-          body: jsonEncode({
+        try {
+          final wcData = await ApiClient().post('/payment/checkout', {
             'gateway': 'wallet',
             'customer_id': widget.userTrackingId,
             'order_id': realOrderTrackingId,
             'amount': totalPrice,
             'currency': 'PKR',
-          }),
-        ).timeout(const Duration(seconds: 10));
+          }, idempotencyKey: 'buynow-$nonce') as Map<String, dynamic>;
 
-        if (walletCheckoutResp.statusCode == 200) {
-          final wcData = jsonDecode(walletCheckoutResp.body) as Map<String, dynamic>;
           final wcError = wcData['error']?.toString();
           if (wcError != null && wcError.isNotEmpty) {
             if (mounted) setState(() => _isCheckoutProcessing = false);
@@ -560,19 +596,10 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
             await prefs.remove('pending_order_status');
             return;
           }
-        } else {
+        } catch (e) {
           if (mounted) setState(() => _isCheckoutProcessing = false);
-          String errorMsg = 'Wallet payment failed. Server returned ${walletCheckoutResp.statusCode}';
-          try {
-            final errorData = jsonDecode(walletCheckoutResp.body) as Map<String, dynamic>;
-            final backendError = errorData['error']?.toString();
-            if (backendError != null && backendError.isNotEmpty) {
-              errorMsg = backendError;
-            }
-          } catch (_) {}
-          if (walletCheckoutResp.statusCode == 409) {
-            errorMsg = 'Order has already been paid. Please refresh to see your order status.';
-            // Show success screen for already paid
+          final msg = e.toString();
+          if (msg.contains('409')) {
             if (mounted) {
               await prefs.remove('pending_nonce');
               await prefs.remove('pending_order_product');
@@ -590,35 +617,24 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
               return;
             }
           }
-          if (mounted) _showErrorDialog(errorMsg);
-          // C-4 FIX: Cancel order on payment failure to release reserved stock
-          await _cancelOrderOnFailure(realOrderTrackingId, 'Wallet payment failed: ${walletCheckoutResp.statusCode}');
+          if (mounted) _showErrorDialog('Wallet payment failed. Please try again.');
+          await _cancelOrderOnFailure(realOrderTrackingId, 'Wallet payment failed');
           await prefs.remove('pending_nonce');
           await prefs.remove('pending_order_product');
           await prefs.remove('pending_order_status');
           return;
         }
       } else if (paymentChoice == 'jazzcash' || paymentChoice == 'easypaisa') {
-        // Mobile wallet redirect flow (scaffolding — redirect URL returned)
-        final walletUrl = Uri.parse('${ApiEndpoints.orderBase}/wallet/charge');
-        final walletResponse = await http.post(
-          walletUrl,
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer $token',
-          },
-          body: jsonEncode({
+        try {
+          final walletData = await ApiClient().post('/wallet/charge', {
             'customer_id': widget.userTrackingId,
             'store_id': vendorStoreId,
             'gateway': paymentChoice,
             'order_id': realOrderTrackingId,
             'amount_cents': (totalPrice * 100).round(),
             'nonce': nonce,
-          }),
-        ).timeout(const Duration(seconds: 10));
+          }) as Map<String, dynamic>;
 
-        if (walletResponse.statusCode == 200) {
-          final walletData = jsonDecode(walletResponse.body) as Map<String, dynamic>;
           final redirectUrl = walletData['redirect_url']?.toString() ?? '';
           if (redirectUrl.isNotEmpty && mounted) {
             final uri = Uri.parse(redirectUrl);
@@ -626,9 +642,6 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
               await launchUrl(uri, mode: LaunchMode.externalApplication);
             }
           }
-          // B1 FIX: Order will be confirmed via webhook after payment.
-          // Navigate to OrderSuccessScreen with pending=true instead of just
-          // showing a dialog and returning to product page.
           if (mounted) {
             await prefs.remove('pending_nonce');
             await prefs.remove('pending_order_product');
@@ -645,20 +658,14 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
             );
           }
           return;
-        } else {
+        } catch (e) {
           if (mounted) setState(() => _isCheckoutProcessing = false);
-          String errorMsg = 'Failed to initiate wallet payment. Server returned ${walletResponse.statusCode}';
-          try {
-            final errorData = jsonDecode(walletResponse.body) as Map<String, dynamic>;
-            final backendError = errorData['error']?.toString();
-            if (backendError != null && backendError.isNotEmpty) {
-              errorMsg = backendError;
-            }
-          } catch (_) {}
-          if (walletResponse.statusCode == 409) {
-            errorMsg = 'Order has already been paid. Please refresh to see your order status.';
-            // Show success screen for already paid
+          final msg = e.toString();
+          if (msg.contains('409')) {
             if (mounted) {
+              await prefs.remove('pending_nonce');
+              await prefs.remove('pending_order_product');
+              await prefs.remove('pending_order_status');
               await Navigator.pushAndRemoveUntil(
                 context,
                 MaterialPageRoute<void>(
@@ -672,57 +679,36 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
               return;
             }
           }
-          if (mounted) _showErrorDialog(errorMsg);
-          // C-4 FIX: Cancel order on payment failure to release reserved stock
-          await _cancelOrderOnFailure(realOrderTrackingId, 'JazzCash/EasyPaisa init failed: ${walletResponse.statusCode}');
+          if (mounted) _showErrorDialog('Failed to initiate wallet payment. Please try again.');
+          await _cancelOrderOnFailure(realOrderTrackingId, 'JazzCash/EasyPaisa init failed');
           await prefs.remove('pending_nonce');
           await prefs.remove('pending_order_product');
           await prefs.remove('pending_order_status');
           return;
         }
       } else if (paymentChoice == 'payfast') {
-        // PayFast PK — Option C tokenized flow (same pipeline as cart checkout):
-        // fraud checks, payment_transactions audit row, 3DS step-up, gateway
-        // verification and the admin/vendor/delivery ledger split all happen
-        // server-side in the payment orchestrator.
         if (!mounted) return;
         final cardDetails = await showPayFastCardDetailsSheet(context);
         if (cardDetails == null) {
-          // User cancelled card entry — keep the order, drop the pending nonce.
           if (mounted) setState(() => _isCheckoutProcessing = false);
           await prefs.remove('pending_nonce');
           return;
         }
 
-        final payfastResponse = await http.post(
-          Uri.parse(ApiEndpoints.payfastPayment()),
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer $token',
-            // Idempotency-Key: a network-level retry of this exact Buy Now
-            // checkout replays the original attempt instead of double-charging.
-            'Idempotency-Key': 'buynow-$nonce',
-          },
-          body: jsonEncode({
+        Map<String, dynamic> pfData;
+        try {
+          pfData = await ApiClient().post('/payments/payfast/payment', {
             'order_id': realOrderTrackingId,
-            // account_type_id intentionally omitted — the orchestrator derives
-            // it from the supplied instrument (card vs bank/wallet).
             'card_number': cardDetails['card_number'],
             'expiry_month': cardDetails['expiry_month'],
             'expiry_year': cardDetails['expiry_year'],
             'cvv': cardDetails['cvv'],
             'customer_mobile_no': cardDetails['customer_mobile_no'],
-          }),
-        ).timeout(const Duration(seconds: 15));
-
-        if (payfastResponse.statusCode != 200) {
+          }, idempotencyKey: 'buynow-$nonce') as Map<String, dynamic>;
+        } catch (e) {
           if (mounted) setState(() => _isCheckoutProcessing = false);
-          final errBody = jsonDecode(payfastResponse.body) as Map<String, dynamic>? ?? {};
-          String errMsg = errBody['error']?.toString() ??
-              'Failed to initiate PayFast payment. Server returned ${payfastResponse.statusCode}';
-          if (payfastResponse.statusCode == 409) {
-            errMsg = 'Order has already been paid. Please refresh to see your order status.';
-            // Show success screen for already paid
+          final msg = e.toString();
+          if (msg.contains('409')) {
             await prefs.remove('pending_nonce');
             await prefs.remove('pending_order_product');
             await prefs.remove('pending_order_status');
@@ -740,24 +726,19 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
               return;
             }
           }
-          if (mounted) _showErrorDialog(errMsg);
-          // C-4 FIX: Cancel order on payment failure to release reserved stock
-          await _cancelOrderOnFailure(realOrderTrackingId, 'PayFast init failed: ${payfastResponse.statusCode}');
+          if (mounted) _showErrorDialog('Failed to initiate PayFast payment. Please try again.');
+          await _cancelOrderOnFailure(realOrderTrackingId, 'PayFast init failed');
           return;
         }
 
-        final pfData = jsonDecode(payfastResponse.body) as Map<String, dynamic>;
         final status = pfData['status']?.toString();
         if (status == 'failed') {
           if (mounted) setState(() => _isCheckoutProcessing = false);
           if (mounted) _showErrorDialog(pfData['message']?.toString() ?? 'PayFast payment failed');
-          // C-4 FIX: Cancel order on payment failure to release reserved stock
           await _cancelOrderOnFailure(realOrderTrackingId, 'PayFast payment failed: ${pfData['message']}');
           return;
         }
 
-        // Hosted checkout redirect (apps.net.pk): open PayFast payment page in browser.
-        // After payment, PayFast sends IPN to our callback URL which marks order paid.
         if (status == 'hosted_redirect') {
           final redirectUrl = pfData['redirect_url']?.toString() ?? '';
           if (redirectUrl.isNotEmpty && mounted) {
@@ -773,8 +754,6 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
                 ),
               );
             }
-            // B1 FIX: Navigate to OrderSuccessScreen with pending=true (payment still processing)
-            // Instead of returning to product page, show the order tracking screen.
             if (mounted) {
               await prefs.remove('pending_nonce');
               await prefs.remove('pending_order_product');
@@ -798,24 +777,14 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
           }
         }
 
-        // 3DS step-up: render the bank challenge; the ACS posts its result to the
-        // backend callback directly, which resumes tokenization + settlement.
         if (status == '3ds_redirect' || pfData['action'] == '3ds_redirect') {
           final threedHtml = pfData['threed_html']?.toString() ?? '';
           if (threedHtml.isNotEmpty && mounted) {
             final verified = await showPayFast3DSChallenge(context, threedHtml);
             if (!verified) {
-              // B2 FIX: Cancel the order on backend so stock is released immediately
-              // instead of waiting 30 minutes for OrderTimeoutWorker.
               try {
-                final cancelResp = await http.post(
-                  Uri.parse(ApiEndpoints.customerCancelOrder(realOrderTrackingId)),
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': 'Bearer ${prefs.getString('jwt_token') ?? ''}',
-                  },
-                );
-                debugPrint('3DS cancel: backend cancel response ${cancelResp.statusCode}');
+                await ApiClient().post('/orders/$realOrderTrackingId/cancel', {});
+                debugPrint('3DS cancel: backend cancel succeeded');
               } catch (e) {
                 debugPrint('3DS cancel: backend cancel failed: $e');
               }
@@ -828,7 +797,6 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
           }
         }
 
-        // Deferred outcomes: money may still be settling at the gateway.
         if (status == 'gateway_pending' || status == 'in_progress') {
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
@@ -1019,6 +987,57 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
                     ],
                   ),
                   const SizedBox(height: 12),
+
+                  // H4: Show estimated delivery fee with location status
+                  if (_locationError != null && _locationError!.isNotEmpty)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: Colors.orange.shade50,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.orange.shade300),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(Icons.location_off, size: 16, color: Colors.orange.shade700),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              _locationError!,
+                              style: TextStyle(fontSize: 12, color: Colors.orange.shade700),
+                            ),
+                          ),
+                          GestureDetector(
+                            onTap: _isFetchingLocation ? null : _fetchCustomerLocation,
+                            child: Text(
+                              'Retry',
+                              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.orange.shade700),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                  // H4: Delivery fee estimate (shown once location is fetched)
+                  if (_customerLat != 0 && _customerLng != 0 && _deliveryFee > 0)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Row(
+                        children: [
+                          Icon(Icons.local_shipping, size: 16, color: Colors.green.shade700),
+                          const SizedBox(width: 4),
+                          Text(
+                            'Delivery: PKR ${_deliveryFee.toStringAsFixed(0)}',
+                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.green.shade700),
+                          ),
+                          if (_routingStatus == 'FALLBACK_HAVERSINE')
+                            Text(
+                              ' (approx)',
+                              style: TextStyle(fontSize: 11, color: Colors.orange.shade700),
+                            ),
+                        ],
+                      ),
+                    ),
 
                   // Product ID chip
                   _buildChip(Icons.qr_code, prodId, AppTheme.softBlue),
@@ -1222,6 +1241,54 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
                     ],
                   ),
                   const SizedBox(height: 16),
+
+                  // H4: Total price + delivery fee summary before checkout
+                  if (_customerLat != 0 && _customerLng != 0 && _deliveryFee > 0)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: Colors.green.shade50,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: Colors.green.shade200),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Product: PKR ${(widget.product.basePrice * _quantity).toStringAsFixed(0)}',
+                                style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+                              ),
+                              Text(
+                                'Delivery: PKR ${_deliveryFee.toStringAsFixed(0)}',
+                                style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+                              ),
+                            ],
+                          ),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              const Text(
+                                'Total',
+                                style: TextStyle(fontSize: 11, color: Colors.grey),
+                              ),
+                              Text(
+                                'PKR ${((widget.product.basePrice * _quantity) + _deliveryFee).toStringAsFixed(0)}',
+                                style: TextStyle(
+                                  fontSize: 17,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.green.shade700,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+
+                  const SizedBox(height: 12),
 
                   Row(
                     children: [

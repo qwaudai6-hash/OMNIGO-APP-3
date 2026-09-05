@@ -1,9 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
-
+import '../../../core/network/api_client.dart';
 import '../../../core/network/api_endpoints.dart';
 import '../../../core/network/websocket_client.dart';
 
@@ -166,58 +164,20 @@ class ChatService {
 
   String get myUserId => _myUserId ?? '';
 
-  /// Helper: HTTP GET with retry on 5xx errors.
-  Future<http.Response> _getWithRetry(Uri url, String token, {int maxRetries = 2}) async {
-    for (int attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        final resp = await http.get(url, headers: {'Authorization': 'Bearer $token'})
-            .timeout(const Duration(seconds: 8));
-        if (resp.statusCode < 500 || attempt == maxRetries) return resp;
-      } catch (e) {
-        if (attempt == maxRetries) rethrow;
-      }
-      await Future<void>.delayed(Duration(seconds: attempt + 1));
-    }
-    throw Exception('unreachable');
+  /// Helper: GET via ApiClient (retries & auth handled internally).
+  Future<dynamic> _get(String endpoint) async {
+    return ApiClient().get(endpoint);
   }
 
-  /// Helper: HTTP POST with retry on 5xx errors.
-  Future<http.Response> _postWithRetry(Uri url, String token, {required Map<String, dynamic> body, int maxRetries = 2}) async {
-    for (int attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        final resp = await http.post(url, headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        }, body: jsonEncode(body))
-            .timeout(const Duration(seconds: 8));
-        if (resp.statusCode < 500 || attempt == maxRetries) return resp;
-      } catch (e) {
-        if (attempt == maxRetries) rethrow;
-      }
-      await Future<void>.delayed(Duration(seconds: attempt + 1));
-    }
-    throw Exception('unreachable');
+  /// Helper: POST via ApiClient (retries & auth handled internally).
+  Future<dynamic> _post(String endpoint, Map<String, dynamic> body) async {
+    return ApiClient().post(endpoint, body);
   }
 
   /// Fetch the chat list (conversations) for the current user.
   Future<List<ChatConversation>> fetchConversations({int page = 1}) async {
-    final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('jwt_token') ?? '';
-    final resp = await _getWithRetry(
-      Uri.parse('${ApiEndpoints.chatConversations}?page=$page'),
-      token,
-    );
-    if (resp.statusCode != 200) {
-      final Map<String, dynamic> body;
-      try {
-        body = jsonDecode(resp.body) as Map<String, dynamic>;
-      } catch (_) {
-        throw Exception('Server error (${resp.statusCode})');
-      }
-      final errMsg = body['error'] as String? ?? 'Failed to load conversations (${resp.statusCode})';
-      throw Exception(errMsg);
-    }
-    final data = jsonDecode(resp.body) as Map<String, dynamic>;
+    final data = await _get('${ApiEndpoints.chatConversations}?page=$page')
+        as Map<String, dynamic>;
     final list = (data['data'] as List<dynamic>? ?? const [])
         .map((e) => ChatConversation.fromJson(e as Map<String, dynamic>))
         .toList();
@@ -229,23 +189,8 @@ class ChatService {
 
   /// Fetch the message history for a single order thread.
   Future<List<ChatMessage>> fetchMessages(String orderId, {int page = 1}) async {
-    final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('jwt_token') ?? '';
-    final resp = await _getWithRetry(
-      Uri.parse('${ApiEndpoints.chatMessages}?order_id=$orderId&page=$page'),
-      token,
-    );
-    if (resp.statusCode != 200) {
-      final Map<String, dynamic> body;
-      try {
-        body = jsonDecode(resp.body) as Map<String, dynamic>;
-      } catch (_) {
-        throw Exception('Server error (${resp.statusCode})');
-      }
-      final errMsg = body['error'] as String? ?? 'Failed to load messages (${resp.statusCode})';
-      throw Exception(errMsg);
-    }
-    final data = jsonDecode(resp.body) as Map<String, dynamic>;
+    final data = await _get('${ApiEndpoints.chatMessages}?order_id=$orderId&page=$page')
+        as Map<String, dynamic>;
     final list = (data['data'] as List<dynamic>? ?? const [])
         .map((e) => ChatMessage.fromJson(e as Map<String, dynamic>))
         .toList();
@@ -261,63 +206,36 @@ class ChatService {
     required String receiverId,
     required String content,
   }) async {
-    final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('jwt_token') ?? '';
-    final resp = await _postWithRetry(
-      Uri.parse(ApiEndpoints.chatMessages),
-      token,
-      body: {
-        'order_id': orderId,
-        'receiver_id': receiverId,
-        'content': content,
-      },
-    );
-    if (resp.statusCode != 200) {
-      final Map<String, dynamic> body;
-      try {
-        body = jsonDecode(resp.body) as Map<String, dynamic>;
-      } catch (_) {
-        throw Exception('Server error (${resp.statusCode})');
-      }
-      final errMsg = body['error'] as String? ?? 'Failed to send message (${resp.statusCode})';
-      throw Exception(errMsg);
-    }
-    final data = jsonDecode(resp.body) as Map<String, dynamic>;
+    final data = await _post(ApiEndpoints.chatMessages, {
+      'order_id': orderId,
+      'receiver_id': receiverId,
+      'content': content,
+    }) as Map<String, dynamic>;
     return ChatMessage.fromJson(data['data'] as Map<String, dynamic>);
   }
 
   /// Mark every message in this thread addressed to me as read.
   Future<void> markRead(String orderId) async {
-    final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('jwt_token') ?? '';
-    await http.put(
-      Uri.parse('${ApiEndpoints.chatMessages}/$orderId/read'),
-      headers: {'Authorization': 'Bearer $token'},
-    ).timeout(const Duration(seconds: 5));
+    await ApiClient().put(
+      '${ApiEndpoints.chatMessages}/$orderId/read',
+      {},
+    );
   }
 
   /// M1: Mark every message in this thread addressed to me as delivered.
   Future<void> markDelivered(String orderId) async {
-    final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('jwt_token') ?? '';
-    await http.put(
-      Uri.parse('${ApiEndpoints.chatMessages}/$orderId/delivered'),
-      headers: {'Authorization': 'Bearer $token'},
-    ).timeout(const Duration(seconds: 5));
+    await ApiClient().put(
+      '${ApiEndpoints.chatMessages}/$orderId/delivered',
+      {},
+    );
   }
 
   /// Cheap poll for the bottom-nav badge. Calls every 15s from the
   /// chat button widget.
   Future<int> fetchUnreadCount() async {
-    final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('jwt_token') ?? '';
-    final resp = await http.get(
-      Uri.parse(ApiEndpoints.chatUnread),
-      headers: {'Authorization': 'Bearer $token'},
-    ).timeout(const Duration(seconds: 5));
-    if (resp.statusCode != 200) return 0;
     try {
-      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      final data = await ApiClient().get(ApiEndpoints.chatUnread)
+          as Map<String, dynamic>;
       final n = (data['unread_count'] ?? 0) as int;
       _unreadController.add(n);
       return n;

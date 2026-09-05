@@ -1,11 +1,9 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/network/api_client.dart';
@@ -128,28 +126,14 @@ class VendorAddProductScreenState extends State<VendorAddProductScreen>
   Future<void> _uploadImage(File imageFile) async {
     setState(() => _isUploadingImage = true);
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-
-      final uri = Uri.parse('${ApiEndpoints.productBase}/products/upload-image');
-      final req = http.MultipartRequest('POST', uri)
-        ..headers['Authorization'] = 'Bearer $token'
-        ..files.add(await http.MultipartFile.fromPath('image', imageFile.path));
-
-      final streamed = await req.send().timeout(const Duration(seconds: 30));
-      final body = await streamed.stream.bytesToString();
-
-      if (streamed.statusCode == 200 || streamed.statusCode == 201) {
-        final data = jsonDecode(body) as Map<String, dynamic>;
-        final url = data['image_url'] as String? ?? data['url'] as String? ?? '';
-        if (url.isNotEmpty) {
-          setState(() => _uploadedImageUrl = url);
-        } else {
-          _showError('Upload succeeded but server returned no URL.');
-        }
+      final endpoint = '${ApiEndpoints.productBase}/products/upload-image';
+      final file = await http.MultipartFile.fromPath('image', imageFile.path);
+      final data = await sl<ApiClient>().multipartPost(endpoint, {}, [file]);
+      final url = (data as Map<String, dynamic>)['image_url'] as String? ?? data['url'] as String? ?? '';
+      if (url.isNotEmpty) {
+        setState(() => _uploadedImageUrl = url);
       } else {
-        _showError('Image upload failed (${streamed.statusCode}): $body');
-        setState(() => _pickedImageFile = null);
+        _showError('Upload succeeded but server returned no URL.');
       }
     } catch (e) {
       _showError('Image upload error: $e');
@@ -259,14 +243,6 @@ class VendorAddProductScreenState extends State<VendorAddProductScreen>
     unawaited(HapticFeedback.mediumImpact());
 
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-
-      final headers = {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer $token',
-      };
-
       if (_isEditMode) {
         // ── EDIT MODE: partial update via PUT ─────────────────────
         final body = <String, dynamic>{};

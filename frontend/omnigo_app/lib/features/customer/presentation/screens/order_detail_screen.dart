@@ -1,9 +1,7 @@
-import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import '../../../../core/di/service_locator.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/network/api_endpoints.dart';
@@ -51,21 +49,14 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 
   Future<String?> _uploadDisputePhoto(File imageFile) async {
     try {
-      final uri = Uri.parse('${ApiEndpoints.deliveryBase}/delivery/gig/upload-proof');
-      final request = http.MultipartRequest('POST', uri);
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-      if (token.isNotEmpty) {
-        request.headers['Authorization'] = 'Bearer $token';
-      }
-      request.files.add(await http.MultipartFile.fromPath('photo', imageFile.path));
-
-      final streamedResponse = await request.send().timeout(const Duration(seconds: 30));
-      final response = await http.Response.fromStream(streamedResponse);
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['photo_url'] as String;
+      final files = [await http.MultipartFile.fromPath('photo', imageFile.path)];
+      final data = await sl<ApiClient>().multipartPost(
+        ApiEndpoints.deliveryGigUploadProof(),
+        {},
+        files,
+      );
+      if (data is Map<String, dynamic>) {
+        return data['photo_url'] as String?;
       }
     } catch (e) {
       debugPrint('Error uploading photo: $e');
@@ -424,39 +415,22 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                   : () async {
                       setDialogState(() => isSubmittingRating = true);
                       try {
-                        final prefs = await SharedPreferences.getInstance();
-                        final token = prefs.getString('jwt_token') ?? '';
-                        final response = await http.post(
-                          Uri.parse(ApiEndpoints.ratingCreate()),
-                          headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': 'Bearer $token',
-                          },
-                          body: jsonEncode({
-                            'product_tracking_id': productId.isNotEmpty ? productId : 'PROD-ORDER',
-                            'target_user_tracking_id': vendorId,
-                            'rating': selectedRating,
-                            'comment': commentController.text.trim(),
-                          }),
-                        ).timeout(const Duration(seconds: 8));
+                        final body = {
+                          'product_tracking_id': productId.isNotEmpty ? productId : 'PROD-ORDER',
+                          'target_user_tracking_id': vendorId,
+                          'rating': selectedRating,
+                          'comment': commentController.text.trim(),
+                        };
+                        await sl<ApiClient>().post(ApiEndpoints.ratingCreate(), body);
 
                         if (mounted) {
                           Navigator.pop(ctx);
-                          if (response.statusCode == 200 || response.statusCode == 201) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('Rating submitted successfully! Thank you.'),
-                                backgroundColor: Colors.green,
-                              ),
-                            );
-                          } else {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text('Failed to submit rating (${response.statusCode})'),
-                                backgroundColor: Colors.redAccent,
-                              ),
-                            );
-                          }
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Rating submitted successfully! Thank you.'),
+                              backgroundColor: Colors.green,
+                            ),
+                          );
                         }
                       } catch (e) {
                         if (mounted) {
