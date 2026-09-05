@@ -20,7 +20,7 @@ import (
 	"github.com/omnigo/backend/internal/shared/messaging"
 	"github.com/omnigo/backend/internal/shared/middleware"
 	"github.com/omnigo/backend/internal/wallet/service"
-	"github.com/redis/go-redis.v9"
+	"github.com/redis/go-redis/v9"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 

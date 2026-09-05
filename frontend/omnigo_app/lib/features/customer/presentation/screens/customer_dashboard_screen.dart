@@ -444,6 +444,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
           _activeDeliveryOrderId = null;
           _deliveryEtaSeconds = null;
           _deliveryDistanceMeters = null;
+          _mapMarkers.remove('destination');
         }
       }
     });
@@ -659,7 +660,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       if (mounted && gpsError != null) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(gpsError!),
+            content: Text(gpsError),
             backgroundColor: Colors.red,
             behavior: SnackBarBehavior.floating,
           ),
@@ -879,6 +880,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
             _activeDeliveryOrderId = null;
             _deliveryEtaSeconds = null;
             _deliveryDistanceMeters = null;
+            _mapMarkers.remove('destination');
           });
         }
       }
@@ -909,20 +911,32 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       if (coords == null || coords.isEmpty) return;
 
       final List<LatLng> points = coords.map<LatLng>((c) {
-        final double lng = (c[0] as num).toDouble();
-        final double lat = (c[1] as num).toDouble();
+        if (c is! List || c.length < 2) return const LatLng(0, 0);
+        final lng = (c[0] as num).toDouble();
+        final lat = (c[1] as num).toDouble();
+        if (lng == 0 && lat == 0) return const LatLng(0, 0);
         return LatLng(lat, lng);
       }).toList();
+
+      if (points.isEmpty || (points.length == 1 && points.first.latitude == 0)) return;
+
+      final destination = points.last;
+      final distanceVal = distance?.toDouble();
+      final durationVal = duration?.toDouble();
 
       if (!mounted) return;
       setState(() {
         _deliveryRoutePolyline = points;
-        _deliveryDistanceMeters = distance?.toDouble();
-        _deliveryEtaSeconds = duration?.toDouble();
+        _deliveryDistanceMeters = distanceVal;
+        _deliveryEtaSeconds = durationVal;
+        _mapCenter = destination;
+        _mapMarkers['destination'] = MarkerData(
+          position: destination,
+          iconSize: 1.0,
+        );
       });
 
-      if (_mapController != null && points.isNotEmpty) {
-        // Pan to the first point of the route (rider's current location)
+      if (_mapController != null) {
         _mapController!.animateCamera(
           CameraUpdate.newLatLng(points.first),
         );
@@ -1485,6 +1499,11 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                       : const []),
               onMapCreated: (controller) {
                 _mapController = controller;
+                if (_deliveryRoutePolyline.isNotEmpty && _deliveryRoutePolyline.first.latitude != 0) {
+                  controller.animateCamera(
+                    CameraUpdate.newLatLng(_deliveryRoutePolyline.first),
+                  );
+                }
               },
             );
           },
@@ -1559,7 +1578,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                   child: Row(
                     children: [
                       const Icon(Icons.local_shipping_outlined,
-                          color: Colors.black, size: 18),
+                          color: Colors.black, size: 18,),
                       const SizedBox(width: 10),
                       Expanded(
                         child: Text(
@@ -1637,56 +1656,6 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     return MyOrdersScreen(customerTrackingId: widget.trackingId);
   }
 
-  Widget _buildTrackingItem(
-      String id, String desc, String storeId, String status, bool isActive, {bool isCancelled = false,}) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-              color: Colors.black.withOpacity(0.01),
-              blurRadius: 10,
-              offset: const Offset(0, 5),),
-        ],
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(id,
-                  style: const TextStyle(
-                      fontWeight: FontWeight.bold,
-                      color: AppTheme.blackAccent,),),
-              const SizedBox(height: 4),
-              Text(desc,
-                  style: const TextStyle(color: Colors.grey, fontSize: 13),),
-            ],
-          ),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            decoration: BoxDecoration(
-              color: isCancelled ? Colors.red.shade100 : (isActive ? AppTheme.limeAccent : Colors.grey.shade200),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Text(
-              status,
-              style: TextStyle(
-                fontWeight: FontWeight.bold,
-                color: isActive ? AppTheme.blackAccent : Colors.grey.shade600,
-                fontSize: 12,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   Widget _buildProfileTab() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(24.0),
@@ -1743,7 +1712,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
           const SizedBox(height: 16),
           _buildEmailRow(
             SessionRegistry.instance.email ?? 'Not provided',
-            SessionRegistry.instance.isVerified ?? false,
+            SessionRegistry.instance.isVerified,
           ),
           _buildInfoRow(
               'Phone Number',

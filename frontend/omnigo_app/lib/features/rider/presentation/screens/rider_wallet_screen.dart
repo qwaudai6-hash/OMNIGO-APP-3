@@ -33,7 +33,7 @@ class _RiderWalletScreenState extends State<RiderWalletScreen> {
       final results = await Future.wait([walletFuture, codDebtsFuture]);
 
       if (mounted) {
-        if (results[0] is Map<String, dynamic>) _wallet = results[0];
+        if (results[0] is Map<String, dynamic>) _wallet = results[0] as Map<String, dynamic>;
         if (results[1] is Map<String, dynamic>) {
           _codDebts = (results[1]['debts'] as List<dynamic>?) ?? <dynamic>[];
         }

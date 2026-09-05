@@ -121,7 +121,7 @@ func (w *SettlementWorker) checkDatabaseHealth(ctx context.Context) {
 
 	// Check for stale connections
 	stats := w.db.Stat()
-	if stats.IdleConns == 0 && stats.TotalConns > 5 {
+	if stats.IdleConns() == 0 && stats.TotalConns() > 5 {
 		log.Printf("[SettlementWorker] WARNING: All database connections are in use (%d/%d). High load detected.",
 			stats.TotalConns, stats.TotalConns)
 	}
