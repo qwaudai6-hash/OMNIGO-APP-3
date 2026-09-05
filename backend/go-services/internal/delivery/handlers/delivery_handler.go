@@ -121,6 +121,65 @@ func (h *DeliveryHandler) GetRoute(c *gin.Context) {
 	c.JSON(http.StatusOK, route)
 }
 
+// GetRouteForCustomer HTTP handler for GET /delivery/gig/:id/route-customer
+// Returns the delivery route for the customer to track their rider on the map.
+func (h *DeliveryHandler) GetRouteForCustomer(c *gin.Context) {
+	trackingID := c.Param("id")
+	if trackingID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing tracking ID"})
+		return
+	}
+
+	customerID := middleware.GetTrackingID(c)
+
+	route, err := h.svc.GetRouteForCustomer(c.Request.Context(), trackingID, customerID)
+	if err != nil {
+		errStr := err.Error()
+		if strings.Contains(errStr, "not authorized") || strings.Contains(errStr, "no gig found") {
+			c.JSON(http.StatusForbidden, gin.H{"error": errStr})
+			return
+		}
+		if strings.Contains(errStr, "no pickup") || strings.Contains(errStr, "no dropoff") {
+			c.JSON(http.StatusNotFound, gin.H{"error": errStr})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errStr})
+		return
+	}
+
+	c.Header(osrmSourceHeader, route.Source)
+	c.JSON(http.StatusOK, route)
+}
+
+// GetRouteByOrderForCustomer HTTP handler for GET /delivery/gig/by-order/:orderId/route-customer
+// Looks up gig by order tracking ID and returns route for customer tracking.
+func (h *DeliveryHandler) GetRouteByOrderForCustomer(c *gin.Context) {
+	orderID := c.Param("orderId")
+	if orderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing order ID"})
+		return
+	}
+
+	customerID := middleware.GetTrackingID(c)
+
+	route, gigID, err := h.svc.GetRouteByOrderForCustomer(c.Request.Context(), orderID, customerID)
+	if err != nil {
+		errStr := err.Error()
+		if strings.Contains(errStr, "not authorized") || strings.Contains(errStr, "no gig found") || strings.Contains(errStr, "no gig") {
+			c.JSON(http.StatusForbidden, gin.H{"error": errStr})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errStr})
+		return
+	}
+
+	c.Header(osrmSourceHeader, route.Source)
+	c.JSON(http.StatusOK, gin.H{
+		"route":     route,
+		"gig_id":    gigID,
+	})
+}
+
 // GetSurgeHeatmap HTTP handler for GET /delivery/surge-heatmap
 func (h *DeliveryHandler) GetSurgeHeatmap(c *gin.Context) {
 	heatmaps, err := h.svc.GetSurgeHeatmap(c.Request.Context())
@@ -204,6 +263,8 @@ func (h *DeliveryHandler) RegisterRoutes(router *gin.Engine) {
 		// Authenticated delivery queries & disputes
 		delivery.POST("/estimate-fee", h.EstimateDeliveryFee)
 		delivery.GET("/gig/:id/route", h.GetRoute)
+		delivery.GET("/gig/:id/route-customer", h.GetRouteForCustomer)
+		delivery.GET("/gig/by-order/:orderId/route-customer", h.GetRouteByOrderForCustomer)
 		delivery.POST("/gig/dispute", h.DisputeGig)
 		delivery.GET("/surge-heatmap", h.GetSurgeHeatmap)
 	}

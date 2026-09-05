@@ -91,6 +91,69 @@ class NotificationAlertDialogState extends State<NotificationAlertDialog> {
                 style: TextStyle(fontSize: 14, color: Colors.grey.shade600, fontWeight: FontWeight.w500),
               ),
             ],
+            if (widget.gigData['items_summary'] != null && (widget.gigData['items_summary'] as String).isNotEmpty) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.blue.shade100),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.shopping_bag_outlined, size: 16, color: Colors.blue.shade700),
+                        const SizedBox(width: 6),
+                        Text('Items', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.blue.shade700)),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      widget.gigData['items_summary']?.toString() ?? '',
+                      style: TextStyle(fontSize: 13, color: Colors.blue.shade900),
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            if (widget.gigData['customer_name'] != null && widget.gigData['customer_name'].toString().isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Icon(Icons.person_outline, size: 16, color: Colors.grey.shade600),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'Deliver to: ${widget.gigData['customer_name']}',
+                      style: TextStyle(fontSize: 13, color: Colors.grey.shade700, fontWeight: FontWeight.w500),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+            if (widget.gigData['customer_address'] != null && widget.gigData['customer_address'].toString().isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.location_on_outlined, size: 16, color: Colors.grey.shade600),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      widget.gigData['customer_address']?.toString() ?? '',
+                      style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ],
             const SizedBox(height: 20),
             Text(
               "00:${_secondsLeft.toString().padLeft(2, '0')}",

@@ -5,11 +5,17 @@ import '../screens/cart_screen.dart';
 
 class OrderSuccessScreen extends StatelessWidget {
 
-  const OrderSuccessScreen({super.key, required this.trackingId, this.pending = false, this.failed = false});
+  const OrderSuccessScreen({
+    super.key,
+    required this.trackingId,
+    this.pending = false,
+    this.failed = false,
+    this.otpCode,
+  });
   final String trackingId;
-
   final bool pending;
   final bool failed;
+  final String? otpCode;
 
   @override
   Widget build(BuildContext context) {
@@ -86,6 +92,68 @@ class OrderSuccessScreen extends StatelessWidget {
                   ),
                 ),
               ),
+              const SizedBox(height: 16),
+              // OTP display — available once rider is assigned
+              if (otpCode != null && otpCode!.isNotEmpty)
+                GestureDetector(
+                  onTap: () {
+                    Clipboard.setData(ClipboardData(text: otpCode!));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('OTP copied to clipboard'), duration: Duration(seconds: 2)),
+                    );
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF0FFF0),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.green.shade200),
+                    ),
+                    child: Column(
+                      children: [
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Text('Delivery OTP', style: TextStyle(color: Colors.grey, fontSize: 12)),
+                            const SizedBox(width: 8),
+                            Icon(Icons.copy, size: 14, color: Colors.grey.shade400),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          otpCode!,
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 20, fontFamily: 'monospace', letterSpacing: 4, color: Colors.green),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Share this with the rider when they arrive',
+                          style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              else if (!isFailed && !pending)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade50,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: Colors.orange.shade200),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.info_outline, size: 18, color: Colors.orange.shade700),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          'Your delivery OTP will appear here once a rider is assigned to your order.',
+                          style: TextStyle(fontSize: 12, color: Colors.orange.shade700),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               const Spacer(),
               if (isFailed) ...[
                 SizedBox(

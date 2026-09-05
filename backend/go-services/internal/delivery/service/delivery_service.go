@@ -130,7 +130,7 @@ func (s *DeliveryService) StartKafkaConsumer(ctx context.Context) {
 						// Notify affected riders via Redis Stream so they see the gig disappear
 						if s.streams != nil {
 							gig, _ := s.repo.GetGigByOrderTrackingID(ctx, orderID)
-							if gig != nil && gig.RiderTrackingID != "" {
+							if gig != nil && gig.AssignedRiderID != "" {
 								_ = s.streams.Publish(ctx, StreamRiderEvents, map[string]interface{}{
 									"event":             "gig_cancelled",
 									"gig_id":            gig.TrackingID,
@@ -214,12 +214,22 @@ func (s *DeliveryService) HandleNewOrder(ctx context.Context, order models.Order
 		IsCOD:              order.IsCOD,
 		OrderTotal:         order.TotalAmount,
 		CustomerPhone:      order.CustomerPhone,
+		CustomerName:       order.CustomerName,
+		CustomerAddress:    order.CustomerAddress,
+		ItemsSummary:       order.ItemsSummary,
 	}
 
 	if err := s.repo.CreateGig(ctx, gig); err != nil {
 		log.Printf("Database Error: Failed to save gig: %v", err)
 		return
 	}
+
+	// H4: Notify customer via FCM push notification with their delivery OTP
+	go func() {
+		if err := s.SendCustomerOTPNotification(context.Background(), gig); err != nil {
+			log.Printf("Warning: Failed to send OTP notification to customer: %v", err)
+		}
+	}()
 
 	// Calculate origin hexagon at resolution 5 from the store pickup location
 	centerCoord := h3.GeoCoord{Latitude: pickupLat, Longitude: pickupLng}
@@ -629,6 +639,121 @@ func (s *DeliveryService) GetRoute(ctx context.Context, trackingID string) (*mod
 	}
 
 	return result, nil
+}
+
+// getGigRoute returns the OSRM route for a given gig's delivery.
+func (s *DeliveryService) getGigRoute(ctx context.Context, gig *models.DeliveryGig) (*models.RouteResponse, error) {
+	if gig.PickupLat == 0 && gig.PickupLng == 0 {
+		return nil, fmt.Errorf("gig has no pickup coordinates")
+	}
+	if gig.DropoffLat == 0 && gig.DropoffLng == 0 {
+		return nil, fmt.Errorf("gig has no dropoff coordinates")
+	}
+
+	// State-aware routing: rider location → customer dropoff
+	originLng, originLat := gig.PickupLng, gig.PickupLat
+	destLng, destLat := gig.DropoffLng, gig.DropoffLat
+
+	if gig.AssignedRiderID != "" && s.redis != nil {
+		coordsKey := fmt.Sprintf("rider:coords:%s", gig.AssignedRiderID)
+		if coordsJSON, err := s.redis.Get(ctx, coordsKey).Result(); err == nil && coordsJSON != "" {
+			var riderLoc struct {
+				Lat float64 `json:"lat"`
+				Lng float64 `json:"lng"`
+			}
+			if json.Unmarshal([]byte(coordsJSON), &riderLoc) == nil && riderLoc.Lat != 0 && riderLoc.Lng != 0 {
+				originLng, originLat = riderLoc.Lng, riderLoc.Lat
+			}
+		}
+	}
+
+	// For customer tracking: show rider → customer dropoff when in transit
+	if gig.Status == models.StatusPickedUp || gig.Status == models.StatusInTransit {
+		destLng, destLat = gig.DropoffLng, gig.DropoffLat
+	}
+
+	coords := fmt.Sprintf("%f,%f;%f,%f", originLng, originLat, destLng, destLat)
+	osrmURL := fmt.Sprintf("%s/route/v1/driving/%s?overview=full&geometries=geojson", s.osrmURL, coords)
+
+	resp, err := s.httpClient.Get(osrmURL)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		// Haversine fallback
+		distKm := haversineKm(originLat, originLng, destLat, destLng)
+		etaSec := (distKm / 30.0) * 3600.0
+		result := &models.RouteResponse{
+			DistanceMeters:  distKm * 1000.0,
+			DurationSeconds: etaSec,
+			Coordinates:     [][]float64{{originLng, originLat}, {destLng, destLat}},
+			Source:          "haversine_fallback",
+		}
+		return result, nil
+	}
+	defer resp.Body.Close()
+
+	var osrmResp struct {
+		Code   string `json:"code"`
+		Routes []struct {
+			Distance  float64 `json:"distance"`
+			Duration  float64 `json:"duration"`
+			Geometry  struct {
+				Coordinates [][]float64 `json:"coordinates"`
+			} `json:"geometry"`
+		} `json:"routes"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&osrmResp); err != nil {
+		return nil, fmt.Errorf("failed to decode OSRM response: %w", err)
+	}
+
+	if len(osrmResp.Routes) == 0 {
+		return nil, fmt.Errorf("no route found from OSRM")
+	}
+
+	route := osrmResp.Routes[0]
+	result := &models.RouteResponse{
+		DistanceMeters:  route.Distance,
+		DurationSeconds: route.Duration,
+		Coordinates:    route.Geometry.Coordinates,
+		Source:         "osrm",
+	}
+
+	return result, nil
+}
+
+// GetRouteForCustomer returns the OSRM driving route from rider's current location to customer's dropoff.
+// It verifies the caller is the customer for this gig before returning the route.
+func (s *DeliveryService) GetRouteForCustomer(ctx context.Context, gigTrackingID, customerID string) (*models.RouteResponse, error) {
+	gig, err := s.repo.GetGigByTrackingID(ctx, gigTrackingID)
+	if err != nil {
+		return nil, fmt.Errorf("no gig found: %w", err)
+	}
+
+	if gig.CustomerTrackID != customerID {
+		return nil, fmt.Errorf("not authorized: customer %s does not match gig customer %s", customerID, gig.CustomerTrackID)
+	}
+
+	return s.getGigRoute(ctx, gig)
+}
+
+// GetRouteByOrderForCustomer looks up gig by order ID and returns the route for customer tracking.
+func (s *DeliveryService) GetRouteByOrderForCustomer(ctx context.Context, orderTrackingID, customerID string) (*models.RouteResponse, string, error) {
+	gig, err := s.repo.GetGigByOrderTrackingID(ctx, orderTrackingID)
+	if err != nil || gig == nil {
+		return nil, "", fmt.Errorf("no gig found for order: %w", err)
+	}
+
+	if gig.CustomerTrackID != customerID {
+		return nil, "", fmt.Errorf("not authorized: customer %s does not match gig customer %s", customerID, gig.CustomerTrackID)
+	}
+
+	route, err := s.getGigRoute(ctx, gig)
+	if err != nil {
+		return nil, gig.TrackingID, err
+	}
+	return route, gig.TrackingID, nil
 }
 
 // EstimateRide returns per-vehicle fare estimates with H3 density surge and preview routes.

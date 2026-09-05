@@ -82,10 +82,13 @@ type OrderEvent struct {
 	UserTrackID        string      `json:"user_tracking_id"`
 	VendorStoreTrackID string      `json:"store_tracking_id"`
 	Items              []OrderItem `json:"items"`
+	ItemsSummary       string      `json:"items_summary"` // H4: human-readable item summary for rider
 	TotalAmountPaisa   int64       `json:"total_amount_paisa"`
 	TotalAmountRupees  float64     `json:"total_amount_rupees"`
 	IsCOD              bool        `json:"is_cod"`
 	CustomerPhone      string      `json:"customer_phone"`
+	CustomerName       string      `json:"customer_name"`  // H4: customer name for rider
+	CustomerAddress    string      `json:"customer_address"` // H4: customer address for rider
 	Tips               float64     `json:"tips"`
 	PetrolAllowance    float64     `json:"petrol_allowance"`
 	DropoffLat         float64     `json:"dropoff_lat"`
@@ -97,8 +100,9 @@ type OrderEvent struct {
 // PriceAtCheckoutPaisa is source of truth. PriceAtCheckoutRupees for display.
 type OrderItem struct {
 	ProductTrackingID     string  `json:"product_tracking_id"`
-	Quantity              int     `json:"quantity"`
-	PriceAtCheckoutPaisa  int64   `json:"price_at_checkout_paisa"`
+	ProductName          string  `json:"product_name"` // H4: product name for rider display
+	Quantity             int     `json:"quantity"`
+	PriceAtCheckoutPaisa int64   `json:"price_at_checkout_paisa"`
 	PriceAtCheckoutRupees float64 `json:"price_at_checkout_rupees"`
 	// Legacy
 	PriceAtCheckout float64 `json:"price_at_checkout,omitempty"`

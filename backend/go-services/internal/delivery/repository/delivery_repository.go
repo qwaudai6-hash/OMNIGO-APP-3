@@ -873,3 +873,16 @@ func (r *DeliveryRepository) AcceptCounterBid(ctx context.Context, bidID string,
 
 	return &counter, tx.Commit(ctx)
 }
+
+// GetUserFCMToken returns the most recent active FCM token for a given user tracking ID.
+func (r *DeliveryRepository) GetUserFCMToken(ctx context.Context, userTrackingID string) (string, error) {
+	var token string
+	err := r.reader.QueryRow(ctx,
+		`SELECT fcm_token FROM device_tokens WHERE user_tracking_id = $1 AND is_active = true ORDER BY updated_at DESC LIMIT 1`,
+		userTrackingID,
+	).Scan(&token)
+	if err != nil {
+		return "", err
+	}
+	return token, nil
+}

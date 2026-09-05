@@ -349,6 +349,9 @@ type BroadcastMessage struct {
 	DeliveryFee        float64 `json:"delivery_fee"`
 	OrderTotal         float64 `json:"order_total"`
 	IsCOD              bool    `json:"is_cod"`
+	ItemsSummary       string  `json:"items_summary"`     // H4: human-readable item summary
+	CustomerName       string  `json:"customer_name"`    // H4: customer name for delivery verification
+	CustomerAddress    string  `json:"customer_address"` // H4: customer address for delivery verification
 }
 
 func (gw *WebSocketGateway) handleBroadcast(data []byte) {
@@ -372,6 +375,9 @@ func (gw *WebSocketGateway) handleBroadcast(data []byte) {
 		DeliveryFee:        gig.DeliveryFee,
 		OrderTotal:         gig.OrderTotal,
 		IsCOD:              gig.IsCOD,
+		ItemsSummary:       gig.ItemsSummary,
+		CustomerName:       gig.CustomerName,
+		CustomerAddress:    gig.CustomerAddress,
 	}
 
 	payload, _ := json.Marshal(msg)

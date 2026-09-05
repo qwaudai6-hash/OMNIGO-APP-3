@@ -925,3 +925,15 @@ func (r *OrderRepository) GetStockReservationsByOrder(ctx context.Context, order
 	}
 	return reservations, rows.Err()
 }
+
+// GetUserInfo returns the full_name and address for a given user tracking ID.
+func (r *OrderRepository) GetUserInfo(ctx context.Context, userTrackingID string) (fullName, address string, err error) {
+	err = r.reader.QueryRow(ctx,
+		`SELECT COALESCE(full_name, ''), COALESCE(address, '') FROM users WHERE tracking_id = $1`,
+		userTrackingID,
+	).Scan(&fullName, &address)
+	if err != nil && err != pgx.ErrNoRows {
+		return "", "", err
+	}
+	return fullName, address, nil
+}

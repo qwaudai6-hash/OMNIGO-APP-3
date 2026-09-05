@@ -36,6 +36,9 @@ type DeliveryGig struct {
 	IsCOD                   bool      `json:"is_cod"`
 	OrderTotal              float64   `json:"order_total"`
 	CustomerPhone           string    `json:"customer_phone"`
+	CustomerName            string    `json:"customer_name"`    // H4: customer name for rider
+	CustomerAddress         string    `json:"customer_address"` // H4: customer address for rider
+	ItemsSummary            string    `json:"items_summary"`    // H4: human-readable item summary for rider
 	Status                  string    `json:"status"` // broadcasting, accepted, picked_up, in_transit, completed, failed
 	AdminCommission         float64   `json:"admin_commission"`
 	RiderEarning            float64   `json:"rider_earning"`
@@ -73,6 +76,9 @@ type OrderEvent struct {
 	TotalAmount        float64 `json:"total_amount"`
 	IsCOD              bool    `json:"is_cod"`
 	CustomerPhone      string  `json:"customer_phone"`
+	CustomerName       string  `json:"customer_name"`    // H4: customer name for rider
+	CustomerAddress    string  `json:"customer_address"` // H4: customer address for rider
+	ItemsSummary       string  `json:"items_summary"`    // H4: human-readable item summary for rider
 	Tips               float64 `json:"tips"`
 	PetrolAllowance    float64 `json:"petrol_allowance"`
 	DropoffLat         float64 `json:"dropoff_lat"`

@@ -156,15 +156,34 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *models.CreateOrderR
 		})
 	}
 
+	// H4: Build items summary string for rider display
+	var itemsSummary string
+	for i, item := range order.Items {
+		if i > 0 {
+			itemsSummary += ", "
+		}
+		itemsSummary += fmt.Sprintf("%dx %s", item.Quantity, item.ProductTrackingID)
+		if item.ProductName != "" {
+			itemsSummary += fmt.Sprintf(" (%s)", item.ProductName)
+		}
+	}
+
+	// H4: Fetch customer name and address for rider delivery verification
+	customerName, customerAddress, _ := s.repo.GetUserInfo(ctx, order.UserTrackID)
+
 	isCOD := order.PaymentGateway == "" || strings.EqualFold(order.PaymentGateway, "cod")
 	event := models.OrderEvent{
 		OrderID:            order.TrackingID,
 		UserTrackID:        order.UserTrackID,
 		VendorStoreTrackID: order.VendorStoreTrackID,
 		Items:              order.Items,
+		ItemsSummary:       itemsSummary,
 		TotalAmountPaisa:   int64(order.TotalAmount * 100),
 		TotalAmountRupees:  order.TotalAmount,
 		IsCOD:              isCOD,
+		CustomerPhone:      order.CustomerPhone,
+		CustomerName:       customerName,
+		CustomerAddress:    customerAddress,
 		DropoffLat:         order.CustomerLat,
 		DropoffLng:         order.CustomerLng,
 		Timestamp:          time.Now().UnixMilli(),
