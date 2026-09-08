@@ -181,7 +181,6 @@ func (h *ChatHandler) ListConversations(c *gin.Context) {
 			"page":         page,
 			"limit":        limit,
 			"unread_total": 0,
-			"_debug_error": err.Error(),
 		})
 		return
 	}

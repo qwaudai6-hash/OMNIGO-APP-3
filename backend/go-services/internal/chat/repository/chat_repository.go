@@ -229,7 +229,7 @@ func (r *chatRepository) ListConversations(ctx context.Context, userID string, l
 		         m.created_at
 		  FROM my_orders mo
 		  CROSS JOIN LATERAL (
-		    SELECT sender_id, receiver_id, content, created_at
+		    SELECT order_id, sender_id, receiver_id, content, created_at
 		    FROM chat_messages
 		    WHERE order_id = mo.order_id AND deleted_at IS NULL
 		    ORDER BY created_at DESC
