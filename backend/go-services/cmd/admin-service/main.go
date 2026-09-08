@@ -207,6 +207,10 @@ func main() {
 			orderID := c.Param("order_id")
 			report, err := adminService.GetCompleteOrderLineage(c.Request.Context(), orderID)
 			if err != nil {
+				if err == pgx.ErrNoRows || strings.Contains(err.Error(), "no rows") {
+					c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
+					return
+				}
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
 			}
@@ -217,6 +221,10 @@ func main() {
 			orderID := c.Param("order_id")
 			report, err := adminService.GetFullOrderLineage(c.Request.Context(), orderID)
 			if err != nil {
+				if err == pgx.ErrNoRows || strings.Contains(err.Error(), "no rows") {
+					c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
+					return
+				}
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
 			}
@@ -227,6 +235,10 @@ func main() {
 			orderID := c.Param("order_id")
 			report, err := adminService.GetFullOrderLineage(c.Request.Context(), orderID)
 			if err != nil {
+				if err == pgx.ErrNoRows || strings.Contains(err.Error(), "no rows") {
+					c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
+					return
+				}
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
 			}

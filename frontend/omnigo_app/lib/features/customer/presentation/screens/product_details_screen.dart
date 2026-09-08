@@ -475,7 +475,7 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
       }];
 
       // Step 1: Place the order (ApiClient throws on error)
-      final orderData = await ApiClient().post('/orders/', {
+      final orderData = await ApiClient().post(ApiEndpoints.orderCheckout(), {
         'user_tracking_id': widget.userTrackingId,
         'vendor_store_tracking_id': vendorStoreId,
         'items': reqItems,
@@ -501,7 +501,7 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
       // ── Step 2: Branch on payment method using the REAL order id.
       if (paymentChoice == 'card') {
         try {
-          final checkoutData = await ApiClient().post('/payment/checkout', {
+          final checkoutData = await ApiClient().post(ApiEndpoints.stripeCheckout(), {
             'gateway': 'stripe',
             'customer_id': widget.userTrackingId,
             'store_id': vendorStoreId,
@@ -579,7 +579,7 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
         }
       } else if (paymentChoice == 'wallet') {
         try {
-          final wcData = await ApiClient().post('/payment/checkout', {
+          final wcData = await ApiClient().post(ApiEndpoints.stripeCheckout(), {
             'gateway': 'wallet',
             'customer_id': widget.userTrackingId,
             'order_id': realOrderTrackingId,
@@ -626,7 +626,7 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
         }
       } else if (paymentChoice == 'jazzcash' || paymentChoice == 'easypaisa') {
         try {
-          final walletData = await ApiClient().post('/wallet/charge', {
+          final walletData = await ApiClient().post(ApiEndpoints.walletCharge(), {
             'customer_id': widget.userTrackingId,
             'store_id': vendorStoreId,
             'gateway': paymentChoice,
@@ -697,7 +697,7 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
 
         Map<String, dynamic> pfData;
         try {
-          pfData = await ApiClient().post('/payments/payfast/payment', {
+          pfData = await ApiClient().post(ApiEndpoints.payfastPayment(), {
             'order_id': realOrderTrackingId,
             'card_number': cardDetails['card_number'],
             'expiry_month': cardDetails['expiry_month'],
@@ -809,6 +809,56 @@ class ProductDetailsScreenState extends State<ProductDetailsScreen> {
         }
       } else {
         // Cash on Delivery — no payment gateway call needed
+      }
+
+      // ── Step 2.5: Poll for payment confirmation (PayFast/Wallet/Stripe)
+      //    Matches checkout_screen.dart behavior: poll up to 15 times, 3s apart.
+      if (paymentChoice != 'cash' && paymentChoice != 'cod') {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Waiting for payment confirmation...'),
+              duration: Duration(seconds: 3),
+            ),
+          );
+        }
+        const paidStatuses = {'paid', 'accepted', 'shipped', 'in_transit', 'delivered', 'completed'};
+        const failedStatuses = {'failed', 'cancelled', 'payment_failed', 'refunded'};
+        bool confirmed = false;
+        bool failed = false;
+        for (var i = 0; i < 15; i++) {
+          await Future<void>.delayed(const Duration(seconds: 3));
+          try {
+            final resp = await ApiClient().get('/orders/$realOrderTrackingId');
+            if (resp is Map<String, dynamic>) {
+              final orderStatus = resp['status']?.toString().toLowerCase() ?? '';
+              final paymentStatus = resp['payment_status']?.toString().toLowerCase() ?? '';
+              if (paidStatuses.contains(orderStatus) || paidStatuses.contains(paymentStatus)) {
+                confirmed = true;
+                break;
+              }
+              if (failedStatuses.contains(orderStatus) || failedStatuses.contains(paymentStatus)) {
+                failed = true;
+                break;
+              }
+            }
+          } catch (_) {/* transient network errors — keep polling */}
+        }
+        if (failed) {
+          if (mounted) _showErrorDialog('Payment was not successful. Your order has been cancelled.');
+          await _cancelOrderOnFailure(realOrderTrackingId, 'Payment failed after polling');
+          await prefs.remove('pending_nonce');
+          await prefs.remove('pending_order_product');
+          await prefs.remove('pending_order_status');
+          return;
+        }
+        if (confirmed) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Payment confirmed!')),
+            );
+          }
+        }
       }
 
       // ── Step 3: success — same landing screen as cart checkout for a

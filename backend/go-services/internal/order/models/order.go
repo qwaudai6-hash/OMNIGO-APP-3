@@ -63,7 +63,7 @@ type Order struct {
 // DeliveryFeePaisa is the Uber-style delivery fee in paisa charged to customer.
 type CreateOrderRequest struct {
 	UserTrackID        string               `json:"user_tracking_id"`
-	VendorStoreTrackID string               `json:"store_tracking_id" binding:"required"`
+	VendorStoreTrackID string               `json:"vendor_store_tracking_id" binding:"required"`
 	Items              []CreateOrderItemReq `json:"items" binding:"required,dive"`
 	TotalAmount        float64              `json:"total_amount" binding:"required"` // rupees; converted to paisa internally
 	DeliveryFeePaisa   int64                `json:"delivery_fee_paisa"`             // H4: Uber-style delivery fee in paisa (customer pays)
