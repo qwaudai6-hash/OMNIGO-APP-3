@@ -172,6 +172,10 @@ func main() {
 }
 
 func seedAdminUser(ctx context.Context, pool *pgxpool.Pool) {
+	// Ensure is_active column exists on users table (login query requires it)
+	_, _ = pool.Exec(ctx, "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true")
+	log.Println("[SEED] users.is_active column verified")
+
 	adminEmail := "admin@omnigo.pk"
 	adminPassword := "Omn!go@YSeoWRg5UwYB"
 	adminName := "System Admin"
