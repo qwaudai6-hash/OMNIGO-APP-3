@@ -111,16 +111,16 @@ EASYPAISA_HASH_KEY=      # NEEDS SANDBOX CREDENTIAL
 
 ### Payment Methods Status
 
-| Method | Backend | Frontend | Status |
-|--------|---------|----------|--------|
-| **PayFast Card (Option C)** | ✅ Complete | ✅ Complete | Working |
-| **PayFast Hosted Checkout (Wallet)** | ✅ Complete | ✅ Complete | **FIXED & VERIFIED ✅** |
-| **JazzCash Wallet** | ✅ Complete | ✅ Complete | **Needs Credentials** |
-| **EasyPaisa Wallet** | ✅ Complete | ✅ Complete | **Needs Credentials** |
-| **Raast P2M** | ✅ Complete | ✅ Complete | **Needs Credentials** |
-| **IBFT Transfer** | ✅ Complete | ✅ Complete | **Needs Credentials** |
-| **QR Payments** | ✅ Complete | ✅ Complete | **Needs Credentials** |
-| **Refund System** | ✅ Complete | N/A | Dashboard-based via PayFast |
+| Method | Backend | Frontend | Status | PayFast Reply |
+|--------|---------|----------|--------|---------------|
+| **PayFast Card (Option C)** | ✅ Complete | ✅ Complete | Working | ✅ Confirmed |
+| **PayFast Hosted Checkout (Wallet)** | ✅ Complete | ✅ Complete | **FIXED & VERIFIED ✅** | ✅ Confirmed |
+| **JazzCash Wallet** | ✅ Complete | ✅ Complete | **Needs Credentials** | ❌ Not available in UAT |
+| **EasyPaisa Wallet** | ✅ Complete | ✅ Complete | **Needs Credentials** | ❌ Not available in UAT |
+| **Raast P2M** | ✅ Complete | ✅ Complete | **Needs Credentials** | ❌ Not available in UAT |
+| **IBFT Transfer** | ✅ Complete | ✅ Complete | **Needs Credentials** | ❌ Not available in UAT |
+| **QR Payments** | ✅ Complete | ✅ Complete | **Needs Credentials** | ❌ Not available in UAT |
+| **Refund System** | ✅ Complete | N/A | Dashboard-based | ✅ Via Merchant Portal |
 
 ### Research Findings
 
@@ -260,16 +260,16 @@ EASYPAISA_HASH_KEY=      # NEEDS SANDBOX CREDENTIAL
 
 ## Current Implementation Status
 
-| Method | Backend | Frontend | Status |
-|--------|---------|----------|--------|
-| **PayFast Card (Option C)** | ✅ Complete | ✅ Complete | Working |
-| **PayFast Hosted Checkout (Wallet)** | ✅ Complete | ✅ Complete | **FIXED & VERIFIED ✅** |
-| **JazzCash Wallet** | ✅ Complete | ✅ Complete | **Needs Credentials** |
-| **EasyPaisa Wallet** | ✅ Complete | ✅ Complete | **Needs Credentials** |
-| **Raast P2M** | ✅ Complete | ✅ Complete | **Needs Credentials** |
-| **IBFT Transfer** | ✅ Complete | ✅ Complete | **Needs Credentials** |
-| **QR Payments** | ✅ Complete | ✅ Complete | **Needs Credentials** |
-| **Refund API** | ❌ Missing | ❌ Missing | PayFast Has No Public API |
+| Method | Backend | Frontend | Status | PayFast Reply |
+|--------|---------|----------|--------|---------------|
+| **PayFast Card (Option C)** | ✅ Complete | ✅ Complete | Working | ✅ Confirmed |
+| **PayFast Hosted Checkout (Wallet)** | ✅ Complete | ✅ Complete | **FIXED & VERIFIED ✅** | ✅ Confirmed |
+| **JazzCash Wallet** | ✅ Complete | ✅ Complete | **Needs Credentials** | ❌ Not available in UAT |
+| **EasyPaisa Wallet** | ✅ Complete | ✅ Complete | **Needs Credentials** | ❌ Not available in UAT |
+| **Raast P2M** | ✅ Complete | ✅ Complete | **Needs Credentials** | ❌ Not available in UAT |
+| **IBFT Transfer** | ✅ Complete | ✅ Complete | **Needs Credentials** | ❌ Not available in UAT |
+| **QR Payments** | ✅ Complete | ✅ Complete | **Needs Credentials** | ❌ Not available in UAT |
+| **Refund API** | ❌ Missing | ❌ Missing | PayFast Has No Public API | ✅ Via Merchant Portal |
 
 ---
 
@@ -543,29 +543,63 @@ PAYFAST_BASE_URL=https://ipg1.apps.net.pk/...
 
 ---
 
-## Email to PayFast (Draft)
+## Email to PayFast (Draft) — SENT & REPLIED ✅
 
-**To:** [PayFast Contact Email]
-**Subject:** OMNIGO App - Hosted Checkout Integration Query
+**Date Sent:** September 8, 2026
+**Date Reply:** September 8, 2026 (Same day!)
 
-Dear PayFast Team,
+### PayFast Reply:
 
-We are integrating PayFast payment gateway into the OMNIGO super app for wallet top-ups and order payments. We have successfully implemented the hosted checkout flow and verified it against your UAT sandbox (merchant ID: 102).
+Dear Team,
 
-**Completed:**
-- ✅ GetAccessToken API integration with basket details
-- ✅ Hosted checkout form with all required parameters
-- ✅ IPN callback validation using SHA256 hash
-- ✅ Payment page rendering confirmed (HTTP 200)
+1. **Hosted Checkout Parameters**
+   - SIGNATURE: Yes, you may use a random string as per the provided PHP sample. ✅
+   - VERSION: Please use the value specified in the integration documentation/sample. ✅
+   - TRAN_TYPE: ECOMM_PURCHASE is the applicable value for the purchase transaction. ✅
 
-**Queries:**
-1. Are there any additional required parameters we may have missed?
-2. For production deployment, what are the live API endpoints and credentials?
-3. Do you provide sandbox credentials for JazzCash/EasyPaisa/Raast integration testing?
-4. Is there a webhook/IPN retry mechanism we should implement?
-5. What is the recommended approach for refund processing?
+2. **Production Deployment**
+   - Production API endpoints and Live Merchant credentials will be shared once the go-live process is completed.
+   - For production verification, you may perform a test transaction of PKR 10 after receiving the Live credentials.
 
-Please confirm if our integration meets your requirements or if any adjustments are needed.
+3. **Sandbox Credentials**
+   - The requested JazzCash, EasyPaisa, Raast, IBFT, and QR credentials are not currently available in the UAT environment. We will update you if/when the required testing credentials become available.
 
-Best Regards,
-OMNIGO Development Team
+4. **IPN**
+   - IPN is currently configured for Instant notification.
+   - The merchant should return HTTP 200 OK after successfully receiving and processing the IPN. ✅
+
+5. **Token Management**
+   - Access tokens have an expiry period. You may cache and reuse the token until it expires rather than requesting a new token for every transaction. ✅
+
+6. **Refund**
+   - Refunds can be processed through the Merchant Portal. Refund APIs are currently not available.
+
+7. **Currency & Amount**
+   - The current integration supports PKR transactions. Transaction amount limits are subject to the applicable merchant/account configuration.
+
+Regarding your completed integration, the reported UAT testing and validation are noted. Please continue testing the complete payment flow in UAT. Production credentials will be provided as part of the go-live process.
+
+Thanks & Kind Regards,
+PayFast Team
+
+---
+
+### Action Items from PayFast Reply:
+
+| Action | Status | Notes |
+|--------|--------|-------|
+| SIGNATURE = random string | ✅ Confirmed | Already implemented |
+| VERSION = documentation value | ✅ Confirmed | Using MERCHANTCART-0.1 |
+| TRAN_TYPE = ECOMM_PURCHASE | ✅ Confirmed | Already implemented |
+| IPN = HTTP 200 OK | ✅ Confirmed | Already implemented |
+| Token caching | ✅ Confirmed | Already implemented with 60s buffer |
+| Production credentials | ⏳ Pending | Wait for go-live process |
+| JazzCash/EasyPaisa/Raast/IBFT/QR | ❌ Blocked | No sandbox credentials available |
+| Refund | ✅ Done | Via Merchant Portal |
+| Currency | ✅ PKR only | Already implemented |
+
+### Current Status:
+- **Card Payments (Hosted Checkout):** ✅ FULLY WORKING in UAT
+- **Production:** ⏳ Waiting for credentials from PayFast
+- **Other Payment Methods:** ❌ Blocked until PayFast provides sandbox credentials
+- **Refund:** ✅ Via Merchant Portal (no API needed)
