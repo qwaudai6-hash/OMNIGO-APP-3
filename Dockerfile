@@ -22,7 +22,7 @@ RUN chmod +x ./build_all.sh && ./build_all.sh
 # ═══ Stage 2: Runtime ═════════════════════════════════════════
 FROM alpine:3.19
 
-RUN apk add --no-cache ca-certificates tzdata bash wget curl
+RUN apk add --no-cache ca-certificates tzdata bash wget curl postgresql16-client
 
 # Non-root user for security
 RUN addgroup -S omnigo && adduser -S omnigo -G omnigo

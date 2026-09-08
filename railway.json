@@ -5,7 +5,7 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "startCommand": "/app/bin/monolith",
+    "startCommand": "sh -c 'if [ -n \"$DATABASE_URL\" ] && [ -d /app/migrations ]; then echo \"=== Running migrations ===\" && for f in /app/migrations/*.sql; do echo \"Running $f...\" && psql \"$DATABASE_URL\" -f \"$f\" || true; done && echo \"=== Migrations complete ===\"; fi && /app/bin/monolith'",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 300,
     "restartPolicyType": "ON_FAILURE",
