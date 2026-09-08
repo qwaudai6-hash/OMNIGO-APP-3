@@ -13,6 +13,7 @@ import (
 
 	"fmt"
 	"github.com/getsentry/sentry-go/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/omnigo/backend/internal/shared/telemetry"
 
 	"github.com/gin-gonic/gin"
@@ -24,6 +25,7 @@ import (
 	"github.com/omnigo/backend/internal/shared/health"
 	"github.com/omnigo/backend/internal/shared/middleware"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // buildEmailNotifier returns a function that POSTs to the email-service
@@ -90,6 +92,9 @@ func main() {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 	defer db.Close()
+
+	// 2b. Seed admin user if not exists (bcrypt hash, not argon2id)
+	seedAdminUser(ctx, db.Writer)
 
 	// 3. Initialize Domain Layers with Dependency Injection
 	svc := service.NewAuthService(db.Writer)
@@ -164,4 +169,47 @@ func main() {
 	}
 
 	log.Println("Server exiting")
+}
+
+func seedAdminUser(ctx context.Context, pool *pgxpool.Pool) {
+	adminEmail := "admin@omnigo.pk"
+	adminPassword := "Omn!go@YSeoWRg5UwYB"
+	adminName := "System Admin"
+
+	// Check if admin exists
+	var exists bool
+	err := pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)", adminEmail).Scan(&exists)
+	if err != nil {
+		log.Printf("[SEED] failed to check admin existence: %v", err)
+		return
+	}
+
+	// Generate bcrypt hash
+	bcryptHash, err := bcrypt.GenerateFromPassword([]byte(adminPassword), 12)
+	if err != nil {
+		log.Printf("[SEED] failed to generate bcrypt hash: %v", err)
+		return
+	}
+
+	if !exists {
+		// Insert new admin
+		_, err = pool.Exec(ctx, `
+			INSERT INTO users (tracking_id, email, full_name, password_hash, role, region, is_verified, email_verified)
+			VALUES ($1, $2, $3, $4, 'admin', 'PK', true, true)
+		`, "ADMN-0001", adminEmail, adminName, string(bcryptHash))
+		if err != nil {
+			log.Printf("[SEED] failed to insert admin user: %v", err)
+			return
+		}
+		log.Printf("[SEED] admin user created: %s", adminEmail)
+		return
+	}
+
+	// Admin exists — rehash password with bcrypt (overwrite argon2id or stale hash)
+	_, err = pool.Exec(ctx, "UPDATE users SET password_hash = $1 WHERE email = $2", string(bcryptHash), adminEmail)
+	if err != nil {
+		log.Printf("[SEED] failed to rehash admin password: %v", err)
+		return
+	}
+	log.Printf("[SEED] admin password rehashed to bcrypt: %s", adminEmail)
 }
