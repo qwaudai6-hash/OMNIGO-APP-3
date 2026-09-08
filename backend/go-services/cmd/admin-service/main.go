@@ -23,6 +23,7 @@ import (
 	"github.com/omnigo/backend/internal/admin"
 	"github.com/omnigo/backend/internal/analytics"
 	"github.com/omnigo/backend/internal/ledger"
+	"github.com/omnigo/backend/internal/shared/cache"
 	"github.com/omnigo/backend/internal/shared/config"
 	"github.com/omnigo/backend/internal/shared/health"
 	"github.com/omnigo/backend/internal/shared/messaging"
@@ -172,17 +173,12 @@ func main() {
 	}
 
 	var rdb redis.UniversalClient
-	if redisAddr != "" && !strings.HasPrefix(redisAddr, "redis://") && !strings.HasPrefix(redisAddr, "rediss://") {
-		rdb = redis.NewClusterClient(&redis.ClusterOptions{
-			Addrs: []string{redisAddr},
-		})
-		if err := rdb.Ping(context.Background()).Err(); err != nil {
-			log.Printf("Warning: Redis unavailable for admin rate limiting: %v", err)
-			rdb = nil
-		}
+	redisClient, err := cache.NewRedisClient(ctx, []string{redisAddr})
+	if err != nil {
+		log.Printf("Warning: Redis unavailable for admin rate limiting (running without rate limits): %v", err)
 	} else {
-		log.Println("Warning: Standalone/URL Redis detected for admin-service, bypassing cluster rate limiter")
-		rdb = nil
+		defer redisClient.Close()
+		rdb = redisClient.Client
 	}
 
 	r := gin.Default()

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -174,6 +175,7 @@ func (h *ChatHandler) ListConversations(c *gin.Context) {
 
 	convs, err := h.chatSvc.ListConversations(c.Request.Context(), userID, page, limit)
 	if err != nil {
+		log.Printf("[CHAT] ListConversations error for user %s: %v", userID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list conversations"})
 		return
 	}

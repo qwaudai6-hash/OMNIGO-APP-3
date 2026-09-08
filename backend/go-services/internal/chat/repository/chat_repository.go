@@ -236,10 +236,10 @@ func (r *chatRepository) ListConversations(ctx context.Context, userID string, l
 		    LIMIT 1
 		  ) m
 		)
-		SELECT l.order_id,
-		       CASE WHEN l.sender_id = $1 THEN l.receiver_id ELSE l.sender_id END AS other_user_id,
-		       u.role AS other_user_role,
-		       u.full_name AS other_user_name,
+	SELECT l.order_id,
+	       CASE WHEN l.sender_id = $1 THEN l.receiver_id ELSE l.sender_id END AS other_user_id,
+	       COALESCE(u.role, 'unknown') AS other_user_role,
+	       COALESCE(u.full_name, 'Unknown') AS other_user_name,
 		       l.content AS last_message,
 		       l.created_at AS last_message_at,
 		       (SELECT COUNT(*) FROM chat_messages
