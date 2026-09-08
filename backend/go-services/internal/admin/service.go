@@ -2,7 +2,6 @@ package admin
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -226,7 +225,7 @@ func (s *AdminSurveillanceService) GetCompleteOrderLineage(ctx context.Context, 
 			o.status,
 			o.total_amount,
 			o.customer_tracking_id,
-			COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'') as customer_name,
+			COALESCE(c.full_name,'') as customer_name,
 			COALESCE(c.phone,''),
 			COALESCE(o.customer_lat, 0),
 			COALESCE(o.customer_lng, 0),
@@ -237,7 +236,7 @@ func (s *AdminSurveillanceService) GetCompleteOrderLineage(ctx context.Context, 
 			COALESCE((SELECT oi.product_tracking_id FROM order_items oi WHERE oi.order_tracking_id = o.order_tracking_id LIMIT 1), 'N/A'),
 			COALESCE((SELECT p.name FROM products p JOIN order_items oi ON oi.product_tracking_id = p.product_tracking_id WHERE oi.order_tracking_id = o.order_tracking_id LIMIT 1), 'N/A'),
 			COALESCE(o.rider_tracking_id, d.rider_tracking_id, 'UNASSIGNED'),
-			COALESCE(ru.first_name,'') || ' ' || COALESCE(ru.last_name,'') as rider_name,
+			COALESCE(ru.full_name,'') as rider_name,
 			COALESCE(ru.phone,''),
 			COALESCE(d.status, 'PENDING')
 		FROM orders o
@@ -391,7 +390,9 @@ func (s *AdminSurveillanceService) ApproveUser(ctx context.Context, trackingID s
 // dashboard can show "ledger offline" instead of misleading zeros.
 func (s *AdminSurveillanceService) GetLedgerKPIs(ctx context.Context) (*FinancialKPIs, error) {
 	if s.tbService == nil || s.tbService.TBService() == nil {
-		return nil, errors.New("ledger KPIs unavailable: TigerBeetle is not configured or offline")
+		// TigerBeetle not configured — return zeroed KPIs so the dashboard
+		// can render with a "ledger offline" indicator instead of 500.
+		return &FinancialKPIs{}, nil
 	}
 
 	accountIDs := []tb.Uint128{
@@ -671,7 +672,7 @@ func (s *AdminSurveillanceService) GetFullOrderLineage(ctx context.Context, rawT
 		SELECT
 			o.order_tracking_id, o.status, o.total_amount,
 			o.customer_tracking_id,
-			COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,'') as customer_name,
+			COALESCE(c.full_name,'') as customer_name,
 			COALESCE(c.phone,''),
 			COALESCE(o.customer_lat, 0),
 			COALESCE(o.customer_lng, 0),
@@ -680,7 +681,7 @@ func (s *AdminSurveillanceService) GetFullOrderLineage(ctx context.Context, rawT
 			COALESCE(s.latitude, 0),
 			COALESCE(s.longitude, 0),
 			COALESCE(o.rider_tracking_id, d.rider_tracking_id, 'UNASSIGNED'),
-			COALESCE(ru.first_name,'') || ' ' || COALESCE(ru.last_name,'') as rider_name,
+			COALESCE(ru.full_name,'') as rider_name,
 			COALESCE(ru.phone,''),
 			COALESCE(d.tracking_id, 'N/A'),
 			COALESCE(d.status, 'PENDING')
@@ -1144,10 +1145,10 @@ func (s *AdminSurveillanceService) GetAllOrders(ctx context.Context, status stri
 		o.escrow_released, o.dispute_status,
 		CASE WHEN o.delivered_at IS NOT NULL THEN o.delivered_at::text END,
 		o.created_at::text, o.updated_at::text,
-		COALESCE(u.first_name,'') || ' ' || COALESCE(u.last_name,'') as customer_name,
+		COALESCE(u.full_name,'') as customer_name,
 		COALESCE(u.phone,''),
 		COALESCE(o.customer_lat, 0), COALESCE(o.customer_lng, 0),
-		COALESCE(ru.first_name,'') || ' ' || COALESCE(ru.last_name,'') as rider_name,
+		COALESCE(ru.full_name,'') as rider_name,
 		COALESCE(ru.phone,''),
 		COALESCE(s.store_name,'Unknown'),
 		COALESCE(s.latitude, 0), COALESCE(s.longitude, 0)

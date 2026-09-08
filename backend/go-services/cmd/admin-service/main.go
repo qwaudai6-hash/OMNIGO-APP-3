@@ -574,7 +574,7 @@ func main() {
 		aiClient := &http.Client{Timeout: 10 * time.Second}
 		adminRoutes.GET("/ai/audit-overview", func(c *gin.Context) {
 			if aiHost == "" {
-				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "AI_ENGINE_URL not configured"})
+				c.JSON(http.StatusOK, gin.H{"audits": []any{}, "message": "AI engine not configured"})
 				return
 			}
 			req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, aiHost+"/api/v1/ai/audit/overview", nil)
@@ -597,7 +597,7 @@ func main() {
 
 		adminRoutes.POST("/ai/auto-heal", func(c *gin.Context) {
 			if aiHost == "" {
-				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "AI_ENGINE_URL not configured"})
+				c.JSON(http.StatusOK, gin.H{"message": "AI engine not configured, auto-heal skipped"})
 				return
 			}
 			req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, aiHost+"/api/v1/ai/audit/auto-heal", c.Request.Body)
