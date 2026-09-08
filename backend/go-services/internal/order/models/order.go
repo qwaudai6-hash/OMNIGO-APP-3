@@ -1,6 +1,10 @@
 package models
 
-import "time"
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+)
 
 // Order represents an e-commerce order.
 // Money fields are int64 paisa (1 PKR = 100 paisa). Float64 *_rupees fields
@@ -61,6 +65,9 @@ type Order struct {
 // TotalAmount is accepted in rupees (float64) for backward compat with
 // existing frontend code, but is converted to paisa internally.
 // DeliveryFeePaisa is the Uber-style delivery fee in paisa charged to customer.
+//
+// NOTE: VendorStoreTrackID accepts BOTH "vendor_store_tracking_id" (Flutter)
+// and "store_tracking_id" (legacy) via custom UnmarshalJSON below.
 type CreateOrderRequest struct {
 	UserTrackID        string               `json:"user_tracking_id"`
 	VendorStoreTrackID string               `json:"vendor_store_tracking_id" binding:"required"`
@@ -74,6 +81,43 @@ type CreateOrderRequest struct {
 	DeviceSessionNonce string               `json:"device_session_nonce" binding:"required"`
 	DropoffLat         float64              `json:"dropoff_lat" binding:"required"`
 	DropoffLng         float64              `json:"dropoff_lng" binding:"required"`
+}
+
+// UnmarshalJSON accepts both "vendor_store_tracking_id" (Flutter) and
+// "store_tracking_id" (legacy) fields and populates VendorStoreTrackID.
+func (r *CreateOrderRequest) UnmarshalJSON(data []byte) error {
+	// Alias to prevent infinite recursion
+	type Alias CreateOrderRequest
+	aux := &struct {
+		StoreTrackingID string `json:"store_tracking_id"`
+		*Alias
+	}{
+		Alias: (*Alias)(r),
+	}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	// Merge: if the primary field is empty but the legacy field is set, use it
+	if r.VendorStoreTrackID == "" && aux.StoreTrackingID != "" {
+		r.VendorStoreTrackID = aux.StoreTrackingID
+	}
+	// Re-validate required fields since gin's binding runs before custom unmarshal
+	if r.VendorStoreTrackID == "" {
+		return fmt.Errorf("Key: 'CreateOrderRequest.VendorStoreTrackID' Error:Field validation for 'VendorStoreTrackID' failed on the 'required' tag")
+	}
+	if r.Items == nil || len(r.Items) == 0 {
+		return fmt.Errorf("Key: 'CreateOrderRequest.Items' Error:Field validation for 'Items' failed on the 'required' tag")
+	}
+	if r.TotalAmount == 0 {
+		return fmt.Errorf("Key: 'CreateOrderRequest.TotalAmount' Error:Field validation for 'TotalAmount' failed on the 'required' tag")
+	}
+	if r.Currency == "" {
+		return fmt.Errorf("Key: 'CreateOrderRequest.Currency' Error:Field validation for 'Currency' failed on the 'required' tag")
+	}
+	if r.DeviceSessionNonce == "" {
+		return fmt.Errorf("Key: 'CreateOrderRequest.DeviceSessionNonce' Error:Field validation for 'DeviceSessionNonce' failed on the 'required' tag")
+	}
+	return nil
 }
 
 // OrderEvent represents the payload sent to Kafka when an order is created.
