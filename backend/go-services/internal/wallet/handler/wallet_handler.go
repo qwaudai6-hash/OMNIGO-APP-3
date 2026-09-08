@@ -506,6 +506,7 @@ func (h *WalletHandler) RegisterRoutes(router *gin.Engine) {
 		wallet.POST("/callback", h.Callback)
 		wallet.POST("/customer/load/callback", h.LoadCustomerWalletCallback)
 		wallet.POST("/payfast/callback", h.PayFastCallback)
+		wallet.GET("/payfast/form/:basket_id", h.PayFastHostedForm)
 
 		// Authenticated user routes
 		auth := wallet.Group("")
@@ -635,24 +636,20 @@ func (h *WalletHandler) LoadCustomerWallet(c *gin.Context) {
 			returnURL = fmt.Sprintf("%s/api/v1/wallet/customer/load/callback?gateway=payfast", publicBase)
 		}
 
-		var hostedURL string
-		if strings.Contains(baseURL, "apps.net.pk") {
-			formEndpoint := strings.TrimRight(baseURL, "/")
-			if !strings.HasSuffix(formEndpoint, "/PostTransaction") {
-				if strings.HasSuffix(formEndpoint, "/Transaction") {
-					formEndpoint += "/PostTransaction"
-				} else {
-					formEndpoint += "/Transaction/PostTransaction"
-				}
-			}
-			hostedURL = fmt.Sprintf("%s?merchant_id=%s&basket_id=%s&txnamt=%.2f&currency_code=PKR&success_url=%s&checkout_url=%s",
-				formEndpoint, url.QueryEscape(merchantID), url.QueryEscape(txnID), req.Amount, url.QueryEscape(returnURL), url.QueryEscape(returnURL))
-		} else {
-			hostedURL = fmt.Sprintf("%s/hosted?merchant_id=%s&basket_id=%s&txnamt=%.2f&currency_code=PKR&success_url=%s&checkout_url=%s",
-				strings.TrimRight(baseURL, "/"), url.QueryEscape(merchantID), url.QueryEscape(txnID), req.Amount, url.QueryEscape(returnURL), url.QueryEscape(returnURL))
+		// Build URL to our own /wallet/payfast/form endpoint which serves the
+		// auto-submit HTML form with all PayFast-required params (TOKEN, SIGNATURE, etc.)
+		publicBase := strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL"))
+		if publicBase == "" {
+			publicBase = "https://omnigo-app-3-production.up.railway.app"
 		}
+		hostedURL := fmt.Sprintf("%s/api/v1/wallet/payfast/form/%s?amount=%.2f&return_url=%s",
+			publicBase,
+			url.QueryEscape(txnID),
+			req.Amount,
+			url.QueryEscape(returnURL),
+		)
 		if mobileNo := strings.TrimSpace(req.CustomerMobileNo); mobileNo != "" {
-			hostedURL += "&customer_mobile_no=" + url.QueryEscape(mobileNo)
+			hostedURL += "&phone=" + url.QueryEscape(mobileNo)
 		}
 
 		c.JSON(http.StatusOK, gin.H{

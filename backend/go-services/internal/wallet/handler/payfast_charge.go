@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -314,6 +315,112 @@ func (h *WalletHandler) PayFastCallback(c *gin.Context) {
 		"status":   "verified",
 		"order_id": pending.OrderID,
 	})
+}
+
+// PayFastHostedForm serves the auto-submit HTML form for PayFast hosted checkout.
+// GET /api/v1/wallet/payfast/form/:basket_id?amount=X&email=Y&phone=Z
+// This endpoint is called by the Flutter app via external browser launch.
+func (h *WalletHandler) PayFastHostedForm(c *gin.Context) {
+	basketID := c.Param("basket_id")
+	if basketID == "" {
+		c.Data(http.StatusBadRequest, "text/html; charset=utf-8", []byte("<html><body><h1>Missing basket_id</h1></body></html>"))
+		return
+	}
+
+	merchantID := os.Getenv("PAYFAST_MERCHANT_ID")
+	securedKey := os.Getenv("PAYFAST_SECURED_KEY")
+	baseURL := os.Getenv("PAYFAST_BASE_URL")
+	if baseURL == "" {
+		baseURL = os.Getenv("PAYFAST_API_URL")
+	}
+	if baseURL == "" {
+		baseURL = "https://ipguat.apps.net.pk/Ecommerce/api/Transaction"
+	}
+
+	amount := 1.0
+	if a := c.Query("amount"); a != "" {
+		if parsed, err := strconv.ParseFloat(a, 64); err == nil && parsed > 0 {
+			amount = parsed
+		}
+	}
+	email := c.Query("email")
+	phone := c.Query("phone")
+	returnURL := c.Query("return_url")
+	if returnURL == "" {
+		returnURL = os.Getenv("WALLET_RETURN_URL")
+	}
+	if returnURL == "" {
+		publicBase := strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL"))
+		if publicBase != "" {
+			returnURL = publicBase + "/api/v1/wallet/customer/load/callback?gateway=payfast"
+		}
+	}
+
+	accessToken := fetchPayfastAccessToken(c.Request.Context(), baseURL, merchantID, securedKey, basketID, amount)
+	merchantName := os.Getenv("PAYFAST_MERCHANT_NAME")
+	if merchantName == "" {
+		merchantName = "OMNIGO"
+	}
+	orderDate := time.Now().Format("2006-01-02 15:04:05")
+	signature := fmt.Sprintf("SIG-%d", time.Now().UnixNano())
+
+	if !strings.Contains(baseURL, "apps.net.pk") {
+		c.Data(http.StatusBadRequest, "text/html; charset=utf-8", []byte("<html><body><h1>PayFast not configured for hosted checkout</h1></body></html>"))
+		return
+	}
+
+	formEndpoint := strings.TrimRight(baseURL, "/")
+	if !strings.HasSuffix(formEndpoint, "/PostTransaction") {
+		if strings.HasSuffix(formEndpoint, "/Transaction") {
+			formEndpoint += "/PostTransaction"
+		} else {
+			formEndpoint += "/Transaction/PostTransaction"
+		}
+	}
+
+	formHTML := fmt.Sprintf(`<!DOCTYPE html>
+<html><head><title>Redirecting to PayFast...</title></head>
+<body>
+<form id="payfast_form" method="post" action="%s">
+<input type="hidden" name="MERCHANT_ID" value="%s" />
+<input type="hidden" name="MERCHANT_NAME" value="%s" />
+<input type="hidden" name="TOKEN" value="%s" />
+<input type="hidden" name="BASKET_ID" value="%s" />
+<input type="hidden" name="TXNAMT" value="%.2f" />
+<input type="hidden" name="CURRENCY_CODE" value="PKR" />
+<input type="hidden" name="ORDER_DATE" value="%s" />
+<input type="hidden" name="SUCCESS_URL" value="%s" />
+<input type="hidden" name="FAILURE_URL" value="%s" />
+<input type="hidden" name="CHECKOUT_URL" value="%s" />
+<input type="hidden" name="CUSTOMER_EMAIL_ADDRESS" value="%s" />
+<input type="hidden" name="CUSTOMER_MOBILE_NO" value="%s" />
+<input type="hidden" name="SIGNATURE" value="%s" />
+<input type="hidden" name="VERSION" value="MERCHANTCART-0.1" />
+<input type="hidden" name="TXNDESC" value="OMNIGO Wallet Top-up" />
+<input type="hidden" name="PROCCODE" value="00" />
+<input type="hidden" name="TRAN_TYPE" value="ECOMM_PURCHASE" />
+<input type="hidden" name="MERCHANT_USERAGENT" value="%s" />
+</form>
+<script>document.getElementById("payfast_form").submit();</script>
+<p>Redirecting to PayFast payment page...</p>
+</body></html>`,
+		formEndpoint,
+		merchantID,
+		merchantName,
+		accessToken,
+		basketID,
+		amount,
+		orderDate,
+		url.QueryEscape(returnURL),
+		url.QueryEscape(returnURL),
+		url.QueryEscape(returnURL),
+		url.QueryEscape(email),
+		url.QueryEscape(phone),
+		signature,
+		c.Request.UserAgent(),
+	)
+
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(formHTML))
 }
 
 // fetchPayfastAccessToken calls GetAccessToken API with basket details per PayFast PHP sample.
