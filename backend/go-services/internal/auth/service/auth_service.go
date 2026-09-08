@@ -497,6 +497,30 @@ func (s *AuthService) Register(ctx context.Context, req RegisterRequest) (string
 		return "", errors.New("CONFLICT_DUPLICATE_EMAIL: this email is already registered")
 	}
 
+	// 1b. Check phone uniqueness (if provided)
+	if req.Phone != "" {
+		checkQuery = "SELECT EXISTS(SELECT 1 FROM users WHERE phone = $1 AND phone != '')"
+		err = s.db.QueryRow(ctx, checkQuery, req.Phone).Scan(&exists)
+		if err != nil {
+			return "", fmt.Errorf("failed verifying phone availability: %w", err)
+		}
+		if exists {
+			return "", errors.New("CONFLICT_DUPLICATE_PHONE: this phone number is already registered")
+		}
+	}
+
+	// 1c. Check vehicle plate uniqueness for riders (if provided)
+	if req.Role == "rider" && req.VehiclePlateNumber != "" {
+		checkQuery = "SELECT EXISTS(SELECT 1 FROM users WHERE vehicle_plate_number = $1 AND vehicle_plate_number != '' AND role = 'rider')"
+		err = s.db.QueryRow(ctx, checkQuery, req.VehiclePlateNumber).Scan(&exists)
+		if err != nil {
+			return "", fmt.Errorf("failed verifying vehicle plate availability: %w", err)
+		}
+		if exists {
+			return "", errors.New("CONFLICT_DUPLICATE_VEHICLE: this vehicle is already registered to another rider")
+		}
+	}
+
 	// 2. Hash Password securely using bcrypt
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
@@ -521,6 +545,18 @@ func (s *AuthService) Register(ctx context.Context, req RegisterRequest) (string
 	if businessName == "" {
 		if req.StoreName != "" {
 			businessName = req.StoreName
+		}
+	}
+
+	// 3b. Check store_name uniqueness for vendors (if provided)
+	if req.Role == "vendor" && businessName != "" {
+		checkQuery = "SELECT EXISTS(SELECT 1 FROM stores WHERE store_name = $1)"
+		err = s.db.QueryRow(ctx, checkQuery, businessName).Scan(&exists)
+		if err != nil {
+			return "", fmt.Errorf("failed verifying store name availability: %w", err)
+		}
+		if exists {
+			return "", errors.New("CONFLICT_DUPLICATE_STORE: this store name is already taken")
 		}
 	}
 

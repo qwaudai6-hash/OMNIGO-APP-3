@@ -30,6 +30,7 @@ type Order struct {
 	DeliveryFeeAmountPaisa int64  `json:"delivery_fee_amount_paisa"`
 	TotalBilledAmountPaisa int64  `json:"total_billed_amount_paisa"`
 	RoutingStatus          string `json:"routing_status"` // DYNAMIC_CALCULATED | FALLBACK_HAVERSINE | FAILED_CALCULATION
+	StoreName             string `json:"store_name"` // joined from stores table
 	// Legacy fields (kept for backward compat — prefer *_paisa versions)
 	TotalAmount         float64    `json:"total_amount,omitempty"`
 	AdminCommission     float64    `json:"admin_commission,omitempty"`
@@ -78,22 +79,24 @@ type CreateOrderRequest struct {
 // OrderEvent represents the payload sent to Kafka when an order is created.
 // Money fields are paisa (int64).
 type OrderEvent struct {
-	OrderID            string      `json:"order_id"`
-	UserTrackID        string      `json:"user_tracking_id"`
-	VendorStoreTrackID string      `json:"store_tracking_id"`
-	Items              []OrderItem `json:"items"`
-	ItemsSummary       string      `json:"items_summary"` // H4: human-readable item summary for rider
-	TotalAmountPaisa   int64       `json:"total_amount_paisa"`
-	TotalAmountRupees  float64     `json:"total_amount_rupees"`
-	IsCOD              bool        `json:"is_cod"`
-	CustomerPhone      string      `json:"customer_phone"`
-	CustomerName       string      `json:"customer_name"`  // H4: customer name for rider
-	CustomerAddress    string      `json:"customer_address"` // H4: customer address for rider
-	Tips               float64     `json:"tips"`
-	PetrolAllowance    float64     `json:"petrol_allowance"`
-	DropoffLat         float64     `json:"dropoff_lat"`
-	DropoffLng         float64     `json:"dropoff_lng"`
-	Timestamp          int64       `json:"timestamp"`
+	OrderID               string      `json:"order_id"`
+	UserTrackID           string      `json:"user_tracking_id"`
+	VendorStoreTrackID    string      `json:"store_tracking_id"`
+	Items                 []OrderItem `json:"items"`
+	ItemsSummary          string      `json:"items_summary"`                      // H4: human-readable item summary for rider
+	TotalAmountPaisa      int64       `json:"total_amount_paisa"`
+	TotalAmountRupees     float64     `json:"total_amount_rupees"`
+	IsCOD                 bool        `json:"is_cod"`
+	CustomerPhone         string      `json:"customer_phone"`
+	CustomerName          string      `json:"customer_name"`                       // H4: customer name for rider
+	CustomerAddress       string      `json:"customer_address"`                     // H4: customer address for rider
+	Tips                  float64     `json:"tips"`
+	PetrolAllowance       float64     `json:"petrol_allowance"`
+	DropoffLat            float64     `json:"dropoff_lat"`
+	DropoffLng            float64     `json:"dropoff_lng"`
+	Timestamp             int64       `json:"timestamp"`
+	DeliveryFeeAmountPaisa int64       `json:"delivery_fee_amount_paisa"`          // H4 FIX: quoted delivery fee from checkout
+	RoutingStatus         string      `json:"routing_status"`                      // H4 FIX: audit trail (DYNAMIC_CALCULATED | FALLBACK_HAVERSINE)
 }
 
 // OrderItem captures the frozen snapshot of a product at checkout.

@@ -51,45 +51,48 @@ class _ChatNavButtonState extends State<ChatNavButton> {
 
   @override
   Widget build(BuildContext context) {
-    return Stack(
-      clipBehavior: Clip.none,
-      children: [
-        IconButton(
-          icon: Icon(Icons.chat_bubble_outline, color: widget.iconColor),
-          onPressed: () async {
-            await Navigator.of(context).push(
-              MaterialPageRoute<void>(builder: (_) => const ChatListScreen()),
-            );
-            // Refresh on return — the user may have replied to threads.
-            if (mounted) {
-              unawaited(ChatService.instance.fetchUnreadCount());
-            }
-          },
-        ),
-        if (_unread > 0)
-          Positioned(
-            right: 4,
-            top: 4,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-              decoration: BoxDecoration(
-                color: const Color(0xFFCAFF33),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Colors.black, width: 1),
-              ),
-              constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
-              child: Text(
-                _unread > 99 ? '99+' : '$_unread',
-                style: const TextStyle(
-                  color: Colors.black,
-                  fontSize: 10,
-                  fontWeight: FontWeight.bold,
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          IconButton(
+            icon: Icon(Icons.chat_bubble_outline, color: widget.iconColor),
+            onPressed: () async {
+              await Navigator.of(context).push(
+                MaterialPageRoute<void>(builder: (_) => const ChatListScreen()),
+              );
+              // Refresh on return — the user may have replied to threads.
+              if (mounted) {
+                unawaited(ChatService.instance.fetchUnreadCount());
+              }
+            },
+          ),
+          if (_unread > 0)
+            Positioned(
+              right: 0,
+              top: 0,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFCAFF33),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.black, width: 1),
                 ),
-                textAlign: TextAlign.center,
+                constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                child: Text(
+                  _unread > 99 ? '99+' : '$_unread',
+                  style: const TextStyle(
+                    color: Colors.black,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
               ),
             ),
-          ),
-      ],
+        ],
+      ),
     );
   }
 }

@@ -533,3 +533,160 @@ func (c *Client) InitiateTokenizedTransaction(ctx context.Context, req Tokenized
 	}
 	return txnRes, nil
 }
+
+// ListInstruments calls GET /list/instruments to retrieve available payment instruments
+func (c *Client) ListInstruments(ctx context.Context) (*InstrumentListResponse, error) {
+	callStart := time.Now()
+	defer func() { telemetry.TimeGatewayCall("list_instruments", callStart, nil) }()
+
+	token, err := c.GetAuthToken(ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get auth token: %w", err)
+	}
+
+	endpoint := c.baseURL + "/list/instruments"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer " + token)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errRes struct {
+			StatusMsg string `json:"status_msg"`
+			Message   string `json:"message"`
+		}
+		_ = json.Unmarshal(bodyBytes, &errRes)
+		msg := errRes.StatusMsg
+		if msg == "" {
+			msg = errRes.Message
+		}
+		return nil, fmt.Errorf("list instruments failed (HTTP %d): %s", resp.StatusCode, msg)
+	}
+
+	var res InstrumentListResponse
+	if err := json.Unmarshal(bodyBytes, &res); err != nil {
+		return nil, fmt.Errorf("failed to parse list instruments response: %w", err)
+	}
+
+	return &res, nil
+}
+
+// ValidateIBAN calls the IBAN validation endpoint
+func (c *Client) ValidateIBAN(ctx context.Context, iban string) (*IBANValidationResponse, error) {
+	callStart := time.Now()
+	defer func() { telemetry.TimeGatewayCall("validate_iban", callStart, nil) }()
+
+	token, err := c.GetAuthToken(ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get auth token: %w", err)
+	}
+
+	endpoint := c.baseURL + "/validate/iban"
+	formData := url.Values{}
+	formData.Set("iban", iban)
+	formData.Set("merchant_id", c.merchantID)
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	httpReq.Header.Set("Authorization", "Bearer " + token)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errRes struct {
+			StatusMsg string `json:"status_msg"`
+			Message   string `json:"message"`
+		}
+		_ = json.Unmarshal(bodyBytes, &errRes)
+		msg := errRes.StatusMsg
+		if msg == "" {
+			msg = errRes.Message
+		}
+		return nil, fmt.Errorf("iban validation failed (HTTP %d): %s", resp.StatusCode, msg)
+	}
+
+	var res IBANValidationResponse
+	if err := json.Unmarshal(bodyBytes, &res); err != nil {
+		return nil, fmt.Errorf("failed to parse iban validation response: %w", err)
+	}
+
+	return &res, nil
+}
+
+// ValidateCNIC calls the CNIC validation endpoint
+func (c *Client) ValidateCNIC(ctx context.Context, cnic string) (*CNICValidationResponse, error) {
+	callStart := time.Now()
+	defer func() { telemetry.TimeGatewayCall("validate_cnic", callStart, nil) }()
+
+	token, err := c.GetAuthToken(ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get auth token: %w", err)
+	}
+
+	endpoint := c.baseURL + "/validate/cnic"
+	formData := url.Values{}
+	formData.Set("cnic", cnic)
+	formData.Set("merchant_id", c.merchantID)
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(formData.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	httpReq.Header.Set("Authorization", "Bearer " + token)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errRes struct {
+			StatusMsg string `json:"status_msg"`
+			Message   string `json:"message"`
+		}
+		_ = json.Unmarshal(bodyBytes, &errRes)
+		msg := errRes.StatusMsg
+		if msg == "" {
+			msg = errRes.Message
+		}
+		return nil, fmt.Errorf("cnic validation failed (HTTP %d): %s", resp.StatusCode, msg)
+	}
+
+	var res CNICValidationResponse
+	if err := json.Unmarshal(bodyBytes, &res); err != nil {
+		return nil, fmt.Errorf("failed to parse cnic validation response: %w", err)
+	}
+
+	return &res, nil
+}

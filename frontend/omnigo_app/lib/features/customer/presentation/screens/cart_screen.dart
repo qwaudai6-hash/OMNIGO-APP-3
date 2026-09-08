@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/services/cart_provider.dart';
 import 'checkout_screen.dart';
+import 'vendor_chat_selector_screen.dart';
 
 class CartScreen extends StatelessWidget {
   const CartScreen({super.key});
@@ -112,10 +113,41 @@ class CartScreen extends StatelessWidget {
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           const Text('Subtotal', style: TextStyle(fontSize: 16, color: Colors.grey)),
-                          Text('PKR ${cart.totalAmount.toStringAsFixed(2)}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                          Text('PKR ${cart.totalAmount.toStringAsFixed(0)}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                         ],
                       ),
-                      const SizedBox(height: 16),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(Icons.local_shipping_outlined, size: 16, color: Colors.grey.shade600),
+                              const SizedBox(width: 4),
+                              Text('Delivery Fee', style: TextStyle(fontSize: 14, color: Colors.grey.shade600)),
+                            ],
+                          ),
+                          Text(
+                            cart.deliveryFee > 0
+                                ? 'PKR ${cart.deliveryFee.toStringAsFixed(0)}'
+                                : 'Calculated at checkout',
+                            style: TextStyle(fontSize: 14, color: cart.deliveryFee > 0 ? Colors.green.shade700 : Colors.grey.shade500),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      if (cart.deliveryFee > 0) ...[
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            const Text('Grand Total', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: AppTheme.blackAccent)),
+                            Text('PKR ${cart.grandTotal.toStringAsFixed(0)}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.redAccent)),
+                          ],
+                        ),
+                        const SizedBox(height: 16),
+                      ] else ...[
+                        const SizedBox(height: 8),
+                      ],
                       SizedBox(
                         width: double.infinity,
                         height: 55,
@@ -127,7 +159,31 @@ class CartScreen extends StatelessWidget {
                           onPressed: () {
                             Navigator.push(context, MaterialPageRoute<void>(builder: (_) => const CheckoutScreen()));
                           },
-                          child: const Text('Proceed to Checkout', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                          child: Text(
+                            cart.deliveryFee > 0
+                                ? 'Proceed to Checkout'
+                                : 'Proceed to Checkout (Delivery Fee Calculated)',
+                            style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      SizedBox(
+                        width: double.infinity,
+                        height: 48,
+                        child: OutlinedButton.icon(
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: AppTheme.blackAccent,
+                            side: const BorderSide(color: AppTheme.blackAccent, width: 1.5),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                          ),
+                          onPressed: () {
+                            Navigator.push(context, MaterialPageRoute<void>(builder: (_) => const VendorChatSelectorScreen()));
+                          },
+                          icon: const Icon(Icons.chat_bubble_outline, size: 20),
+                          label: const Text('Chat with Vendor', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
                         ),
                       ),
                     ],

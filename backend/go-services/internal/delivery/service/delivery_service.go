@@ -166,6 +166,19 @@ func (s *DeliveryService) StartKafkaConsumer(ctx context.Context) {
 func (s *DeliveryService) HandleNewOrder(ctx context.Context, order models.OrderEvent) {
 	log.Printf("Processing Delivery Gig: Order %s from Store %s", order.OrderID, order.VendorStoreTrackID)
 
+	// H4 FIX: Use the quoted delivery fee from checkout instead of recalculating.
+	// This ensures the customer pays exactly what was shown at checkout and prevents
+	// fee mismatches due to night multiplier timing differences.
+	quotedFee := float64(order.DeliveryFeeAmountPaisa) / 100.0
+	if quotedFee <= 0 {
+		log.Printf("Dispatch Error: invalid delivery_fee_amount_paisa %d for order %s", order.DeliveryFeeAmountPaisa, order.OrderID)
+		return
+	}
+	adminComm := quotedFee * (envFloat("DELIVERY_COMMISSION_PERCENT", 5.0) / 100.0)
+	riderEarning := quotedFee - adminComm
+	log.Printf("[Delivery] Using quoted fee: PKR %.2f (admin: %.2f, rider: %.2f, routing: %s)",
+		quotedFee, adminComm, riderEarning, order.RoutingStatus)
+
 	// Resolve store pickup coordinates from the stores table
 	pickupLat, pickupLng, err := s.repo.GetStoreCoordinates(ctx, order.VendorStoreTrackID)
 	if err != nil {
@@ -180,28 +193,12 @@ func (s *DeliveryService) HandleNewOrder(ctx context.Context, order models.Order
 	otpVal, _ := rand.Int(rand.Reader, big.NewInt(10000))
 	otpCode := fmt.Sprintf("%04d", otpVal.Int64())
 
-	km, _, _, _ := s.estimateDistanceAndETA(ctx, pickupLng, pickupLat, order.DropoffLng, order.DropoffLat)
-
-	baseFare := envFloat("DELIVERY_BASE_FARE", 50.0)
-	perKmRate := envFloat("DELIVERY_PER_KM_RATE", 15.0)
-	surgeMultiplier := 1.0 // H3 surge applied downstream
-	nightMultiplier := 1.0
-
-	hour := time.Now().Hour()
-	if hour >= 23 || hour <= 6 {
-		nightMultiplier = envFloat("DELIVERY_NIGHT_MULTIPLIER", 1.5)
-	}
-
-	totalFare := (baseFare + (perKmRate * km)) * surgeMultiplier * nightMultiplier
-	adminComm := totalFare * (envFloat("DELIVERY_COMMISSION_PERCENT", 5.0) / 100.0) // admin commission on delivery fee
-	riderEarning := totalFare - adminComm
-
 	gig := &models.DeliveryGig{
 		TrackingID:         generateDeliveryUTID(),
 		OrderTrackingID:    order.OrderID,
 		VendorStoreTrackID: order.VendorStoreTrackID,
 		CustomerTrackID:    order.UserTrackID,
-		DeliveryFee:        totalFare,
+		DeliveryFee:        quotedFee,
 		AdminCommission:    adminComm,
 		RiderEarning:       riderEarning,
 		Tips:               order.Tips,
@@ -415,15 +412,18 @@ func (s *DeliveryService) UpdateGigStatus(ctx context.Context, trackingID string
 	}
 
 	// Record double-entry ledger transfer for rider earnings.
-	// NOTE: The actual Postgres wallet balance is now updated atomically in UpdateGigStatus.
+	// NOTE: The actual Postgres rider_wallet balance is now updated atomically in UpdateGigStatus.
 	if req.Status == models.StatusCompleted && s.walletCredit != nil && assignedRider != "" {
 		// Retry ledger transfer up to 3 times before giving up.
 		var creditErr error
 		riderEarningPaisa := int64(gig.RiderEarning * 100)
 		adminCommissionPaisa := int64(gig.AdminCommission * 100)
+		// H4 FIX: Pass isCOD via context so CreditDelivery can skip ledger transfer for COD
+		// (COD's central_escrow is funded later by CODHandler.Settlement())
+		creditCtx := context.WithValue(ctx, "is_cod_order", gig.IsCOD)
 		for attempt := 0; attempt < 3; attempt++ {
 			creditErr = s.walletCredit.CreditDelivery(
-				ctx,
+				creditCtx,
 				assignedRider,
 				trackingID,
 				riderEarningPaisa,
@@ -836,15 +836,20 @@ func (s *DeliveryService) EstimateDeliveryFee(ctx context.Context, storeTrackID 
 	// Get store coordinates
 	lat, lng, err := s.repo.GetStoreCoordinates(ctx, storeTrackID)
 	if err != nil || (lat == 0 && lng == 0) {
-		// H3 FIX: Use haversine fallback instead of returning hardcoded 50 PKR.
+		// H4 FIX: Use haversine fallback with night multiplier for consistency.
 		// Calculate rough estimate from order dropoff to platform default (Karachi center).
 		defaultLat, defaultLng := 24.8607, 67.0011 // Karachi default
 		fallbackKm := haversineKm(defaultLat, defaultLng, dropoffLat, dropoffLng)
 		baseFare := envFloat("DELIVERY_BASE_FARE", 50.0)
 		perKmRate := envFloat("DELIVERY_PER_KM_RATE", 15.0)
-		totalFare := baseFare + (perKmRate * fallbackKm)
+		nightMultiplier := 1.0
+		hour := time.Now().Hour()
+		if hour >= 23 || hour <= 6 {
+			nightMultiplier = envFloat("DELIVERY_NIGHT_MULTIPLIER", 1.5)
+		}
+		totalFare := (baseFare + (perKmRate * fallbackKm)) * nightMultiplier
 		adminComm := totalFare * (envFloat("DELIVERY_COMMISSION_PERCENT", 5.0) / 100.0)
-		log.Printf("[Delivery] H3 FALLBACK: store %s coords unavailable, using haversine fallback %.1fkm → PKR %.2f", storeTrackID, fallbackKm, totalFare)
+		log.Printf("[Delivery] H4 FALLBACK: store %s coords unavailable, using haversine fallback %.1fkm × %.1f night → PKR %.2f", storeTrackID, fallbackKm, nightMultiplier, totalFare)
 		return totalFare, adminComm, totalFare - adminComm, "FALLBACK_HAVERSINE", nil
 	}
 

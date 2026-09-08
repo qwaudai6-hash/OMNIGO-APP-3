@@ -151,7 +151,8 @@ func main() {
 		rdbForWebhook = redisClient.Client
 	}
 	webhookHandler := paymentHandlers.NewWebhookHandler(paymentOrchestrator, ledgerSvc, paymentTxnRepo, repo, commissionCalculator, db.Writer, rdbForWebhook)
-	refundHandler := paymentHandlers.NewRefundHandler(paymentOrchestrator, ledgerSvc, paymentTxnRepo, repo, svc, customerWalletSvc)
+	refundReqRepo := paymentRepo.NewRefundRequestRepository(db.Writer)
+	refundHandler := paymentHandlers.NewRefundHandler(paymentOrchestrator, ledgerSvc, paymentTxnRepo, repo, svc, customerWalletSvc, refundReqRepo)
 
 	// 4. Setup Router
 	router := gin.Default()

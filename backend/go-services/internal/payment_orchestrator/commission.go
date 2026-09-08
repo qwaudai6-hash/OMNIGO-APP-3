@@ -118,11 +118,16 @@ func (c *CommissionCalculator) CalculateCODSplit(ctx context.Context, orderTotal
 
 	var deliveryFeePaisa int64
 	if orderTrackingID != "" {
+		// H4 FIX: deliveries table has delivery_fee (NUMERIC rupees) and admin_commission_paisa/rider_earning_paisa (BIGINT)
+		// We need to read delivery_fee and convert to paisa since there's no delivery_fee_paisa column
+		var deliveryFeeRupees float64
 		err = c.db.QueryRow(ctx,
-			`SELECT COALESCE(amount_paisa, 0) FROM deliveries WHERE order_tracking_id = $1 LIMIT 1`, orderTrackingID,
-		).Scan(&deliveryFeePaisa)
+			`SELECT COALESCE(delivery_fee, 0) FROM deliveries WHERE order_tracking_id = $1 LIMIT 1`, orderTrackingID,
+		).Scan(&deliveryFeeRupees)
 		if err != nil {
 			deliveryFeePaisa = 0
+		} else {
+			deliveryFeePaisa = int64(math.Round(deliveryFeeRupees * 100))
 		}
 	}
 
@@ -160,16 +165,15 @@ func (c *CommissionCalculator) CalculateCODSplit(ctx context.Context, orderTotal
 // Rider gets: delivery_fee - admin_commission
 // Returns values in paisa (int64).
 func (c *CommissionCalculator) CalculateRiderDeliveryCredit(ctx context.Context, deliveryTrackingID string) (riderEarning, adminCommission int64, err error) {
-	var deliveryFeePaisa int64
+	// H4 FIX: deliveries table has rider_earning_paisa and admin_commission_paisa (BIGINT)
+	// Not amount_paisa / commission_paisa
 	err = c.db.QueryRow(ctx,
-		`SELECT COALESCE(amount_paisa, 0), COALESCE(commission_paisa, 0) FROM deliveries WHERE tracking_id = $1`,
+		`SELECT COALESCE(rider_earning_paisa, 0), COALESCE(admin_commission_paisa, 0) FROM deliveries WHERE tracking_id = $1`,
 		deliveryTrackingID,
-	).Scan(&deliveryFeePaisa, &adminCommission)
+	).Scan(&riderEarning, &adminCommission)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to read delivery gig: %w", err)
 	}
-
-	riderEarning = deliveryFeePaisa - adminCommission
 	if riderEarning < 0 {
 		riderEarning = 0
 	}

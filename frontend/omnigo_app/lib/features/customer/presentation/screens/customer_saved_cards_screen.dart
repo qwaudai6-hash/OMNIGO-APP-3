@@ -157,7 +157,41 @@ class _CustomerSavedCardsScreenState extends State<CustomerSavedCardsScreen> {
         ],
       ),
       body: _buildBody(),
+      floatingActionButton: _cards.isNotEmpty
+          ? FloatingActionButton.extended(
+              onPressed: _addNewCard,
+              backgroundColor: AppTheme.blackAccent,
+              icon: const Icon(Icons.add, color: Colors.white),
+              label: const Text('Add Card', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+            )
+          : null,
     );
+  }
+
+  Future<void> _addNewCard() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Add New Card'),
+        content: const Text(
+          'To add a new card, please proceed to checkout and select "PayFast Card" payment method. Your card will be saved automatically for future purchases.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Go to Checkout'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true && mounted) {
+      Navigator.pop(context);
+    }
   }
 
   Widget _buildBody() {

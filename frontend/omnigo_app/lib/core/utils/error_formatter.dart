@@ -44,8 +44,29 @@ class UserFriendlyError {
 
     if (str.contains('409') || str.contains('conflict_duplicate_email') || str.contains('already registered') || str.contains('already exists')) {
       return const UserFriendlyError(
-        title: 'Email Already Registered',
-        message: 'An account with this email already exists. Please log in instead or use another email.',
+        title: 'Already Registered',
+        message: 'An account with this information already exists. Please log in instead.',
+      );
+    }
+
+    if (str.contains('conflict_duplicate_phone') || str.contains('phone.*already') || str.contains('duplicate.*phone')) {
+      return const UserFriendlyError(
+        title: 'Phone Already Registered',
+        message: 'This phone number is already associated with another account.',
+      );
+    }
+
+    if (str.contains('conflict_duplicate_vehicle') || str.contains('vehicle.*already') || str.contains('duplicate.*vehicle')) {
+      return const UserFriendlyError(
+        title: 'Vehicle Already Registered',
+        message: 'This vehicle is already registered to another rider.',
+      );
+    }
+
+    if (str.contains('conflict_duplicate_store') || str.contains('store.*already') || str.contains('duplicate.*store')) {
+      return const UserFriendlyError(
+        title: 'Store Name Taken',
+        message: 'This store name is already taken. Please choose a different name.',
       );
     }
 

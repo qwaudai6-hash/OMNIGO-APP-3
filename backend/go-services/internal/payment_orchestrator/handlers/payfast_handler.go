@@ -110,7 +110,12 @@ func (h *PayFastSplitHandler) ThreeDSCallback(c *gin.Context) {
 	}
 
 	safeOrderID := html.EscapeString(orderID)
-	targetOrigin := postMessageTargetOrigin()
+	targetOrigin, err := postMessageTargetOrigin()
+	if err != nil {
+		log.Printf("[payfast] postMessage target origin error: %v", err)
+		h.respond3DSError(c, http.StatusInternalServerError, "Payment callback origin not configured on server")
+		return
+	}
 	if strings.Contains(c.GetHeader("Accept"), "text/html") {
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, fmt.Sprintf(`<!DOCTYPE html>
@@ -136,23 +141,21 @@ func (h *PayFastSplitHandler) ThreeDSCallback(c *gin.Context) {
 }
 
 // postMessageTargetOrigin resolves the origin allowed to receive window.postMessage
-// results from the 3DS popup/webview. Wildcard "*" leaks payment status to whatever
-// page opened the window, so it is only used as a last-resort dev fallback when no
-// trusted origin is configured.
-func postMessageTargetOrigin() string {
+// results from the 3DS popup/webview. Returns error if no trusted origin is configured
+// to prevent security issues with wildcard postMessage target.
+func postMessageTargetOrigin() (string, error) {
 	if o := strings.TrimSpace(os.Getenv("PAYFAST_WEB_ORIGIN")); o != "" {
-		return o
+		return o, nil
 	}
 	// Prefer the first explicitly allow-listed CORS origin — it is already a trusted
 	// frontend origin by definition.
 	if origins := strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS")); origins != "" {
 		first := strings.TrimSpace(strings.Split(origins, ",")[0])
 		if first != "" && first != "*" {
-			return first
+			return first, nil
 		}
 	}
-	log.Println("WARNING: [payfast] PAYFAST_WEB_ORIGIN / CORS_ALLOWED_ORIGINS unset — 3DS postMessage falling back to wildcard targetOrigin '*'")
-	return "*"
+	return "", fmt.Errorf("PAYFAST_WEB_ORIGIN or CORS_ALLOWED_ORIGINS must be configured for 3DS postMessage")
 }
 
 // respond3DSError sends a format-appropriate response (HTML for webviews, JSON for APIs).

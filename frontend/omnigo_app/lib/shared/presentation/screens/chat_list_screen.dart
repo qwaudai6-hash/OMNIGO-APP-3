@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../../core/services/session_registry.dart';
+import '../../../features/customer/presentation/screens/pre_order_chat_screen.dart';
 import '../services/chat_service.dart';
 import 'chat_room_screen.dart';
 
@@ -68,11 +69,21 @@ class _ChatListScreenState extends State<ChatListScreen> {
     try {
       await ChatService.instance.fetchConversations();
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to load chats: $e')),
-        );
+      if (!mounted) return;
+      final msg = e.toString();
+      String userMsg;
+      if (msg.contains('SocketException') || msg.contains('Connection refused') || msg.contains('HandshakeException')) {
+        userMsg = 'No internet connection. Pull to refresh.';
+      } else if (msg.contains('401') || msg.contains('403')) {
+        userMsg = 'Session expired. Please login again.';
+      } else if (msg.contains('500') || msg.contains('502') || msg.contains('503')) {
+        userMsg = 'Server error. Please try again later.';
+      } else {
+        userMsg = 'Failed to load chats. Pull to refresh.';
       }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(userMsg), backgroundColor: Colors.orange),
+      );
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -97,27 +108,32 @@ class _ChatListScreenState extends State<ChatListScreen> {
   }
 
   Future<void> _startNewChat() async {
-    final otherUserId = await _promptText(
-      label: 'Other party tracking ID',
-      hint: 'CUST-..., VEND-..., RIDR-...',
-    );
-    if (otherUserId == null || otherUserId.isEmpty) return;
-
-    final orderId = await _promptText(
-      label: 'Order tracking ID',
-      hint: 'ORD-...',
-    );
-    if (orderId == null || orderId.isEmpty) return;
-
-    if (!mounted) return;
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => ChatRoomScreen(
-          orderId: orderId,
-          otherUserId: otherUserId,
-          otherUserName: otherUserId,
-          otherUserRole: 'unknown',
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Start New Chat'),
+        content: const Text(
+          'Search for a vendor store to ask questions before placing an order.',
         ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Search Stores'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    await Navigator.push(
+      context,
+      MaterialPageRoute<void>(
+        builder: (_) => const PreOrderChatScreen(),
       ),
     );
     unawaited(_fetchConversations());

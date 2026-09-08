@@ -1,7 +1,10 @@
 package handler
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -101,8 +104,18 @@ func (h *WalletHandler) PayFastCharge(c *gin.Context) {
 
 	merchantID := os.Getenv("PAYFAST_MERCHANT_ID")
 	if merchantID == "" {
-		merchantID = "10001"
+		log.Printf("[payfast-charge] ERROR: PAYFAST_MERCHANT_ID not configured")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "PayFast merchant ID not configured on server"})
+		return
 	}
+
+	securedKey := os.Getenv("PAYFAST_SECURED_KEY")
+	if securedKey == "" {
+		log.Printf("[payfast-charge] ERROR: PAYFAST_SECURED_KEY not configured")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "PayFast secured key not configured on server"})
+		return
+	}
+
 	baseURL := os.Getenv("PAYFAST_BASE_URL")
 	if baseURL == "" {
 		baseURL = os.Getenv("PAYFAST_API_URL")
@@ -136,7 +149,22 @@ func (h *WalletHandler) PayFastCharge(c *gin.Context) {
 		return
 	}
 
-	var redirectURL string
+	// Fetch access token with basket details per PayFast PHP sample
+	// GetAccessToken requires: MERCHANT_ID, SECURED_KEY, BASKET_ID, TXNAMT, CURRENCY_CODE
+	accessToken := ""
+	accessToken = fetchPayfastAccessToken(c.Request.Context(), baseURL, merchantID, securedKey, basketID, order.TotalAmount)
+
+	merchantName := os.Getenv("PAYFAST_MERCHANT_NAME")
+	if merchantName == "" {
+		merchantName = "OMNIGO"
+	}
+
+	failureURL := returnURL
+	orderDate := time.Now().Format("2006-01-02 15:04:05")
+
+	// PayFast signature is a random string (per official PHP sample: "SOME-RANDOM-STRING")
+	signature := fmt.Sprintf("SIG-%d", time.Now().UnixNano())
+
 	if strings.Contains(baseURL, "apps.net.pk") {
 		formEndpoint := strings.TrimRight(baseURL, "/")
 		if !strings.HasSuffix(formEndpoint, "/PostTransaction") {
@@ -146,30 +174,68 @@ func (h *WalletHandler) PayFastCharge(c *gin.Context) {
 				formEndpoint += "/Transaction/PostTransaction"
 			}
 		}
-		redirectURL = fmt.Sprintf(
-			"%s?merchant_id=%s&basket_id=%s&txnamt=%.2f&currency_code=PKR&customer_mobile_no=%s&customer_email_address=%s&success_url=%s&checkout_url=%s",
+
+		// Build POST form HTML that auto-submits to PayFast
+		// Per PayFast PHP sample, form uses method='post' with all fields as hidden inputs
+		formHTML := fmt.Sprintf(`<!DOCTYPE html>
+<html><head><title>Redirecting to PayFast...</title></head>
+<body>
+<form id="payfast_form" method="post" action="%s">
+<input type="hidden" name="MERCHANT_ID" value="%s" />
+<input type="hidden" name="MERCHANT_NAME" value="%s" />
+<input type="hidden" name="TOKEN" value="%s" />
+<input type="hidden" name="BASKET_ID" value="%s" />
+<input type="hidden" name="TXNAMT" value="%.2f" />
+<input type="hidden" name="CURRENCY_CODE" value="PKR" />
+<input type="hidden" name="ORDER_DATE" value="%s" />
+<input type="hidden" name="SUCCESS_URL" value="%s" />
+<input type="hidden" name="FAILURE_URL" value="%s" />
+<input type="hidden" name="CHECKOUT_URL" value="%s" />
+<input type="hidden" name="CUSTOMER_EMAIL_ADDRESS" value="%s" />
+<input type="hidden" name="CUSTOMER_MOBILE_NO" value="%s" />
+<input type="hidden" name="SIGNATURE" value="%s" />
+<input type="hidden" name="VERSION" value="MERCHANTCART-0.1" />
+<input type="hidden" name="TXNDESC" value="OMNIGO Wallet Top-up" />
+<input type="hidden" name="PROCCODE" value="00" />
+<input type="hidden" name="TRAN_TYPE" value="ECOMM_PURCHASE" />
+<input type="hidden" name="MERCHANT_USERAGENT" value="%s" />
+</form>
+<script>document.getElementById("payfast_form").submit();</script>
+<p>Redirecting to PayFast payment page...</p>
+</body></html>`,
 			formEndpoint,
-			url.QueryEscape(merchantID),
-			url.QueryEscape(basketID),
+			merchantID,
+			merchantName,
+			accessToken,
+			basketID,
 			order.TotalAmount,
-			url.QueryEscape(req.CustomerMobile),
+			orderDate,
+			url.QueryEscape(returnURL),
+			url.QueryEscape(failureURL),
+			url.QueryEscape(returnURL),
 			url.QueryEscape(req.CustomerEmail),
-			url.QueryEscape(returnURL),
-			url.QueryEscape(returnURL),
-		)
-	} else {
-		redirectURL = fmt.Sprintf(
-			"%s/hosted?merchant_id=%s&basket_id=%s&txnamt=%.2f&currency_code=PKR&customer_mobile_no=%s&customer_email_address=%s&success_url=%s&checkout_url=%s",
-			strings.TrimRight(baseURL, "/"),
-			url.QueryEscape(merchantID),
-			url.QueryEscape(basketID),
-			order.TotalAmount,
 			url.QueryEscape(req.CustomerMobile),
-			url.QueryEscape(req.CustomerEmail),
-			url.QueryEscape(returnURL),
-			url.QueryEscape(returnURL),
+			signature,
+			c.Request.UserAgent(),
 		)
+
+		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(formHTML))
+		return
 	}
+
+	// Fallback for non-APPS endpoints: return redirect URL
+	redirectURL := fmt.Sprintf(
+		"%s/hosted?merchant_id=%s&basket_id=%s&txnamt=%.2f&currency_code=PKR&customer_mobile_no=%s&customer_email_address=%s&success_url=%s&failure_url=%s&checkout_url=%s",
+		strings.TrimRight(baseURL, "/"),
+		url.QueryEscape(merchantID),
+		url.QueryEscape(basketID),
+		order.TotalAmount,
+		url.QueryEscape(req.CustomerMobile),
+		url.QueryEscape(req.CustomerEmail),
+		url.QueryEscape(returnURL),
+		url.QueryEscape(failureURL),
+		url.QueryEscape(returnURL),
+	)
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":       "pending_redirect",
@@ -248,4 +314,58 @@ func (h *WalletHandler) PayFastCallback(c *gin.Context) {
 		"status":   "verified",
 		"order_id": pending.OrderID,
 	})
+}
+
+// fetchPayfastAccessToken calls GetAccessToken API with basket details per PayFast PHP sample.
+// Returns empty string on failure (non-fatal — form can still be submitted without TOKEN).
+func fetchPayfastAccessToken(ctx context.Context, baseURL, merchantID, securedKey, basketID string, amount float64) string {
+	// Determine token endpoint
+	tokenURL := baseURL + "/Transaction/GetAccessToken"
+	if strings.Contains(baseURL, "apps.net.pk") {
+		if !strings.HasSuffix(baseURL, "/Transaction") && !strings.HasSuffix(baseURL, "/GetAccessToken") {
+			tokenURL = strings.TrimRight(baseURL, "/") + "/Transaction/GetAccessToken"
+		} else if strings.HasSuffix(baseURL, "/Transaction") {
+			tokenURL = strings.TrimRight(baseURL, "/") + "/GetAccessToken"
+		} else {
+			tokenURL = strings.TrimRight(baseURL, "/")
+		}
+	}
+
+	// Per PayFast PHP sample: MERCHANT_ID, SECURED_KEY, BASKET_ID, TXNAMT, CURRENCY_CODE, APPLY_DISCOUNT
+	formData := url.Values{}
+	formData.Set("MERCHANT_ID", merchantID)
+	formData.Set("SECURED_KEY", securedKey)
+	formData.Set("BASKET_ID", basketID)
+	formData.Set("TXNAMT", fmt.Sprintf("%.2f", amount))
+	formData.Set("CURRENCY_CODE", "PKR")
+	formData.Set("APPLY_DISCOUNT", "true")
+
+	httpClient := &http.Client{Timeout: 15 * time.Second}
+	resp, err := httpClient.Post(tokenURL, "application/x-www-form-urlencoded", strings.NewReader(formData.Encode()))
+	if err != nil {
+		log.Printf("[payfast-charge] WARN: GetAccessToken request failed: %v", err)
+		return ""
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		log.Printf("[payfast-charge] WARN: failed to read GetAccessToken response: %v", err)
+		return ""
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[payfast-charge] WARN: GetAccessToken returned status %d: %s", resp.StatusCode, string(body))
+		return ""
+	}
+
+	var result struct {
+		AccessToken string `json:"ACCESS_TOKEN"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("[payfast-charge] WARN: failed to parse GetAccessToken response: %v", err)
+		return ""
+	}
+
+	return result.AccessToken
 }

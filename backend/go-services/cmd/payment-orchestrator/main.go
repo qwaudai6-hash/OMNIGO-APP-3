@@ -222,6 +222,39 @@ func main() {
 	)
 	mobileWalletHandler.RegisterRoutes(router)
 
+	// Raast P2M - instant bank transfer via PayFast
+	raastHandler := handlers.NewRaastHandler(
+		paymentservice.NewOrchestrator(),
+		paymentRepo.NewRepository(db.Writer),
+		orderRepo.NewOrderRepository(db.Writer, nil),
+		calculator,
+		db.Writer,
+	)
+	raastHandler.RegisterRoutes(router)
+	log.Println("Raast P2M endpoints registered: /api/v1/payments/raast/{initiate,callback}")
+
+	// IBFT - Inter-Bank Fund Transfer
+	ibftHandler := handlers.NewIBFTHandler(
+		paymentservice.NewOrchestrator(),
+		paymentRepo.NewRepository(db.Writer),
+		orderRepo.NewOrderRepository(db.Writer, nil),
+		calculator,
+		db.Writer,
+	)
+	ibftHandler.RegisterRoutes(router)
+	log.Println("IBFT endpoints registered: /api/v1/payments/ibft/{initiate,callback}")
+
+	// QR Payments
+	qrHandler := handlers.NewQRHandler(
+		paymentservice.NewOrchestrator(),
+		paymentRepo.NewRepository(db.Writer),
+		orderRepo.NewOrderRepository(db.Writer, nil),
+		calculator,
+		db.Writer,
+	)
+	qrHandler.RegisterRoutes(router)
+	log.Println("QR endpoints registered: /api/v1/payments/qr/{initiate,generate,callback}")
+
 	// Prometheus Metrics
 	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 

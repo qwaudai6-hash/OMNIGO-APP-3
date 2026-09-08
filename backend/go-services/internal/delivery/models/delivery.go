@@ -70,20 +70,22 @@ type UpdateLocationRequest struct {
 
 // OrderEvent represents the payload consumed from Kafka
 type OrderEvent struct {
-	OrderID            string  `json:"order_id"`
-	UserTrackID        string  `json:"user_tracking_id"`
-	VendorStoreTrackID string  `json:"vendor_store_tracking_id"`
-	TotalAmount        float64 `json:"total_amount"`
-	IsCOD              bool    `json:"is_cod"`
-	CustomerPhone      string  `json:"customer_phone"`
-	CustomerName       string  `json:"customer_name"`    // H4: customer name for rider
-	CustomerAddress    string  `json:"customer_address"` // H4: customer address for rider
-	ItemsSummary       string  `json:"items_summary"`    // H4: human-readable item summary for rider
-	Tips               float64 `json:"tips"`
-	PetrolAllowance    float64 `json:"petrol_allowance"`
-	DropoffLat         float64 `json:"dropoff_lat"`
-	DropoffLng         float64 `json:"dropoff_lng"`
-	Timestamp          int64   `json:"timestamp"`
+	OrderID               string  `json:"order_id"`
+	UserTrackID           string  `json:"user_tracking_id"`
+	VendorStoreTrackID    string  `json:"vendor_store_tracking_id"`
+	TotalAmount           float64 `json:"total_amount"`
+	IsCOD                 bool    `json:"is_cod"`
+	CustomerPhone         string  `json:"customer_phone"`
+	CustomerName          string  `json:"customer_name"`     // H4: customer name for rider
+	CustomerAddress       string  `json:"customer_address"`  // H4: customer address for rider
+	ItemsSummary          string  `json:"items_summary"`     // H4: human-readable item summary for rider
+	Tips                  float64 `json:"tips"`
+	PetrolAllowance       float64 `json:"petrol_allowance"`
+	DropoffLat            float64 `json:"dropoff_lat"`
+	DropoffLng            float64 `json:"dropoff_lng"`
+	Timestamp             int64   `json:"timestamp"`
+	DeliveryFeeAmountPaisa int64  `json:"delivery_fee_amount_paisa"` // H4 FIX: quoted delivery fee from checkout
+	RoutingStatus         string  `json:"routing_status"`             // H4 FIX: audit trail (DYNAMIC_CALCULATED | FALLBACK_HAVERSINE)
 }
 
 // AcceptGigRequest used by riders to accept a broadcasted gig

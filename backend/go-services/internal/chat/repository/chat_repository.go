@@ -82,14 +82,30 @@ func (r *chatRepository) SaveMessage(ctx context.Context, msg *models.ChatMessag
 }
 
 // IsPartyToOrder checks if the user is a participant in the order.
+// It validates:
+//   - Customer: must be the order's customer_tracking_id
+//   - Vendor: must be either the resolved vendor_tracking_id OR the store's actual owner
+//     (handles race where vendor_tracking_id placeholder hasn't been resolved yet)
+//   - Rider: must be the order's rider_tracking_id
 func (r *chatRepository) IsPartyToOrder(ctx context.Context, orderID, userID string) (bool, error) {
 	query := `
 		SELECT EXISTS(
-			SELECT 1 FROM orders
-			WHERE order_tracking_id = $1
-			  AND (customer_tracking_id = $2
-			       OR vendor_tracking_id = $2
-			       OR rider_tracking_id = $2)
+			SELECT 1 FROM orders o
+			LEFT JOIN stores s ON o.store_tracking_id = s.store_tracking_id
+			WHERE o.order_tracking_id = $1
+			  AND (
+			       -- Customer is always a party
+			       o.customer_tracking_id = $2
+			       OR
+			       -- Rider is always a party
+			       o.rider_tracking_id = $2
+			       OR
+			       -- Vendor: either the resolved vendor_tracking_id matches
+			       (o.vendor_tracking_id = $2 AND COALESCE(s.vendor_tracking_id, o.vendor_tracking_id) = o.vendor_tracking_id)
+			       OR
+			       -- Vendor: OR the store's actual owner matches (handles placeholder vendor_tracking_id)
+			       (s.vendor_tracking_id = $2)
+			  )
 		)
 	`
 	var exists bool
@@ -246,9 +262,15 @@ func (r *chatRepository) ListConversations(ctx context.Context, userID string, l
 	var out []models.ChatConversation
 	for rows.Next() {
 		var c models.ChatConversation
-		if err := rows.Scan(&c.OrderID, &c.OtherUserID, &c.OtherUserRole, &c.OtherUserName,
+		var otherUserName *string
+		if err := rows.Scan(&c.OrderID, &c.OtherUserID, &c.OtherUserRole, &otherUserName,
 			&c.LastMessage, &c.LastMessageAt, &c.UnreadCount, &c.LastSenderIsMe); err != nil {
 			return nil, err
+		}
+		if otherUserName != nil && *otherUserName != "" {
+			c.OtherUserName = *otherUserName
+		} else {
+			c.OtherUserName = c.OtherUserID
 		}
 		out = append(out, c)
 	}

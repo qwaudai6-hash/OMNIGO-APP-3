@@ -161,9 +161,10 @@ func (c *Client) VerifyIPNHash(basketID, payfastErrCode, receivedHash string) bo
 }
 
 // GetAuthToken returns a cached or freshly-fetched auth token via the internal TokenManager.
-func (c *Client) GetAuthToken(ctx context.Context, customerIP string) (string, error) {
+// Pass TokenContext with basket details for PayFast APPS UAT endpoints.
+func (c *Client) GetAuthToken(ctx context.Context, customerIP string, tokenCtx ...*TokenContext) (string, error) {
 	if !c.IsConfigured() {
 		return "", ErrNotConfigured
 	}
-	return c.tokens.GetToken(ctx, customerIP)
+	return c.tokens.GetToken(ctx, customerIP, tokenCtx...)
 }

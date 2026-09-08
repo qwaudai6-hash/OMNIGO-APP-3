@@ -25,9 +25,54 @@ func (h *CardVaultHandler) RegisterRoutes(r gin.IRoutes) {
 	cardsGroup := r.Use(middleware.JWTAuth())
 	{
 		cardsGroup.GET("/api/v1/payments/cards", h.ListCards)
+		cardsGroup.POST("/api/v1/payments/cards", h.SaveCard)
 		cardsGroup.DELETE("/api/v1/payments/cards/:card_id", h.DeleteCard)
 		cardsGroup.POST("/api/v1/payments/cards/default", h.SetDefaultCard)
 	}
+}
+
+// SaveCard handles POST /api/v1/payments/cards
+func (h *CardVaultHandler) SaveCard(c *gin.Context) {
+	customerID := middleware.GetTrackingID(c)
+	if customerID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized: missing customer tracking ID"})
+		return
+	}
+
+	var req struct {
+		InstrumentToken string `json:"instrument_token" binding:"required"`
+		CardBrand      string `json:"card_brand"`
+		LastFour       string `json:"last_four" binding:"required"`
+		ExpiryMonth    string `json:"expiry_month" binding:"required"`
+		ExpiryYear     string `json:"expiry_year" binding:"required"`
+		CardholderName string `json:"cardholder_name"`
+		SetAsDefault   bool   `json:"set_as_default"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload: " + err.Error()})
+		return
+	}
+
+	card, err := h.vaultService.SaveCard(
+		c.Request.Context(),
+		customerID,
+		req.InstrumentToken,
+		req.CardBrand,
+		req.LastFour,
+		req.ExpiryMonth,
+		req.ExpiryYear,
+		req.CardholderName,
+		req.SetAsDefault,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save card: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"message": "Card saved successfully",
+		"card":    card,
+	})
 }
 
 // ListCards handles GET /api/v1/payments/cards

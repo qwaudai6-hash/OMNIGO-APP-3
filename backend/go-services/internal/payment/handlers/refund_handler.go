@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/omnigo/backend/internal/ledger"
 	middleware "github.com/omnigo/backend/internal/shared/middleware"
 	"github.com/omnigo/backend/internal/order/repository"
@@ -19,22 +20,24 @@ import (
 
 // RefundHandler exposes returns/cancellations/refund operations.
 type RefundHandler struct {
-	orchestrator *service.Orchestrator
-	ledgerSvc    *ledger.Service
-	txnRepo      *paymentRepo.Repository
-	orderRepo    *repository.OrderRepository
-	orderSvc     *orderSvc.OrderService
-	walletSvc    *walletSvc.CustomerWalletService
+	orchestrator   *service.Orchestrator
+	ledgerSvc      *ledger.Service
+	txnRepo        *paymentRepo.Repository
+	orderRepo      *repository.OrderRepository
+	orderSvc       *orderSvc.OrderService
+	walletSvc      *walletSvc.CustomerWalletService
+	refundReqRepo  *paymentRepo.RefundRequestRepository
 }
 
-func NewRefundHandler(orchestrator *service.Orchestrator, ledgerSvc *ledger.Service, txnRepo *paymentRepo.Repository, orderRepo *repository.OrderRepository, orderSvc *orderSvc.OrderService, walletSvc *walletSvc.CustomerWalletService) *RefundHandler {
+func NewRefundHandler(orchestrator *service.Orchestrator, ledgerSvc *ledger.Service, txnRepo *paymentRepo.Repository, orderRepo *repository.OrderRepository, orderSvc *orderSvc.OrderService, walletSvc *walletSvc.CustomerWalletService, refundReqRepo *paymentRepo.RefundRequestRepository) *RefundHandler {
 	return &RefundHandler{
-		orchestrator: orchestrator,
-		ledgerSvc:    ledgerSvc,
-		txnRepo:      txnRepo,
-		orderRepo:    orderRepo,
-		orderSvc:     orderSvc,
-		walletSvc:    walletSvc,
+		orchestrator:  orchestrator,
+		ledgerSvc:     ledgerSvc,
+		txnRepo:       txnRepo,
+		orderRepo:     orderRepo,
+		orderSvc:      orderSvc,
+		walletSvc:     walletSvc,
+		refundReqRepo: refundReqRepo,
 	}
 }
 
@@ -107,7 +110,35 @@ func (h *RefundHandler) executeRefund(ctx context.Context, req RefundRequest) (g
 	}
 
 	// Call gateway refund for online payments. COD is handled as a reversal.
+	// NOTE: PayFast-based gateways (jazzcash, easypaisa, raast, ibft, qr, payfast)
+	// have NO public refund API - they must be processed manually via PayFast dashboard.
 	if gateway != "cod" && gateway != "wallet" {
+		if isPayFastGateway(gateway) {
+			// Create a manual refund request for PayFast payments
+			if h.refundReqRepo != nil {
+				refundReq := &paymentRepo.RefundRequest{
+					ID:            generateUUID(),
+					OrderID:       req.OrderID,
+					CustomerID:    order.UserTrackID,
+					Gateway:       gateway,
+					GatewayTxnID:  gatewayTxnID,
+					Amount:        float64(refundAmountPaisa) / 100.0,
+					Currency:      order.Currency,
+					Status:        paymentRepo.RefundStatusPending,
+					Reason:        req.Reason,
+					RequestedBy:   req.RequestedBy,
+				}
+				if err := h.refundReqRepo.Create(ctx, refundReq); err != nil {
+					log.Printf("[REFUND] WARNING: failed to create refund request for PayFast order %s: %v", req.OrderID, err)
+				}
+			}
+			return gin.H{
+				"status":           "pending_manual",
+				"message":          "Refund requires manual processing via PayFast dashboard. Our team will process it within 2-3 business days.",
+				"order_tracking_id": req.OrderID,
+				"amount":           float64(refundAmountPaisa) / 100.0,
+			}, http.StatusOK, nil
+		}
 		if h.orchestrator != nil {
 			if err := h.orchestrator.Refund(ctx, gateway, gatewayTxnID, float64(refundAmountPaisa)/100.0); err != nil {
 				return gin.H{"error": "gateway refund failed: " + err.Error()}, http.StatusBadGateway, err
@@ -410,4 +441,17 @@ func (h *RefundHandler) RegisterRefundRoutes(router *gin.Engine) {
 		finance.POST("/cancel", h.ProcessCancellation)
 		finance.GET("/refund/:order_tracking_id", h.GetRefundStatus)
 	}
+}
+
+func isPayFastGateway(gateway string) bool {
+	switch gateway {
+	case "payfast", "jazzcash", "easypaisa", "raast", "ibft", "qr":
+		return true
+	default:
+		return false
+	}
+}
+
+func generateUUID() string {
+	return uuid.New().String()
 }

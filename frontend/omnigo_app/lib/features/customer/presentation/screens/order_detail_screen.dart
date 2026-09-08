@@ -461,7 +461,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   Widget build(BuildContext context) {
     final orderId = _currentOrder['order_tracking_id'] ?? 'ORD-UNKNOWN';
     final status = (_currentOrder['status'] ?? 'pending').toString().toLowerCase();
-    final total = (_currentOrder['total_amount'] ?? 0.0).toString();
+    final total = ((_currentOrder['total_amount'] as num?)?.toDouble() ?? 0.0).toStringAsFixed(0);
     final currency = _currentOrder['currency'] ?? 'PKR';
     final storeId = (_currentOrder['store_tracking_id'] ?? _currentOrder['vendor_tracking_id'] ?? 'STOR-N/A').toString();
     final vendorId = (_currentOrder['vendor_tracking_id'] ?? _currentOrder['store_tracking_id'] ?? 'N/A').toString();
@@ -507,19 +507,27 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
               ),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('Order #$orderId',
-                          style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),),
-                      const SizedBox(height: 4),
-                      Text(_statusLabel(status),
-                          style: TextStyle(color: _statusColor(status), fontSize: 14, fontWeight: FontWeight.bold),),
-                    ],
+                  Flexible(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Order #$orderId',
+                            style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                            overflow: TextOverflow.ellipsis,
+                            maxLines: 1),
+                        const SizedBox(height: 4),
+                        Text(_statusLabel(status),
+                            style: TextStyle(color: _statusColor(status), fontSize: 14, fontWeight: FontWeight.bold),),
+                      ],
+                    ),
                   ),
+                  const SizedBox(width: 12),
                   Text('PKR $total',
-                      style: const TextStyle(color: AppTheme.limeAccent, fontSize: 24, fontWeight: FontWeight.w900),),
+                      style: const TextStyle(color: AppTheme.limeAccent, fontSize: 24, fontWeight: FontWeight.w900),
+                      overflow: TextOverflow.ellipsis,
+                      maxLines: 1),
                 ],
               ),
             ),

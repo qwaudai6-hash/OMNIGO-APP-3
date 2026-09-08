@@ -173,20 +173,22 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *models.CreateOrderR
 
 	isCOD := order.PaymentGateway == "" || strings.EqualFold(order.PaymentGateway, "cod")
 	event := models.OrderEvent{
-		OrderID:            order.TrackingID,
-		UserTrackID:        order.UserTrackID,
-		VendorStoreTrackID: order.VendorStoreTrackID,
-		Items:              order.Items,
-		ItemsSummary:       itemsSummary,
-		TotalAmountPaisa:   int64(order.TotalAmount * 100),
-		TotalAmountRupees:  order.TotalAmount,
-		IsCOD:              isCOD,
-		CustomerPhone:      order.CustomerPhone,
-		CustomerName:       customerName,
-		CustomerAddress:    customerAddress,
-		DropoffLat:         order.CustomerLat,
-		DropoffLng:         order.CustomerLng,
-		Timestamp:          time.Now().UnixMilli(),
+		OrderID:               order.TrackingID,
+		UserTrackID:           order.UserTrackID,
+		VendorStoreTrackID:    order.VendorStoreTrackID,
+		Items:                 order.Items,
+		ItemsSummary:          itemsSummary,
+		TotalAmountPaisa:      int64(order.TotalAmount * 100),
+		TotalAmountRupees:     order.TotalAmount,
+		IsCOD:                 isCOD,
+		CustomerPhone:         order.CustomerPhone,
+		CustomerName:          customerName,
+		CustomerAddress:       customerAddress,
+		DropoffLat:            order.CustomerLat,
+		DropoffLng:            order.CustomerLng,
+		Timestamp:             time.Now().UnixMilli(),
+		DeliveryFeeAmountPaisa: order.DeliveryFeeAmountPaisa,
+		RoutingStatus:         order.RoutingStatus,
 	}
 
 	eventBytes, err := json.Marshal(event)

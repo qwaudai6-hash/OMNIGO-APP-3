@@ -170,6 +170,7 @@ class ApiEndpoints {
   static String payfastPayment() => '$paymentBase/payments/payfast/payment';
   static String payfast3DSCallback() => '$paymentBase/payments/payfast/3ds_callback';
   static String savedCards() => '$paymentBase/payments/cards';
+  static String saveCard() => '$paymentBase/payments/cards';
   static String savedCard(String cardId) => '$paymentBase/payments/cards/$cardId';
   static String defaultSavedCard() => '$paymentBase/payments/cards/default';
   static String payfastCharge() => '$orderBase/wallet/payfast/charge';
@@ -294,9 +295,28 @@ class ApiEndpoints {
   static String codDebts(String riderId) =>
       '$paymentBase/payments/cod/debts?rider_id=$riderId';
 
-  // NOTE: jazzcashStatus/easypaisaStatus removed — those orchestrator paths
-  // never existed. Wallet payment state arrives via the /wallet/callback
-  // webhook; poll the order endpoint for confirmation instead.
+  // ── JazzCash / EasyPaisa Wallet (Payment Orchestrator) ──────────────
+  // POST /api/v1/payments/{gateway}/initiate → {gateway, session_id, redirect_url}
+  // Frontend opens redirect_url in WebView for hosted checkout
+  static String walletInitiate(String gateway) =>
+      '$paymentBase/payments/$gateway/initiate';
+  static String walletCallback(String gateway) =>
+      '$paymentBase/payments/$gateway/callback';
+  static String walletStatus(String gateway, String txnRef) =>
+      '$paymentBase/payments/$gateway/status/$txnRef';
+
+  // ── Raast P2M (Instant Bank Transfer) ────────────────────────────
+  static String raastInitiate() => '$paymentBase/payments/raast/initiate';
+  static String raastCallback() => '$paymentBase/payments/raast/callback';
+
+  // ── IBFT (Inter-Bank Fund Transfer) ────────────────────────────
+  static String ibftInitiate() => '$paymentBase/payments/ibft/initiate';
+  static String ibftCallback() => '$paymentBase/payments/ibft/callback';
+
+  // ── QR Payments ─────────────────────────────────────────────
+  static String qrInitiate() => '$paymentBase/payments/qr/initiate';
+  static String qrGenerate() => '$paymentBase/payments/qr/generate';
+  static String qrCallback() => '$paymentBase/payments/qr/callback';
 
   // Disputes
   static String disputeCreate() => '$paymentBase/payments/disputes';

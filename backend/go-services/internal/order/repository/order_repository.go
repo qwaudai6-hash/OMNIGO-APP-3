@@ -359,15 +359,17 @@ func (r *OrderRepository) GetOrdersByCustomerID(ctx context.Context, customerID 
 		limitClause = fmt.Sprintf(" LIMIT $%d", argsLen+1)
 	}
 	query := `
-		SELECT id, order_tracking_id, customer_tracking_id, store_tracking_id, vendor_tracking_id, rider_tracking_id,
-			status, delivery_type, payment_gateway, total_amount, admin_commission, vendor_escrow, delivery_escrow,
-			currency, payment_status, customer_lat, customer_lng, otp_code, device_session_nonce,
-			escrow_released, dispute_status, delivered_at, created_at, updated_at,
-			COALESCE(handover_photo_url, ''), handover_at, COALESCE(handover_notes, ''), COALESCE(handed_over_by_tracking_id, ''),
-			base_product_amount, delivery_fee_amount, total_billed_amount, routing_status
-		FROM orders
+		SELECT o.id, o.order_tracking_id, o.customer_tracking_id, o.store_tracking_id, o.vendor_tracking_id, o.rider_tracking_id,
+			o.status, o.delivery_type, o.payment_gateway, o.total_amount, o.admin_commission, o.vendor_escrow, o.delivery_escrow,
+			o.currency, o.payment_status, o.customer_lat, o.customer_lng, o.otp_code, o.device_session_nonce,
+			o.escrow_released, o.dispute_status, o.delivered_at, o.created_at, o.updated_at,
+			COALESCE(o.handover_photo_url, ''), o.handover_at, COALESCE(o.handover_notes, ''), COALESCE(o.handed_over_by_tracking_id, ''),
+			o.base_product_amount, o.delivery_fee_amount, o.total_billed_amount, o.routing_status,
+			COALESCE(s.store_name, '')
+		FROM orders o
+		LEFT JOIN stores s ON o.store_tracking_id = s.store_tracking_id
 		` + where + `
-		ORDER BY created_at DESC
+		ORDER BY o.created_at DESC
 		` + limitClause
 	rows, err := r.reader.Query(ctx, query, args...)
 	if err != nil {
@@ -386,6 +388,7 @@ func (r *OrderRepository) GetOrdersByCustomerID(ctx context.Context, customerID 
 		var customerLng *float64
 		var createdAt *time.Time
 		var updatedAt *time.Time
+		var storeName string
 
 		err := rows.Scan(
 			&order.ID, &order.TrackingID, &order.UserTrackID, &order.VendorStoreTrackID,
@@ -397,6 +400,7 @@ func (r *OrderRepository) GetOrdersByCustomerID(ctx context.Context, customerID 
 			&createdAt, &updatedAt,
 			&order.HandoverPhotoURL, &order.HandoverAt, &order.HandoverNotes, &order.HandedByTrackingID,
 			&order.BaseProductAmountPaisa, &order.DeliveryFeeAmountPaisa, &order.TotalBilledAmountPaisa, &order.RoutingStatus,
+			&storeName,
 		)
 		if err != nil {
 			return nil, err
@@ -426,6 +430,7 @@ func (r *OrderRepository) GetOrdersByCustomerID(ctx context.Context, customerID 
 		if updatedAt != nil {
 			order.UpdatedAt = *updatedAt
 		}
+		order.StoreName = storeName
 
 		orders = append(orders, &order)
 	}

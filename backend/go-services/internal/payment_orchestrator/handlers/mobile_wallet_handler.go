@@ -7,6 +7,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -173,6 +175,69 @@ func (h *MobileWalletHandler) Callback(gateway string) gin.HandlerFunc {
 	}
 }
 
+// CallbackRedirect handles GET /api/v1/payments/{gateway}/callback — the customer
+// redirect after payment. The authoritative payment confirmation comes via the POST
+// webhook, but this handler catches any GET redirects and returns a simple page
+// that the WebView can detect to close itself.
+func (h *MobileWalletHandler) CallbackRedirect(gateway string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		txnRef := c.Query("pp_TxnRefNo")
+		status := c.Query("pp_ResponseCode")
+		orderID := c.Query("pp_BillReference")
+
+		log.Printf("[mobile-wallet] GET callback for %s: txn=%s status=%s order=%s", gateway, txnRef, status, orderID)
+
+		targetOrigin := walletPostMessageTargetOrigin()
+		successHTML := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head><title>Payment Successful</title></head>
+<body style="font-family:sans-serif;text-align:center;padding:50px;">
+    <h2 style="color:#2e7d32;">Payment Successful!</h2>
+    <p>Your order is being processed.</p>
+    <script>
+        if (window.opener) { window.opener.postMessage({status: 'success', order_id: '%s'}, '%s'); }
+        setTimeout(function() { window.close(); }, 2000);
+    </script>
+</body>
+</html>`, orderID, targetOrigin)
+		failureHTML := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head><title>Payment Cancelled</title></head>
+<body style="font-family:sans-serif;text-align:center;padding:50px;">
+    <h2 style="color:#c62828;">Payment Cancelled</h2>
+    <p>Your payment was not completed.</p>
+    <script>
+        if (window.opener) { window.opener.postMessage({status: 'cancelled', order_id: '%s'}, '%s'); }
+        setTimeout(function() { window.close(); }, 2000);
+    </script>
+</body>
+</html>`, orderID, targetOrigin)
+
+		if status == "000" || status == "00" {
+			c.Header("Content-Type", "text/html; charset=utf-8")
+			c.String(200, successHTML)
+			return
+		}
+
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(200, failureHTML)
+	}
+}
+
+func walletPostMessageTargetOrigin() string {
+	if o := strings.TrimSpace(os.Getenv("PAYFAST_WEB_ORIGIN")); o != "" {
+		return o
+	}
+	if origins := strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS")); origins != "" {
+		first := strings.TrimSpace(strings.Split(origins, ",")[0])
+		if first != "" && first != "*" {
+			return first
+		}
+	}
+	log.Println("WARNING: [mobile-wallet] PAYFAST_WEB_ORIGIN / CORS_ALLOWED_ORIGINS unset — postMessage falling back to wildcard")
+	return "*"
+}
+
 // settleSuccess records the captured payment (idempotently) and hands off to
 // the SettlementWorker via a 'payment_settlement' outbox event — identical
 // completion semantics to the order-service webhook and the PayFast flow.
@@ -316,6 +381,7 @@ func (h *MobileWalletHandler) RegisterRoutes(router *gin.Engine) {
 		gw := gw
 		router.POST("/api/v1/payments/"+gw+"/initiate", middleware.JWTAuth(), h.Initiate(gw))
 		router.POST("/api/v1/payments/"+gw+"/callback", h.Callback(gw))
+		router.GET("/api/v1/payments/"+gw+"/callback", h.CallbackRedirect(gw))
 		router.GET("/api/v1/payments/"+gw+"/status/:txn_ref", middleware.JWTAuth(), h.Status(gw))
 	}
 }

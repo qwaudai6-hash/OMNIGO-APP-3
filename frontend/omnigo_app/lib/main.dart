@@ -18,6 +18,7 @@ import 'core/di/service_locator.dart';
 import 'features/auth/presentation/screens/login_screen.dart';
 import 'features/auth/presentation/screens/dynamic_signup_screen.dart';
 import 'features/customer/presentation/screens/customer_dashboard_screen.dart';
+import 'features/customer/presentation/screens/vendor_chat_selector_screen.dart';
 import 'features/vendor/presentation/screens/vendor_dashboard_screen.dart';
 import 'features/vendor/presentation/screens/vendor_live_map_screen.dart';
 import 'features/vendor/presentation/screens/vendor_inventory_screen.dart';
@@ -262,6 +263,11 @@ class _OmnigoAppState extends State<OmnigoApp> with WidgetsBindingObserver {
         if (settings.name == '/customer-dashboard') {
           return MaterialPageRoute(
             builder: (context) => CustomerDashboardScreen(trackingId: args ?? trackingId ?? 'CUST-0000'),
+          );
+        }
+        if (settings.name == '/vendor-chat-selector') {
+          return MaterialPageRoute(
+            builder: (context) => const VendorChatSelectorScreen(),
           );
         }
         if (settings.name == '/vendor-dashboard') {

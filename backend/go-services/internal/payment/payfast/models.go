@@ -160,7 +160,62 @@ type CustomerValidationResponse struct {
 	Data3DSHTML                  string         `json:"data_3ds_html"`
 	Data3DSSecureID              string         `json:"data_3ds_secureid"`
 	Data3DSGatewayRecommendation string         `json:"data_3ds_gatewayrecommendation"`
-	ECI                          FlexibleString `json:"eci"`
+}
+
+// InstrumentListResponse represents the response from GET /list/instruments
+type InstrumentListResponse struct {
+	ResponseCode    string               `json:"response_code"`
+	ResponseMessage string               `json:"response_message"`
+	Instruments     []Instrument         `json:"instruments"`
+}
+
+// Instrument represents a single payment instrument (bank/wallet/card)
+type Instrument struct {
+	Code            string `json:"code"`
+	Name            string `json:"name"`
+	Type            string `json:"type"` // card, bank, wallet
+	AccountTypeID   string `json:"account_type_id"`
+	BankCode        string `json:"bank_code,omitempty"`
+	LogoURL         string `json:"logo_url,omitempty"`
+	Active          bool   `json:"active"`
+	SortingPriority int    `json:"sorting_priority"`
+}
+
+// ListInstrumentsRequest is empty for PayFast as the endpoint needs no body
+type ListInstrumentsRequest struct {
+	// Currently no additional parameters needed for /list/instruments
+}
+
+// IBANValidationRequest for IBAN validation endpoint
+type IBANValidationRequest struct {
+	IBAN       string `json:"iban"`
+	BankCode   string `json:"bank_code,omitempty"`
+	MerchantID string `json:"merchant_id,omitempty"`
+}
+
+// IBANValidationResponse for IBAN validation
+type IBANValidationResponse struct {
+	ResponseCode    string `json:"response_code"`
+	ResponseMessage string `json:"response_message"`
+	IBAN            string `json:"iban"`
+	BankName        string `json:"bank_name"`
+	AccountNumber   string `json:"account_number,omitempty"`
+	Valid           bool   `json:"valid"`
+}
+
+// CNICValidationRequest for CNIC validation
+type CNICValidationRequest struct {
+	CNIC       string `json:"cnic"`
+	MerchantID string `json:"merchant_id,omitempty"`
+}
+
+// CNICValidationResponse for CNIC validation
+type CNICValidationResponse struct {
+	ResponseCode    string `json:"response_code"`
+	ResponseMessage string `json:"response_message"`
+	CNIC           string `json:"cnic"`
+	Valid          bool   `json:"valid"`
+	FormattedCNIC  string `json:"formatted_cnic,omitempty"`
 }
 
 // InitiateTransactionRequest contains fields for POST /transaction

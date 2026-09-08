@@ -175,6 +175,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.white,
+      resizeToAvoidBottomInset: true,
       appBar: AppBar(
         backgroundColor: Colors.white,
         elevation: 0,
@@ -212,6 +213,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         ),
       ),
       body: SafeArea(
+        bottom: false,
         child: Column(
           children: [
             Expanded(
@@ -319,51 +321,48 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         top: 8,
         bottom: MediaQuery.of(context).viewInsets.bottom + 8,
       ),
-      child: SafeArea(
-        top: false,
-        child: Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _inputController,
-                textInputAction: TextInputAction.send,
-                onSubmitted: (_) => _send(),
-                decoration: InputDecoration(
-                  hintText: 'Message...',
-                  filled: true,
-                  fillColor: Colors.grey.shade100,
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(20),
-                    borderSide: BorderSide.none,
-                  ),
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _inputController,
+              textInputAction: TextInputAction.send,
+              onSubmitted: (_) => _send(),
+              decoration: InputDecoration(
+                hintText: 'Message...',
+                filled: true,
+                fillColor: Colors.grey.shade100,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(20),
+                  borderSide: BorderSide.none,
                 ),
               ),
             ),
-            const SizedBox(width: 8),
-            Material(
-              color: _isSending ? Colors.grey.shade300 : Colors.black,
-              shape: const CircleBorder(),
-              child: InkWell(
-                customBorder: const CircleBorder(),
-                onTap: _isSending ? null : _send,
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: _isSending
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.black,
-                          ),
-                        )
-                      : const Icon(Icons.send, color: Color(0xFFCAFF33)),
-                ),
+          ),
+          const SizedBox(width: 8),
+          Material(
+            color: _isSending ? Colors.grey.shade300 : Colors.black,
+            shape: const CircleBorder(),
+            child: InkWell(
+              customBorder: const CircleBorder(),
+              onTap: _isSending ? null : _send,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: _isSending
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.black,
+                        ),
+                      )
+                    : const Icon(Icons.send, color: Color(0xFFCAFF33)),
               ),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

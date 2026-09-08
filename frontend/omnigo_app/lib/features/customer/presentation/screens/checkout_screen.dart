@@ -1,9 +1,11 @@
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_stripe/flutter_stripe.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/services/cart_provider.dart';
 import '../../../../core/network/api_client.dart';
@@ -11,6 +13,7 @@ import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/di/service_locator.dart';
 import '../../../shared/presentation/widgets/map_libre_map_widget.dart';
 import '../widgets/payfast_card_sheet.dart';
+import 'vendor_chat_selector_screen.dart';
 import 'order_success_screen.dart';
 
 class CheckoutScreen extends StatefulWidget {
@@ -50,22 +53,52 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     _fetchVendorStoreInfo();
   }
 
+  static const double _baseFare = 50.0;
+  static const double _perKmRate = 15.0;
+
+  double _calculateHaversineFee(double storeLat, double storeLng, double dropoffLat, double dropoffLng) {
+    const double earthRadius = 6371;
+    final dLat = _toRadians(dropoffLat - storeLat);
+    final dLng = _toRadians(dropoffLng - storeLng);
+    final a = sin(dLat / 2) * sin(dLat / 2) + cos(_toRadians(storeLat)) * cos(_toRadians(dropoffLat)) * sin(dLng / 2) * sin(dLng / 2);
+    final c = 2 * atan2(sqrt(a), sqrt(1 - a));
+    final km = earthRadius * c;
+    final hour = DateTime.now().hour;
+    final multiplier = (hour >= 23 || hour <= 6) ? 1.5 : 1.0;
+    return (_baseFare + (_perKmRate * km)) * multiplier;
+  }
+
+  double _toRadians(double deg) => deg * pi / 180;
+
   Future<void> _fetchVendorStoreInfo() async {
     final cart = context.read<CartProvider>();
     final storeId = cart.currentStoreId;
     if (storeId == null) return;
     try {
-      final data = await sl<ApiClient>().get('/vendor/stores/me') as Map<String, dynamic>;
+      final data = await sl<ApiClient>().get(
+        ApiEndpoints.vendorStore(storeId),
+      ) as Map<String, dynamic>;
       if (mounted) {
+        String storeName = (data['store_name'] as String?) ?? data['name'] as String? ?? '';
+        if (storeName.isEmpty) storeName = 'Store #$storeId';
+        String storeAddress = (data['address'] as String?) ??
+                              (data['store_address'] as String?) ??
+                              (data['location'] as String?) ?? '';
         setState(() {
-          _storeName = (data['store_name'] as String?) ?? 'Store';
-          _storeAddress = (data['address'] as String?) ?? '';
-          _storeLat = (data['latitude'] as num?)?.toDouble();
-          _storeLng = (data['longitude'] as num?)?.toDouble();
+          _storeName = storeName;
+          _storeAddress = storeAddress;
+          _storeLat = (data['latitude'] as num?)?.toDouble() ?? (data['lat'] as num?)?.toDouble();
+          _storeLng = (data['longitude'] as num?)?.toDouble() ?? (data['lng'] as num?)?.toDouble();
         });
       }
     } catch (e) {
       debugPrint('Could not fetch vendor store info: $e');
+      if (mounted) {
+        setState(() {
+          _storeName = 'Store #$storeId';
+          _storeAddress = '';
+        });
+      }
     }
   }
 
@@ -203,7 +236,14 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     final storeId = cart.currentStoreId;
     if (storeId == null || storeId.isEmpty) return;
 
-    setState(() => _deliveryFeeLoading = true);
+    setState(() {
+      _deliveryFeeLoading = true;
+      _routingStatus = 'CALCULATING';
+    });
+
+    double? fee;
+    String routingStatus = 'FALLBACK_HAVERSINE';
+
     try {
       final resp = await sl<ApiClient>().post(
         ApiEndpoints.deliveryEstimateFee(),
@@ -213,25 +253,38 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           'dropoff_lng': _deliveryLocation!.longitude,
         },
       );
-      if (mounted && resp != null) {
-        final fee = (resp['delivery_fee'] is num) ? (resp['delivery_fee'] as num).toDouble() : 0.0;
-        final routing = (resp['routing_status'] as String?) ?? 'DYNAMIC_CALCULATED';
-        setState(() {
-          _deliveryFee = fee;
-          _routingStatus = routing;
-          _deliveryFeeLoading = false;
-        });
-        cart.setDeliveryFee(fee);
+      if (resp != null) {
+        fee = (resp['delivery_fee'] is num) ? (resp['delivery_fee'] as num).toDouble() : null;
+        routingStatus = (resp['routing_status'] as String?) ?? 'DYNAMIC_CALCULATED';
       }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _deliveryFee = 0.0;
-          _routingStatus = 'FAILED_CALCULATION';
-          _deliveryFeeLoading = false;
-        });
-        cart.setDeliveryFee(0.0);
+    } catch (_) {
+      // Silently fallback to local Haversine calculation
+    }
+
+    if (fee == null || fee <= 0) {
+      // Fallback: calculate fee locally using Haversine
+      if (_storeLat != null && _storeLng != null) {
+        fee = _calculateHaversineFee(
+          _storeLat!,
+          _storeLng!,
+          _deliveryLocation!.latitude,
+          _deliveryLocation!.longitude,
+        );
+        routingStatus = 'FALLBACK_HAVERSINE';
+      } else {
+        // Default Karachi center coordinates
+        fee = _calculateHaversineFee(24.8607, 67.0011, _deliveryLocation!.latitude, _deliveryLocation!.longitude);
+        routingStatus = 'FALLBACK_HAVERSINE';
       }
+    }
+
+    if (mounted) {
+      setState(() {
+        _deliveryFee = fee ?? 0.0;
+        _routingStatus = routingStatus;
+        _deliveryFeeLoading = false;
+      });
+      cart.setDeliveryFee(fee ?? 0.0);
     }
   }
 
@@ -478,6 +531,193 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         if (status == 'settlement_pending' || status == 'success' || status == 'approved') {
           // Payment authorized, proceed to confirmation polling
         }
+      } else if (_selectedPaymentMethod == 'jazzcash' || _selectedPaymentMethod == 'easypaisa') {
+        // JazzCash / EasyPaisa hosted checkout flow
+        try {
+          final initiateResponse = await apiClient.post(
+            ApiEndpoints.walletInitiate(_selectedPaymentMethod),
+            {
+              'order_id': realOrderTrackingId,
+              'amount': cart.totalAmount,
+              'currency': 'PKR',
+              'return_url': '${ApiEndpoints.gatewayBase}/api/v1/payments/${_selectedPaymentMethod}/callback',
+              'cancel_url': '${ApiEndpoints.gatewayBase}/checkout',
+            },
+            idempotencyKey: 'checkout_${_selectedPaymentMethod}_$_checkoutSessionNonce',
+          ) as Map<String, dynamic>;
+
+          final redirectUrl = initiateResponse['redirect_url']?.toString();
+          if (redirectUrl == null || redirectUrl.isEmpty) {
+            throw Exception('Failed to get redirect URL from payment gateway');
+          }
+
+          // PF-WALLET FIX: Open gateway redirect URL in WebView for hosted checkout
+          if (mounted) {
+            final paymentCompleted = await _openWalletWebView(context, redirectUrl);
+            if (!paymentCompleted) {
+              // User cancelled or payment failed
+              await _cancelOrderOnFailure(realOrderTrackingId.toString(), '${_selectedPaymentMethod} payment cancelled');
+              if (mounted) setState(() => _isLoading = false);
+              return;
+            }
+          }
+        } catch (e) {
+          if (_isAlreadyPaidError(e)) {
+            await cart.clearCart();
+            if (mounted) {
+              await Navigator.pushAndRemoveUntil(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (_) => OrderSuccessScreen(trackingId: realOrderTrackingId.toString()),
+                ),
+                (route) => route.isFirst,
+              );
+            }
+            return;
+          }
+          await _cancelOrderOnFailure(realOrderTrackingId.toString(), '${_selectedPaymentMethod} payment failed');
+          final userMsg = _getUserFriendlyError(e, '${_selectedPaymentMethod} payment failed. Please try again.');
+          throw Exception(userMsg);
+        }
+      } else if (_selectedPaymentMethod == 'raast') {
+        // Raast P2M - instant bank transfer via PayFast/SBP
+        try {
+          final initiateResponse = await apiClient.post(
+            ApiEndpoints.raastInitiate(),
+            {
+              'order_id': realOrderTrackingId,
+              'amount': cart.totalAmount,
+              'currency': 'PKR',
+              'return_url': '${ApiEndpoints.gatewayBase}/api/v1/payments/raast/callback',
+              'cancel_url': '${ApiEndpoints.gatewayBase}/checkout',
+            },
+            idempotencyKey: 'checkout_raast_$_checkoutSessionNonce',
+          ) as Map<String, dynamic>;
+
+          final redirectUrl = initiateResponse['redirect_url']?.toString();
+          if (redirectUrl == null || redirectUrl.isEmpty) {
+            throw Exception('Failed to get redirect URL from Raast');
+          }
+
+          // Open Raast redirect URL in WebView for bank selection and authentication
+          if (mounted) {
+            final paymentCompleted = await _openWalletWebView(context, redirectUrl);
+            if (!paymentCompleted) {
+              await _cancelOrderOnFailure(realOrderTrackingId.toString(), 'Raast payment cancelled');
+              if (mounted) setState(() => _isLoading = false);
+              return;
+            }
+          }
+        } catch (e) {
+          if (_isAlreadyPaidError(e)) {
+            await cart.clearCart();
+            if (mounted) {
+              await Navigator.pushAndRemoveUntil(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (_) => OrderSuccessScreen(trackingId: realOrderTrackingId.toString()),
+                ),
+                (route) => route.isFirst,
+              );
+            }
+            return;
+          }
+          await _cancelOrderOnFailure(realOrderTrackingId.toString(), 'Raast payment failed');
+          final userMsg = _getUserFriendlyError(e, 'Raast payment failed. Please try again.');
+          throw Exception(userMsg);
+        }
+      } else if (_selectedPaymentMethod == 'ibft') {
+        // IBFT - Inter-Bank Fund Transfer via PayFast
+        try {
+          final initiateResponse = await apiClient.post(
+            ApiEndpoints.ibftInitiate(),
+            {
+              'order_id': realOrderTrackingId,
+              'amount': cart.totalAmount,
+              'currency': 'PKR',
+              'return_url': '${ApiEndpoints.gatewayBase}/api/v1/payments/ibft/callback',
+              'cancel_url': '${ApiEndpoints.gatewayBase}/checkout',
+            },
+            idempotencyKey: 'checkout_ibft_$_checkoutSessionNonce',
+          ) as Map<String, dynamic>;
+
+          final redirectUrl = initiateResponse['redirect_url']?.toString();
+          if (redirectUrl == null || redirectUrl.isEmpty) {
+            throw Exception('Failed to get redirect URL from IBFT');
+          }
+
+          if (mounted) {
+            final paymentCompleted = await _openWalletWebView(context, redirectUrl);
+            if (!paymentCompleted) {
+              await _cancelOrderOnFailure(realOrderTrackingId.toString(), 'IBFT payment cancelled');
+              if (mounted) setState(() => _isLoading = false);
+              return;
+            }
+          }
+        } catch (e) {
+          if (_isAlreadyPaidError(e)) {
+            await cart.clearCart();
+            if (mounted) {
+              await Navigator.pushAndRemoveUntil(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (_) => OrderSuccessScreen(trackingId: realOrderTrackingId.toString()),
+                ),
+                (route) => route.isFirst,
+              );
+            }
+            return;
+          }
+          await _cancelOrderOnFailure(realOrderTrackingId.toString(), 'IBFT payment failed');
+          final userMsg = _getUserFriendlyError(e, 'IBFT payment failed. Please try again.');
+          throw Exception(userMsg);
+        }
+      } else if (_selectedPaymentMethod == 'qr') {
+        // QR Code Payment
+        try {
+          final initiateResponse = await apiClient.post(
+            ApiEndpoints.qrInitiate(),
+            {
+              'order_id': realOrderTrackingId,
+              'amount': cart.totalAmount,
+              'currency': 'PKR',
+              'return_url': '${ApiEndpoints.gatewayBase}/api/v1/payments/qr/callback',
+              'cancel_url': '${ApiEndpoints.gatewayBase}/checkout',
+            },
+            idempotencyKey: 'checkout_qr_$_checkoutSessionNonce',
+          ) as Map<String, dynamic>;
+
+          final redirectUrl = initiateResponse['redirect_url']?.toString();
+          if (redirectUrl == null || redirectUrl.isEmpty) {
+            throw Exception('Failed to get redirect URL from QR payment');
+          }
+
+          if (mounted) {
+            final paymentCompleted = await _openWalletWebView(context, redirectUrl);
+            if (!paymentCompleted) {
+              await _cancelOrderOnFailure(realOrderTrackingId.toString(), 'QR payment cancelled');
+              if (mounted) setState(() => _isLoading = false);
+              return;
+            }
+          }
+        } catch (e) {
+          if (_isAlreadyPaidError(e)) {
+            await cart.clearCart();
+            if (mounted) {
+              await Navigator.pushAndRemoveUntil(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (_) => OrderSuccessScreen(trackingId: realOrderTrackingId.toString()),
+                ),
+                (route) => route.isFirst,
+              );
+            }
+            return;
+          }
+          await _cancelOrderOnFailure(realOrderTrackingId.toString(), 'QR payment failed');
+          final userMsg = _getUserFriendlyError(e, 'QR payment failed. Please try again.');
+          throw Exception(userMsg);
+        }
       }
 
       final trackingId = realOrderTrackingId.toString();
@@ -696,8 +936,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                     _buildPaymentOption('payfast', 'PayFast (Debit/Credit Card & Bank)', Icons.payment_outlined),
                     _buildPaymentOption('card', 'Credit/Debit Card (International)', Icons.credit_card),
                     _buildPaymentOption('wallet', 'Wallet Balance', Icons.account_balance_wallet),
-                    _buildPaymentOption('easypaisa', 'EasyPaisa (Mobile Account)', Icons.account_balance_wallet, isComingSoon: true),
-                    _buildPaymentOption('jazzcash', 'JazzCash (Mobile Account)', Icons.phone_android, isComingSoon: true),
+                    _buildPaymentOption('easypaisa', 'EasyPaisa (Mobile Account)', Icons.account_balance_wallet),
+                    _buildPaymentOption('jazzcash', 'JazzCash (Mobile Account)', Icons.phone_android),
+                    _buildPaymentOption('raast', 'Raast (Instant Bank Transfer)', Icons.account_balance),
+                    _buildPaymentOption('ibft', 'IBFT (Bank Transfer)', Icons.account_balance),
+                    _buildPaymentOption('qr', 'QR Code Payment', Icons.qr_code),
                   ],
                 ),
                 isActive: _currentStep >= 1,
@@ -752,8 +995,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                                 child: ClipRRect(
                                   borderRadius: BorderRadius.circular(8),
                                   child: MapLibreMapWidget(
-                                    initialCenter: LatLng(_storeLat!, _storeLng!),
-                                    initialZoom: 15,
+                                    initialCenter: _deliveryLocation != null
+                                        ? _deliveryLocation!
+                                        : LatLng(_storeLat!, _storeLng!),
+                                    initialZoom: 14,
                                     myLocationEnabled: false,
                                     myLocationTrackingMode: MyLocationTrackingMode.none,
                                     markers: {
@@ -761,7 +1006,17 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                                         position: LatLng(_storeLat!, _storeLng!),
                                         iconImage: 'location_dot',
                                       ),
+                                      if (_deliveryLocation != null)
+                                        'delivery': MarkerData(
+                                          position: _deliveryLocation!,
+                                          iconImage: 'poi',
+                                        ),
                                     },
+                                    polylines: _deliveryLocation != null
+                                        ? [
+                                            [LatLng(_storeLat!, _storeLng!), _deliveryLocation!]
+                                          ]
+                                        : [],
                                   ),
                                 ),
                               ),
@@ -769,6 +1024,20 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                           ),
                         ),
                         const SizedBox(height: 12),
+                        SizedBox(
+                          width: double.infinity,
+                          child: TextButton.icon(
+                            style: TextButton.styleFrom(
+                              foregroundColor: AppTheme.blackAccent,
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                            ),
+                            onPressed: () {
+                              Navigator.push(context, MaterialPageRoute<void>(builder: (_) => const VendorChatSelectorScreen()));
+                            },
+                            icon: const Icon(Icons.chat_bubble_outline, size: 18),
+                            label: const Text('Chat with Vendor about this order', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                          ),
+                        ),
                       ],
                       ...cart.items.values.map((item) => Padding(
                         padding: const EdgeInsets.only(bottom: 8.0),
@@ -907,4 +1176,89 @@ Future<bool> _waitForPaymentConfirmation(
     } catch (_) {/* transient network errors — keep polling */}
   }
   return false;
+}
+
+/// Opens a WebView for JazzCash/EasyPaisa hosted checkout redirect URL.
+/// Returns true if payment completed (gateway redirected to success), false if cancelled/failed.
+Future<bool> _openWalletWebView(BuildContext context, String redirectUrl) async {
+  final controller = WebViewController();
+  await controller.setJavaScriptMode(JavaScriptMode.unrestricted);
+
+  bool paymentCompleted = false;
+  bool hasLoaded = false;
+
+  await controller.setNavigationDelegate(NavigationDelegate(
+    onPageStarted: (url) {
+      hasLoaded = true;
+      // Check if redirected to success/cancel page
+      if (url.contains('success') || url.contains('paid') || url.contains('order-success')) {
+        paymentCompleted = true;
+        Navigator.of(context, rootNavigator: true).pop(true);
+      } else if (url.contains('cancel') || url.contains('failed') || url.contains('error')) {
+        paymentCompleted = false;
+        Navigator.of(context, rootNavigator: true).pop(false);
+      }
+    },
+    onPageFinished: (url) {
+      // If page finished without navigating to success/cancel, it might be the gateway's final page
+      if (!paymentCompleted && hasLoaded) {
+        if (url.contains('success') || url.contains('paid') || url.contains('order-success')) {
+          paymentCompleted = true;
+          Navigator.of(context, rootNavigator: true).pop(true);
+        }
+      }
+    },
+    onWebResourceError: (error) {
+      debugPrint('WebView error: $error');
+      if (!paymentCompleted) {
+        Navigator.of(context, rootNavigator: true).pop(false);
+      }
+    },
+  ));
+
+  await controller.loadRequest(Uri.parse(redirectUrl));
+
+  if (!context.mounted) return false;
+
+  final result = await showDialog<bool>(
+    context: context,
+    barrierDismissible: false,
+    builder: (dialogCtx) {
+      return Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: SizedBox(
+          height: MediaQuery.of(dialogCtx).size.height * 0.7,
+          width: double.maxFinite,
+          child: Column(
+            children: [
+              AppBar(
+                title: const Text('Payment Gateway', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                automaticallyImplyLeading: false,
+                actions: [
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: () {
+                      Navigator.pop(dialogCtx, false);
+                    },
+                  ),
+                ],
+              ),
+              Expanded(
+                child: WebViewWidget(controller: controller),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(8.0),
+                child: OutlinedButton(
+                  onPressed: () => Navigator.pop(dialogCtx, paymentCompleted),
+                  child: Text(paymentCompleted ? 'Continue' : 'Cancel Payment'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+
+  return result ?? false;
 }

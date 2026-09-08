@@ -146,6 +146,42 @@ func MapIssuerResponseCode(code string) string {
 		return "OTP could not be verified. Please request a new OTP."
 	case "91", "96":
 		return "Your issuing bank or 1LINK switch is temporarily unavailable. Please retry in a few moments."
+	case "001":
+		return "Invalid merchant configuration. Please contact support."
+	case "013":
+		return "Transaction amount exceeds maximum limit allowed."
+	case "015":
+		return "Invalid transaction currency or format."
+	case "041":
+		return "Card issuer is temporarily unavailable. Please retry."
+	case "126":
+		return "Your card has been blocked by the bank. Please contact your bank."
+	case "423":
+		return "Transaction could not be processed at this time. Please retry."
+	case "801":
+		return "OTP verification timeout. Please request a new OTP."
+	case "802":
+		return "OTP has expired. Please request a new OTP."
+	case "807":
+		return "Maximum OTP verification attempts exceeded. Please request a new OTP."
+	case "808":
+		return "OTP verification failed. Please check and retry."
+	case "809":
+		return "OTP has been resend to your registered mobile/email."
+	case "810":
+		return "OTP verified successfully."
+	case "811":
+		return "OTP could not be sent. Please try again."
+	case "812":
+		return "OTP delivery failed. Please try again or use another verification method."
+	case "813":
+		return "OTP verification is required to complete this transaction."
+	case "850":
+		return "Beneficiary bank is not available for this transfer. Please try another method."
+	case "851":
+		return "Transfer type not allowed for this account. Please contact your bank."
+	case "9000":
+		return "System error. Please contact support if problem persists."
 	default:
 		return "Payment was declined by issuing bank."
 	}

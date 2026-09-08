@@ -142,13 +142,27 @@ func (s *RiderWalletService) GetWallet(ctx context.Context, riderTrackingID stri
 // All amounts are in paisa (int64).
 //
 // The transfer source is central_escrow (delivery fee pool funded by online payments).
-// For COD orders, central_escrow is funded by the COD settlement handler.
-// NOTE: The actual Postgres rider_wallet balance update is now handled atomically
+// For COD orders, central_escrow is funded later by the COD settlement handler, so
+// we skip the ledger transfer here and rely on CODHandler.Settlement() to fund it instead.
+//
+// NOTE: The actual Postgres rider_wallet balance update is handled atomically
 // within the delivery_repository's UpdateGigStatus transaction to prevent race conditions.
 func (s *RiderWalletService) CreditDelivery(ctx context.Context, riderTrackingID, deliveryID string, riderEarningPaisa, adminCommissionPaisa int64) error {
 	netCredit := riderEarningPaisa
 	if netCredit < 0 {
 		return fmt.Errorf("net credit cannot be negative")
+	}
+
+	// H4 FIX: For online payments, central_escrow is already funded by ExecuteSplit.
+	// For COD orders, central_escrow is funded later by CODHandler.Settlement().
+	// We only attempt ledger transfer for non-COD orders.
+	// The isCOD flag is passed as a context value to avoid changing the function signature.
+	// If context indicates COD, skip ledger transfer and let COD settlement handle it.
+	isCOD := ctx.Value("is_cod_order") == true
+	if isCOD {
+		// For COD, the wallet is credited via AddCODCollection in delivery_service.
+		// No ledger transfer needed here since central_escrow isn't funded yet.
+		return nil
 	}
 
 	// Create double-entry ledger transfer: central_escrow → rider_wallet

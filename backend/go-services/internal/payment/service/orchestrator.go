@@ -85,6 +85,39 @@ func NewOrchestrator() *Orchestrator {
 		)
 	}
 
+	// Raast P2M - instant bank transfer via PayFast
+	if raastMerchantID := os.Getenv("RAAST_MERCHANT_ID"); raastMerchantID != "" {
+		raastSecuredKey := os.Getenv("RAAST_SECURED_KEY")
+		raastBaseURL := os.Getenv("RAAST_API_URL")
+		gateways["raast"] = NewRaastService(
+			raastMerchantID,
+			raastSecuredKey,
+			raastBaseURL,
+		)
+	}
+
+	// IBFT - Inter-Bank Fund Transfer via PayFast
+	if ibftMerchantID := os.Getenv("IBFT_MERCHANT_ID"); ibftMerchantID != "" {
+		ibftSecuredKey := os.Getenv("IBFT_SECURED_KEY")
+		ibftBaseURL := os.Getenv("IBFT_API_URL")
+		gateways["ibft"] = NewIBFTService(
+			ibftMerchantID,
+			ibftSecuredKey,
+			ibftBaseURL,
+		)
+	}
+
+	// QR Payments via PayFast
+	if qrMerchantID := os.Getenv("QR_MERCHANT_ID"); qrMerchantID != "" {
+		qrSecuredKey := os.Getenv("QR_SECURED_KEY")
+		qrBaseURL := os.Getenv("QR_API_URL")
+		gateways["qr"] = NewQRService(
+			qrMerchantID,
+			qrSecuredKey,
+			qrBaseURL,
+		)
+	}
+
 	return &Orchestrator{
 		gateways: gateways,
 	}
@@ -126,6 +159,21 @@ func (o *Orchestrator) Refund(ctx context.Context, gatewayName string, transacti
 		return fmt.Errorf("gateway %s is not configured", gatewayName)
 	}
 	return gateway.Refund(ctx, transactionID, amount)
+}
+
+func (o *Orchestrator) GenerateQR(ctx context.Context, gatewayName string, req QRGenerateRequest) (QRGenerateResponse, error) {
+	gateway, ok := o.gateways[gatewayName]
+	if !ok {
+		return QRGenerateResponse{}, fmt.Errorf("unsupported or unconfigured payment gateway: %s", gatewayName)
+	}
+	if !gateway.IsConfigured() {
+		return QRGenerateResponse{}, fmt.Errorf("gateway %s is not configured", gatewayName)
+	}
+	qrSvc, ok := gateway.(*QRService)
+	if !ok {
+		return QRGenerateResponse{}, fmt.Errorf("gateway %s does not support QR generation", gatewayName)
+	}
+	return qrSvc.GenerateQR(ctx, req)
 }
 
 // AvailableGateways returns a list of configured gateway names for the frontend.

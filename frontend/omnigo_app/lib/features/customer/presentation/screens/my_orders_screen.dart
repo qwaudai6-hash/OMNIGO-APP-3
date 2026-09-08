@@ -319,7 +319,7 @@ class _MyOrdersScreenState extends State<MyOrdersScreen> with SingleTickerProvid
     final status = order['status']?.toString() ?? 'pending';
     final createdAt = order['created_at']?.toString() ?? '';
     final products = order['products'] as List<dynamic>? ?? [];
-    final paymentMethod = order['payment_method']?.toString() ?? 'Unknown';
+    final paymentMethod = order['payment_method']?.toString().toUpperCase() ?? order['payment_gateway']?.toString().toUpperCase() ?? 'N/A';
 
     final statusColor = _getStatusColor(status);
     final statusIcon = _getStatusIcon(status);

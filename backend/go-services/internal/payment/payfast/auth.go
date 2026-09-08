@@ -17,13 +17,22 @@ const maxAuthResponseSize = 64 * 1024 // 64 KB limit
 
 // TokenManager provides thread-safe token acquisition, caching, and refresh logic.
 type TokenManager struct {
-	client     *http.Client
-	baseURL    string
-	merchantID string
-	securedKey string
+	client         *http.Client
+	baseURL        string
+	merchantID     string
+	securedKey     string
 	circuitBreaker *CircuitBreaker
 	mu             sync.RWMutex
 	cache          TokenCache
+}
+
+// TokenContext holds optional basket context for GetAccessToken.
+// Per PayFast PHP sample, GetAccessToken requires BASKET_ID, TXNAMT, CURRENCY_CODE.
+type TokenContext struct {
+	BasketID     string
+	TxnAmt       string
+	CurrencyCode string
+	ApplyDiscount string
 }
 
 // NewTokenManager initializes a new TokenManager securely.
@@ -38,7 +47,8 @@ func NewTokenManager(client *http.Client, baseURL, merchantID, securedKey string
 }
 
 // GetToken returns a valid token from cache or fetches a fresh token if expired.
-func (tm *TokenManager) GetToken(ctx context.Context, customerIP string) (string, error) {
+// Pass TokenContext with basket details for PayFast APPS UAT endpoints.
+func (tm *TokenManager) GetToken(ctx context.Context, customerIP string, tokenCtx ...*TokenContext) (string, error) {
 	tm.mu.RLock()
 	if tm.cache.AccessToken != "" && time.Now().Before(tm.cache.ExpiresAt) {
 		token := tm.cache.AccessToken
@@ -55,11 +65,16 @@ func (tm *TokenManager) GetToken(ctx context.Context, customerIP string) (string
 		return tm.cache.AccessToken, nil
 	}
 
+	var tc *TokenContext
+	if len(tokenCtx) > 0 {
+		tc = tokenCtx[0]
+	}
+
 	var token, expiresInStr string
 	var err error
 	if tm.circuitBreaker != nil {
 		err = tm.circuitBreaker.Execute(func() error {
-			t, exp, fErr := tm.fetchToken(ctx)
+			t, exp, fErr := tm.fetchToken(ctx, tc)
 			if fErr != nil {
 				return fErr
 			}
@@ -68,7 +83,7 @@ func (tm *TokenManager) GetToken(ctx context.Context, customerIP string) (string
 			return nil
 		})
 	} else {
-		token, expiresInStr, err = tm.fetchToken(ctx)
+		token, expiresInStr, err = tm.fetchToken(ctx, tc)
 	}
 
 	if err != nil {
@@ -88,7 +103,7 @@ func (tm *TokenManager) GetToken(ctx context.Context, customerIP string) (string
 	return token, nil
 }
 
-func (tm *TokenManager) fetchToken(ctx context.Context) (string, string, error) {
+func (tm *TokenManager) fetchToken(ctx context.Context, tc *TokenContext) (string, string, error) {
 	if tm.merchantID == "" || tm.securedKey == "" {
 		return "", "", ErrNotConfigured
 	}
@@ -104,10 +119,35 @@ func (tm *TokenManager) fetchToken(ctx context.Context) (string, string, error) 
 			authURL = tm.baseURL + "/Transaction/GetAccessToken"
 		}
 	}
+
+	// Per PayFast PHP sample: GetAccessToken requires MERCHANT_ID, SECURED_KEY,
+	// BASKET_ID, TXNAMT, CURRENCY_CODE, APPLY_DISCOUNT
 	formData := url.Values{}
-	formData.Set("merchant_id", tm.merchantID)
-	formData.Set("grant_type", "client_credentials")
-	formData.Set("secured_key", tm.securedKey)
+	formData.Set("MERCHANT_ID", tm.merchantID)
+	formData.Set("SECURED_KEY", tm.securedKey)
+	if tc != nil {
+		if tc.BasketID != "" {
+			formData.Set("BASKET_ID", tc.BasketID)
+		}
+		if tc.TxnAmt != "" {
+			formData.Set("TXNAMT", tc.TxnAmt)
+		}
+		if tc.CurrencyCode != "" {
+			formData.Set("CURRENCY_CODE", tc.CurrencyCode)
+		} else {
+			formData.Set("CURRENCY_CODE", "PKR")
+		}
+		if tc.ApplyDiscount != "" {
+			formData.Set("APPLY_DISCOUNT", tc.ApplyDiscount)
+		} else {
+			formData.Set("APPLY_DISCOUNT", "true")
+		}
+	} else {
+		formData.Set("BASKET_ID", "PF"+strconv.FormatInt(time.Now().UnixNano(), 10))
+		formData.Set("TXNAMT", "1")
+		formData.Set("CURRENCY_CODE", "PKR")
+		formData.Set("APPLY_DISCOUNT", "true")
+	}
 
 	var resp *http.Response
 	var err error
