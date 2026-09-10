@@ -217,3 +217,52 @@ type DeliveryCounterBid struct {
 	Status       string    `json:"status"`
 	CreatedAt    time.Time `json:"created_at"`
 }
+
+// ReturnGig represents a product return pickup/delivery task for riders.
+// Customer returns product → rider picks up → rider delivers to vendor store.
+type ReturnGig struct {
+	ID                  int       `json:"id"`
+	TrackingID          string    `json:"tracking_id"`          // e.g. RTNG-xxxx
+	ReturnRequestID     string    `json:"return_request_id"`    // links to return_requests.id
+	OrderTrackingID     string    `json:"order_tracking_id"`
+	VendorStoreTrackID  string    `json:"vendor_store_tracking_id"`
+	AssignedRiderID     string    `json:"assigned_rider_id,omitempty"`
+	CustomerTrackID     string    `json:"customer_tracking_id"`
+	ReturnReason        string    `json:"return_reason"`
+	ItemsSummary        string    `json:"items_summary"`
+	CustomerName        string    `json:"customer_name"`
+	CustomerAddress     string    `json:"customer_address"`
+	CustomerPhone       string    `json:"customer_phone"`
+	Status              string    `json:"status"` // broadcasting, accepted, picked_up, in_transit, completed, failed
+	RiderEarning        float64   `json:"rider_earning"`
+	DeliveryFee         float64   `json:"delivery_fee"`
+	PickupLat           float64   `json:"pickup_lat"`
+	PickupLng           float64   `json:"pickup_lng"`
+	DropoffLat          float64   `json:"dropoff_lat"`
+	DropoffLng          float64   `json:"dropoff_lng"`
+	OTPCode             string    `json:"otp_code,omitempty"`
+	PickupPhotoURL      string    `json:"pickup_photo_url,omitempty"`
+	DeliveryPhotoURL    string    `json:"delivery_photo_url,omitempty"`
+	EligibleRiders      []string  `json:"eligible_riders,omitempty"`
+	IsReturn            bool      `json:"is_return"` // always true for return gigs
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
+}
+
+// ReturnEvent represents the payload consumed from Kafka for return requests.
+type ReturnEvent struct {
+	ReturnRequestID    string `json:"return_request_id"`
+	OrderTrackingID    string `json:"order_tracking_id"`
+	CustomerTrackingID string `json:"customer_tracking_id"`
+	VendorTrackingID   string `json:"vendor_tracking_id"`
+	StoreTrackingID    string `json:"store_tracking_id"`
+	Reason             string `json:"reason"`
+	CustomerName       string `json:"customer_name"`
+	CustomerAddress    string `json:"customer_address"`
+	CustomerPhone      string `json:"customer_phone"`
+	CustomerLat        float64 `json:"customer_lat"`
+	CustomerLng        float64 `json:"customer_lng"`
+	ReturnFeePaisa     int64  `json:"return_fee_paisa"`
+	ItemsSummary       string `json:"items_summary"`
+	Timestamp          int64  `json:"timestamp"`
+}

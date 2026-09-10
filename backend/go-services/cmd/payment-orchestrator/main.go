@@ -29,6 +29,9 @@ import (
 	"github.com/omnigo/backend/internal/payment_orchestrator/handlers"
 	payfastSvc "github.com/omnigo/backend/internal/payment_orchestrator/service"
 	"github.com/omnigo/backend/internal/payment_orchestrator/workers"
+	returnHandlers "github.com/omnigo/backend/internal/return/handlers"
+	returnRepo "github.com/omnigo/backend/internal/return/repository"
+	returnSvc "github.com/omnigo/backend/internal/return/service"
 	"github.com/omnigo/backend/internal/shared/cache"
 	"github.com/omnigo/backend/internal/shared/config"
 	"github.com/omnigo/backend/internal/shared/database"
@@ -103,6 +106,11 @@ func main() {
 	codHandler := handlers.NewCODHandler(db.Writer, ledgerSvc, escrowSvc, calculator, payfastClient)
 	disputeHandler := handlers.NewDisputeHandler(db.Writer, escrowSvc)
 	vendorHandler := handlers.NewVendorHandler(db.Writer)
+
+	// Return service (product return flow)
+	returnRepository := returnRepo.NewReturnRepository(db.Writer, db.Reader)
+	returnService := returnSvc.NewReturnService(returnRepository, escrowSvc, kafkaClient)
+	returnHandler := returnHandlers.NewReturnHandler(returnService)
 
 	cardVaultService := payfastSvc.NewCardVaultService(db.Writer)
 	cardVaultHandler := handlers.NewCardVaultHandler(cardVaultService)
@@ -210,6 +218,7 @@ func main() {
 	disputeHandler.RegisterRoutes(router)
 	vendorHandler.RegisterRoutes(router)
 	cardVaultHandler.RegisterRoutes(router)
+	returnHandler.RegisterRoutes(router)
 
 	// JazzCash / EasyPaisa hosted-checkout flow: initiate + callback.
 	// NOTE: there is intentionally NO /status endpoint here — payment state

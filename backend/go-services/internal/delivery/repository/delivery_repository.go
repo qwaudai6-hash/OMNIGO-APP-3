@@ -905,3 +905,181 @@ func (r *DeliveryRepository) GetUserFCMToken(ctx context.Context, userTrackingID
 	}
 	return token, nil
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// RETURN GIG REPOSITORY METHODS
+// ──────────────────────────────────────────────────────────────────────────────
+
+// CreateReturnGig inserts a new return gig into the database.
+func (r *DeliveryRepository) CreateReturnGig(ctx context.Context, gig *models.ReturnGig) error {
+	query := `
+		INSERT INTO return_gigs (
+			tracking_id, return_request_id, order_tracking_id,
+			vendor_store_tracking_id, customer_tracking_id,
+			return_reason, items_summary, customer_name, customer_address,
+			customer_phone, status, rider_earning, delivery_fee,
+			pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
+			otp_code, is_return, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW(), NOW())
+	`
+	_, err := r.writer.Exec(ctx, query,
+		gig.TrackingID,
+		gig.ReturnRequestID,
+		gig.OrderTrackingID,
+		gig.VendorStoreTrackID,
+		gig.CustomerTrackID,
+		gig.ReturnReason,
+		gig.ItemsSummary,
+		gig.CustomerName,
+		gig.CustomerAddress,
+		gig.CustomerPhone,
+		gig.Status,
+		gig.RiderEarning,
+		gig.DeliveryFee,
+		gig.PickupLat,
+		gig.PickupLng,
+		gig.DropoffLat,
+		gig.DropoffLng,
+		gig.OTPCode,
+		gig.IsReturn,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create return gig: %w", err)
+	}
+
+	// Mirror OTP to return_requests table
+	_, _ = r.writer.Exec(ctx,
+		`UPDATE return_requests SET gig_tracking_id = $1, rider_tracking_id = $2, updated_at = NOW() WHERE id = $3`,
+		gig.TrackingID, nil, gig.ReturnRequestID,
+	)
+
+	return nil
+}
+
+// AcceptReturnGig assigns a rider to a return gig.
+func (r *DeliveryRepository) AcceptReturnGig(ctx context.Context, trackingID, riderID string) error {
+	tx, err := r.writer.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	// Lock the return gig row
+	var currentStatus string
+	err = tx.QueryRow(ctx,
+		`SELECT status FROM return_gigs WHERE tracking_id = $1 FOR UPDATE`,
+		trackingID,
+	).Scan(&currentStatus)
+	if err != nil {
+		return fmt.Errorf("return gig not found: %w", err)
+	}
+
+	if currentStatus != models.StatusBroadcasting {
+		return fmt.Errorf("return gig is not available (status: %s)", currentStatus)
+	}
+
+	// Assign rider
+	_, err = tx.Exec(ctx,
+		`UPDATE return_gigs SET status = 'accepted', assigned_rider_id = $1, updated_at = NOW() WHERE tracking_id = $2`,
+		riderID, trackingID,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Mirror rider to return_requests table
+	_, _ = tx.Exec(ctx,
+		`UPDATE return_requests SET rider_tracking_id = $1, status = 'rider_assigned', updated_at = NOW() WHERE gig_tracking_id = $2`,
+		riderID, trackingID,
+	)
+
+	return tx.Commit(ctx)
+}
+
+// UpdateReturnGigPickup records the pickup photo for a return gig.
+func (r *DeliveryRepository) UpdateReturnGigPickup(ctx context.Context, trackingID, photoURL string) error {
+	tx, err := r.writer.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx,
+		`UPDATE return_gigs SET status = 'picked_up', pickup_photo_url = $1, updated_at = NOW() WHERE tracking_id = $2`,
+		photoURL, trackingID,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Mirror to return_requests
+	_, _ = tx.Exec(ctx,
+		`UPDATE return_requests SET pickup_photo_url = $1, status = 'return_pickup_completed', updated_at = NOW() WHERE gig_tracking_id = $2`,
+		photoURL, trackingID,
+	)
+
+	return tx.Commit(ctx)
+}
+
+// UpdateReturnGigCompletion records the delivery photo and marks the gig as completed.
+func (r *DeliveryRepository) UpdateReturnGigCompletion(ctx context.Context, trackingID, photoURL string) error {
+	tx, err := r.writer.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx,
+		`UPDATE return_gigs SET status = 'completed', delivery_photo_url = $1, updated_at = NOW() WHERE tracking_id = $2`,
+		photoURL, trackingID,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Mirror to return_requests
+	_, _ = tx.Exec(ctx,
+		`UPDATE return_requests SET delivery_photo_url = $1, status = 'return_delivered', updated_at = NOW() WHERE gig_tracking_id = $2`,
+		photoURL, trackingID,
+	)
+
+	return tx.Commit(ctx)
+}
+
+// UpdateReturnGigStatus updates the status of a return gig.
+func (r *DeliveryRepository) UpdateReturnGigStatus(ctx context.Context, trackingID, status string) error {
+	_, err := r.writer.Exec(ctx,
+		`UPDATE return_gigs SET status = $1, updated_at = NOW() WHERE tracking_id = $2`,
+		status, trackingID,
+	)
+	return err
+}
+
+// GetReturnGig retrieves a return gig by tracking ID.
+func (r *DeliveryRepository) GetReturnGig(ctx context.Context, trackingID string) (*models.ReturnGig, error) {
+	query := `
+		SELECT id, tracking_id, return_request_id, order_tracking_id,
+			vendor_store_tracking_id, assigned_rider_id, customer_tracking_id,
+			return_reason, items_summary, customer_name, customer_address,
+			customer_phone, status, rider_earning, delivery_fee,
+			pickup_lat, pickup_lng, dropoff_lat, dropoff_lng,
+			otp_code, pickup_photo_url, delivery_photo_url, is_return,
+			created_at, updated_at
+		FROM return_gigs
+		WHERE tracking_id = $1
+	`
+	var gig models.ReturnGig
+	err := r.reader.QueryRow(ctx, query, trackingID).Scan(
+		&gig.ID, &gig.TrackingID, &gig.ReturnRequestID, &gig.OrderTrackingID,
+		&gig.VendorStoreTrackID, &gig.AssignedRiderID, &gig.CustomerTrackID,
+		&gig.ReturnReason, &gig.ItemsSummary, &gig.CustomerName, &gig.CustomerAddress,
+		&gig.CustomerPhone, &gig.Status, &gig.RiderEarning, &gig.DeliveryFee,
+		&gig.PickupLat, &gig.PickupLng, &gig.DropoffLat, &gig.DropoffLng,
+		&gig.OTPCode, &gig.PickupPhotoURL, &gig.DeliveryPhotoURL, &gig.IsReturn,
+		&gig.CreatedAt, &gig.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("return gig not found: %w", err)
+	}
+	return &gig, nil
+}

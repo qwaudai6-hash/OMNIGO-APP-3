@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -1326,4 +1327,219 @@ func (s *DeliveryService) AcceptCounterBid(ctx context.Context, bidID string, co
 	}
 
 	return counter, nil
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// RETURN GIG FLOW
+// ──────────────────────────────────────────────────────────────────────────────
+
+// HandleReturnRequest creates a return gig when a customer requests a product return.
+// The gig is broadcast to nearby riders for pickup from customer → vendor store.
+func (s *DeliveryService) HandleReturnRequest(ctx context.Context, event models.ReturnEvent) {
+	// 1. Calculate rider earning (flat fee from return delivery fee)
+	returnFee := float64(event.ReturnFeePaisa) / 100.0
+	adminComm := returnFee * (envFloat("DELIVERY_COMMISSION_PERCENT", 5.0) / 100.0)
+	riderEarning := returnFee - adminComm
+
+	// 2. Get vendor store coordinates for dropoff
+	storeLat, storeLng, err := s.repo.GetStoreCoordinates(ctx, event.StoreTrackingID)
+	if err != nil {
+		log.Printf("[RETURN-GIG] Failed to get store coordinates for %s: %v", event.StoreTrackingID, err)
+		return
+	}
+
+	// 3. Generate OTP for customer verification on pickup
+	otpVal, _ := rand.Int(rand.Reader, big.NewInt(10000))
+	otpCode := fmt.Sprintf("%04d", otpVal.Int64())
+
+	// 4. Build return gig
+	gig := &models.ReturnGig{
+		TrackingID:         generateReturnGigUTID(),
+		ReturnRequestID:    event.ReturnRequestID,
+		OrderTrackingID:    event.OrderTrackingID,
+		VendorStoreTrackID: event.StoreTrackingID,
+		CustomerTrackID:    event.CustomerTrackingID,
+		ReturnReason:       event.Reason,
+		ItemsSummary:       event.ItemsSummary,
+		CustomerName:       event.CustomerName,
+		CustomerAddress:    event.CustomerAddress,
+		CustomerPhone:      event.CustomerPhone,
+		Status:             models.StatusBroadcasting,
+		RiderEarning:       riderEarning,
+		DeliveryFee:        returnFee,
+		PickupLat:          event.CustomerLat,
+		PickupLng:          event.CustomerLng,
+		DropoffLat:         storeLat,
+		DropoffLng:         storeLng,
+		OTPCode:            otpCode,
+		IsReturn:           true,
+	}
+
+	// 5. Save to database
+	if err := s.repo.CreateReturnGig(ctx, gig); err != nil {
+		log.Printf("[RETURN-GIG] Failed to create return gig: %v", err)
+		return
+	}
+
+	// 6. Send OTP to customer via FCM (async)
+	go s.SendReturnOTPNotification(context.Background(), gig)
+
+	// 7. Find nearby riders using proximity search (reuse existing infrastructure)
+	nearbyRiders, err := s.proximity.FindNearbyRiders(ctx, event.CustomerLng, event.CustomerLat, 10.0, 5)
+	if err != nil {
+		log.Printf("[RETURN-GIG] Warning: proximity search failed: %v", err)
+	}
+
+	var topRiders []string
+	for _, r := range nearbyRiders {
+		topRiders = append(topRiders, r.RiderTrackID)
+	}
+
+	// 8. Broadcast to riders
+	s.BroadcastReturnGigAlert(ctx, gig, topRiders)
+}
+
+// BroadcastReturnGigAlert broadcasts the return gig to nearby riders.
+func (s *DeliveryService) BroadcastReturnGigAlert(ctx context.Context, gig *models.ReturnGig, topRiders []string) {
+	if len(topRiders) == 0 {
+		return
+	}
+
+	gig.EligibleRiders = topRiders
+
+	// Sanitize — OTP must never be leaked
+	broadcastGig := *gig
+	broadcastGig.OTPCode = ""
+
+	eventBytes, _ := json.Marshal(broadcastGig)
+	if s.kafka != nil {
+		record := &kgo.Record{
+			Topic: "returns.broadcasted",
+			Key:   []byte(gig.TrackingID),
+			Value: eventBytes,
+		}
+		s.kafka.Client.Produce(ctx, record, func(_ *kgo.Record, err error) {
+			if err != nil {
+				log.Printf("Warning: Failed to produce returns.broadcasted event: %v", err)
+			}
+		})
+	}
+
+	// Set 30-second TTL for the gig offer
+	offerKey := fmt.Sprintf("return:gig:offer:%s", gig.TrackingID)
+	if s.redis != nil {
+		s.redis.Set(ctx, offerKey, "pending", 30*time.Second)
+	}
+
+	log.Printf("Broadcasting Return Gig %s to matching riders: %v", gig.TrackingID, topRiders)
+}
+
+// AcceptReturnGig allows a rider to accept a return pickup gig.
+func (s *DeliveryService) AcceptReturnGig(ctx context.Context, trackingID, riderID string) error {
+	// 1. Check Redis suspension
+	if s.redis != nil {
+		suspended, _ := s.redis.Get(ctx, fmt.Sprintf("rider:suspended:%s", riderID)).Result()
+		if suspended == "true" {
+			return fmt.Errorf("rider is suspended")
+		}
+	}
+
+	// 2. Accept the gig in DB
+	if err := s.repo.AcceptReturnGig(ctx, trackingID, riderID); err != nil {
+		return err
+	}
+
+	// 3. Publish to Kafka for WebSocket gateway
+	if s.kafka != nil {
+		event := map[string]interface{}{
+			"tracking_id":   trackingID,
+			"rider_id":      riderID,
+			"is_return":     true,
+			"timestamp":     time.Now().UnixMilli(),
+		}
+		eventBytes, _ := json.Marshal(event)
+		s.kafka.Client.Produce(ctx, &kgo.Record{
+		Topic: "returns.accepted",
+			Key:   []byte(trackingID),
+			Value: eventBytes,
+		}, nil)
+	}
+
+	return nil
+}
+
+// UpdateReturnGigStatus updates the status of a return gig (pickup, transit, completion).
+func (s *DeliveryService) UpdateReturnGigStatus(ctx context.Context, trackingID string, status string, photoURL string) error {
+	switch status {
+	case "picked_up":
+		return s.repo.UpdateReturnGigPickup(ctx, trackingID, photoURL)
+	case "completed":
+		return s.repo.UpdateReturnGigCompletion(ctx, trackingID, photoURL)
+	default:
+		return s.repo.UpdateReturnGigStatus(ctx, trackingID, status)
+	}
+}
+
+// SendReturnOTPNotification sends an FCM push notification with return OTP to customer.
+func (s *DeliveryService) SendReturnOTPNotification(ctx context.Context, gig *models.ReturnGig) error {
+	fcmToken, err := s.repo.GetUserFCMToken(ctx, gig.CustomerTrackID)
+	if err != nil || fcmToken == "" {
+		log.Printf("SendReturnOTPNotification: no FCM token for customer %s", gig.CustomerTrackID)
+		return fmt.Errorf("no FCM token for customer %s", gig.CustomerTrackID)
+	}
+
+	fcmServerKey := getEnv("FCM_SERVER_KEY", "")
+	if fcmServerKey == "" {
+		return fmt.Errorf("FCM_SERVER_KEY not configured")
+	}
+
+	payload := map[string]interface{}{
+		"token": fcmToken,
+		"notification": map[string]string{
+			"title": "Return Pickup OTP",
+			"body":  fmt.Sprintf("Share this code with the rider when they pick up your return: %s", gig.OTPCode),
+		},
+		"data": map[string]string{
+			"type":           "return_otp",
+			"order_id":       gig.OrderTrackingID,
+			"return_gig_id":  gig.TrackingID,
+			"otp_code":       gig.OTPCode,
+		},
+		"android": map[string]interface{}{
+			"priority": "high",
+			"notification": map[string]string{
+				"channel_id": "delivery_updates",
+				"sound":      "default",
+			},
+		},
+	}
+
+	payloadBytes, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		"https://fcm.googleapis.com/fcm/send", bytes.NewReader(payloadBytes))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Authorization", "key="+fcmServerKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("FCM returned status %d", resp.StatusCode)
+	}
+
+	log.Printf("SendReturnOTPNotification: OTP %s sent to customer %s for return %s",
+		gig.OTPCode, gig.CustomerTrackID, gig.ReturnRequestID)
+	return nil
+}
+
+// generateReturnGigUTID generates a unique tracking ID for return gigs.
+func generateReturnGigUTID() string {
+	return tracking.Generate("RTNG")
 }
