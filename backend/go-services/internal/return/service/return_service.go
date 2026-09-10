@@ -14,25 +14,28 @@ import (
 )
 
 const (
-	returnWindowHours        = 36
-	pickupDeadlineHours      = 12
+	returnWindowHours         = 36
+	pickupDeadlineHours       = 12
 	vendorVerifyDeadlineHours = 24
+	returnHoldHours           = 72 // Hold escrow for 3 days during return verification
 )
 
-// EscrowReleaser handles escrow re-hold for returns.
-type EscrowReleaser interface {
+// EscrowManager handles escrow operations for returns.
+type EscrowManager interface {
 	CancelForOrder(ctx context.Context, orderTrackingID string) error
+	CreateReturnHold(ctx context.Context, orderID, vendorID string, amount int64, holdUntil time.Time) error
+	RefundForReturn(ctx context.Context, orderTrackingID string, amount int64) error
 }
 
 type ReturnService struct {
 	repo    *repository.ReturnRepository
-	escrow  EscrowReleaser
+	escrow  EscrowManager
 	kafka   *messaging.KafkaClient
 }
 
 func NewReturnService(
 	repo *repository.ReturnRepository,
-	escrow EscrowReleaser,
+	escrow EscrowManager,
 	kafka *messaging.KafkaClient,
 ) *ReturnService {
 	return &ReturnService{
@@ -109,8 +112,7 @@ func (s *ReturnService) RequestReturn(
 		return nil, fmt.Errorf("ORDER_NOT_RETURNABLE: order status is '%s', must be 'delivered' or 'completed'", status)
 	}
 
-	// 6. Calculate return delivery fee (same as normal delivery fee, or a flat rate)
-	// For now, use a flat PKR 150 return delivery fee
+	// 6. Calculate return delivery fee
 	var returnFeePaisa int64 = 15000 // PKR 150 in paisa
 
 	// 7. Create return request
@@ -120,50 +122,56 @@ func (s *ReturnService) RequestReturn(
 	returnItemsJSON, _ := json.Marshal(returnItems)
 
 	req := &models.ReturnRequest{
-		OrderTrackingID:    orderTrackingID,
-		CustomerTrackingID: customerID,
-		VendorTrackingID:   orderData["vendor_tracking_id"].(string),
-		StoreTrackingID:    orderData["store_tracking_id"].(string),
-		Reason:             reason,
-		ReturnItems:        returnItemsJSON,
-		Status:             models.ReturnStatusRequested,
-		RequestedAt:        now,
-		PickupDeadline:     &pickupDeadline,
+		OrderTrackingID:       orderTrackingID,
+		CustomerTrackingID:    customerID,
+		VendorTrackingID:      orderData["vendor_tracking_id"].(string),
+		StoreTrackingID:       orderData["store_tracking_id"].(string),
+		Reason:                reason,
+		ReturnItems:           returnItemsJSON,
+		Status:                models.ReturnStatusRequested,
+		RequestedAt:           now,
+		PickupDeadline:        &pickupDeadline,
 		ReturnDeliveryFeePaisa: returnFeePaisa,
-		PaymentStatus:      "pending",
+		PaymentStatus:         "pending",
 	}
 
 	if err := s.repo.CreateReturnRequest(ctx, req); err != nil {
 		return nil, fmt.Errorf("failed to create return request: %w", err)
 	}
 
-	// 8. Re-hold escrow if it was already released
+	// 8. Re-hold escrow for return verification
 	if s.escrow != nil {
-		// Cancel existing hold to prevent premature release during return verification
-		if err := s.escrow.CancelForOrder(ctx, orderTrackingID); err != nil {
-			log.Printf("[RETURN-%s] Warning: failed to cancel escrow for return: %v", orderTrackingID, err)
+		vendorID := orderData["vendor_tracking_id"].(string)
+		totalAmount := int64(0)
+		if v, ok := orderData["total_amount_paisa"]; ok {
+			if amt, ok := v.(int64); ok {
+				totalAmount = amt
+			}
 		}
-		// NOTE: Escrow re-hold for return verification will be implemented in Phase 4
-		// For now, we cancel the existing hold. The return_verified → refund flow
-		// will create a new hold when escrow service supports CreateReturnHold.
+
+		// Create return-specific hold with extended hold_until
+		returnHoldUntil := time.Now().Add(time.Duration(returnHoldHours) * time.Hour)
+		if err := s.escrow.CreateReturnHold(ctx, orderTrackingID, vendorID, totalAmount, returnHoldUntil); err != nil {
+			log.Printf("[RETURN-%s] Warning: failed to create return escrow hold: %v", orderTrackingID, err)
+		}
 	}
 
 	// 9. Emit Kafka event for delivery-service to create return gig
 	event := map[string]interface{}{
-		"return_request_id":     req.ID,
-		"order_tracking_id":     orderTrackingID,
-		"customer_tracking_id":  customerID,
-		"vendor_tracking_id":    orderData["vendor_tracking_id"].(string),
-		"store_tracking_id":     orderData["store_tracking_id"].(string),
-		"reason":                reason,
-		"customer_name":         orderData["customer_name"],
-		"customer_address":      orderData["customer_address"],
-		"customer_phone":        orderData["customer_phone"],
-		"customer_lat":          orderData["customer_lat"],
-		"customer_lng":          orderData["customer_lng"],
-		"return_fee_paisa":      returnFeePaisa,
-		"items_summary":         "",
-		"timestamp":             time.Now().UnixMilli(),
+		"return_request_id":    req.ID,
+		"order_tracking_id":    orderTrackingID,
+		"customer_tracking_id": customerID,
+		"vendor_tracking_id":   orderData["vendor_tracking_id"].(string),
+		"store_tracking_id":    orderData["store_tracking_id"].(string),
+		"reason":               reason,
+		"customer_name":        orderData["customer_name"],
+		"customer_address":     orderData["customer_address"],
+		"customer_phone":       orderData["customer_phone"],
+		"customer_lat":         orderData["customer_lat"],
+		"customer_lng":         orderData["customer_lng"],
+		"return_fee_paisa":     returnFeePaisa,
+		"items_summary":        "",
+		"timestamp":            time.Now().UnixMilli(),
 	}
 	s.emitEvent(ctx, "orders.return_requested", orderTrackingID, event)
 
@@ -237,6 +245,7 @@ func (s *ReturnService) RecordDeliveryToVendor(ctx context.Context, id, photoURL
 }
 
 // VerifyByVendor processes the vendor's verification of the returned product.
+// When verified, triggers refund to customer and cancels COD debts.
 func (s *ReturnService) VerifyByVendor(
 	ctx context.Context,
 	id string,
@@ -258,8 +267,28 @@ func (s *ReturnService) VerifyByVendor(
 		return err
 	}
 
-	// Emit Kafka event
 	if verified {
+		// Trigger refund to customer
+		if s.escrow != nil {
+			orderID := current.OrderTrackingID
+			// Get order total for refund amount
+			orderData, err := s.repo.GetOrderForReturn(ctx, orderID)
+			if err != nil {
+				log.Printf("[RETURN-%s] Warning: failed to get order for refund: %v", orderID, err)
+			} else {
+				totalAmount := int64(0)
+				if v, ok := orderData["total_amount_paisa"]; ok {
+					if amt, ok := v.(int64); ok {
+						totalAmount = amt
+					}
+				}
+				// Refund from escrow to customer wallet + cancel COD debts
+				if err := s.escrow.RefundForReturn(ctx, orderID, totalAmount); err != nil {
+					log.Printf("[RETURN-%s] Warning: failed to process return refund: %v", orderID, err)
+				}
+			}
+		}
+
 		s.emitEvent(ctx, "return.verified", current.OrderTrackingID, map[string]interface{}{
 			"return_request_id": id,
 			"order_tracking_id": current.OrderTrackingID,
@@ -279,7 +308,7 @@ func (s *ReturnService) VerifyByVendor(
 	return nil
 }
 
-// CompleteReturn processes the refund after vendor verification.
+// CompleteReturn processes the final settlement after vendor verification.
 func (s *ReturnService) CompleteReturn(ctx context.Context, id string) error {
 	current, err := s.repo.GetReturnRequestByID(ctx, id)
 	if err != nil {
@@ -289,10 +318,6 @@ func (s *ReturnService) CompleteReturn(ctx context.Context, id string) error {
 	if !models.IsValidReturnTransition(current.Status, models.ReturnStatusCompleted) {
 		return fmt.Errorf("cannot complete in '%s' status", current.Status)
 	}
-
-	// Release escrow hold to customer (if verified)
-	// NOTE: Escrow re-hold and release will be implemented in Phase 4
-	// For now, the escrow is cancelled when return is requested
 
 	// Emit Kafka event
 	s.emitEvent(ctx, "return.completed", current.OrderTrackingID, map[string]interface{}{

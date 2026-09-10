@@ -518,6 +518,144 @@ func (s *Service) GetHoldsByVendor(ctx context.Context, vendorTrackingID string)
 	return s.repo.GetHoldsByVendor(ctx, vendorTrackingID)
 }
 
+// CreateReturnHold creates a new escrow hold for return verification.
+// The hold prevents auto-release until the return is verified or disputed.
+func (s *Service) CreateReturnHold(ctx context.Context, orderID, vendorID string, amount int64, holdUntil time.Time) error {
+	exists, err := s.repo.HoldExistsForOrder(ctx, orderID)
+	if err != nil {
+		return fmt.Errorf("failed to check existing hold: %w", err)
+	}
+	if exists {
+		// Update existing hold to extend hold_until for return verification
+		return s.repo.ExtendHoldUntil(ctx, orderID, holdUntil)
+	}
+
+	hold := &EscrowHold{
+		ID:               uuid.New(),
+		OrderTrackingID:  orderID,
+		VendorTrackingID: vendorID,
+		Amount:           amount,
+		Status:           StatusHeld,
+		HoldUntil:        holdUntil,
+	}
+
+	if err := s.repo.CreateHold(ctx, hold); err != nil {
+		return fmt.Errorf("return escrow hold creation failed: %w", err)
+	}
+
+	// Index in Redis sorted set for O(log N) expiry lookup
+	if idxErr := s.index.Add(ctx, hold.ID.String(), hold.HoldUntil); idxErr != nil {
+		fmt.Printf("[Escrow] Warning: failed to index return hold %s in Redis: %v\n", hold.ID, idxErr)
+	}
+
+	return nil
+}
+
+// RefundForReturn executes a double-entry ledger refund to the customer for a verified return.
+// Similar to RefundDispute but for return-verified orders.
+func (s *Service) RefundForReturn(ctx context.Context, orderTrackingID string, amount int64) error {
+	// Fetch hold details
+	var hold EscrowHold
+	err := s.db.QueryRow(ctx,
+		`SELECT id, order_tracking_id, vendor_tracking_id, amount, status, hold_until, created_at
+		 FROM escrow_holds WHERE order_tracking_id = $1 AND status IN ('held', 'disputed')`,
+		orderTrackingID,
+	).Scan(&hold.ID, &hold.OrderTrackingID, &hold.VendorTrackingID, &hold.Amount, &hold.Status, &hold.HoldUntil, &hold.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("escrow hold not found for order %s: %w", orderTrackingID, err)
+	}
+
+	// Fetch customer tracking ID
+	var customerTrackingID string
+	err = s.db.QueryRow(ctx,
+		`SELECT customer_tracking_id FROM orders WHERE order_tracking_id = $1`,
+		orderTrackingID,
+	).Scan(&customerTrackingID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch order customer: %w", err)
+	}
+
+	// Use the actual hold amount if amount is 0
+	refundAmount := amount
+	if refundAmount == 0 {
+		refundAmount = hold.Amount
+	}
+
+	// STEP 1: Execute ledger transfer FIRST (idempotent)
+	idempotencyKey := fmt.Sprintf("return:refund:%s", orderTrackingID)
+	_, err = s.ledger.Transfer(ctx, ledger.TransferRequest{
+		DebitAccount:   ledger.AccountVendorLockedEscrow,
+		CreditAccount:  ledger.AccountCustomerWallet,
+		Amount:         refundAmount,
+		Currency:       "PKR",
+		ReferenceType:  "return_refund",
+		ReferenceID:    orderTrackingID,
+		Description:    fmt.Sprintf("Return refund for order %s to customer %s", orderTrackingID, customerTrackingID),
+		IdempotencyKey: idempotencyKey,
+	})
+	if err != nil {
+		return fmt.Errorf("ledger return refund transfer failed: %w", err)
+	}
+
+	// STEP 2: All DB operations in a single transaction
+	tx, txErr := s.db.Begin(ctx)
+	if txErr != nil {
+		return fmt.Errorf("failed to begin transaction: %w", txErr)
+	}
+	defer tx.Rollback(ctx)
+
+	// Mark hold as refunded
+	_, err = tx.Exec(ctx,
+		`UPDATE escrow_holds SET status = 'refunded', released_at = NOW() WHERE id = $1`,
+		hold.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update escrow_holds status: %w", err)
+	}
+
+	// Update customer wallet balance
+	upsertQuery := `
+		INSERT INTO customer_wallet (customer_tracking_id, balance_paisa, lifetime_spent_paisa, updated_at)
+		VALUES ($1, $2, 0, NOW())
+		ON CONFLICT (customer_tracking_id)
+		DO UPDATE SET
+			balance_paisa = customer_wallet.balance_paisa + $2,
+			updated_at = NOW()
+	`
+	_, err = tx.Exec(ctx, upsertQuery, customerTrackingID, refundAmount)
+	if err != nil {
+		return fmt.Errorf("failed to update customer_wallet: %w", err)
+	}
+
+	// Update order payment status
+	_, err = tx.Exec(ctx,
+		`UPDATE orders SET payment_status = 'refunded', updated_at = NOW() WHERE order_tracking_id = $1`,
+		orderTrackingID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update order payment_status: %w", err)
+	}
+
+	// Cancel any pending COD debts for this order
+	_, err = tx.Exec(ctx,
+		`UPDATE cod_debts SET status = 'cancelled', settled_at = NOW() WHERE order_tracking_id = $1 AND status != 'cancelled'`,
+		orderTrackingID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to cancel COD debts: %w", err)
+	}
+
+	// Commit
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	// Remove from Redis index
+	_ = s.index.Remove(ctx, hold.ID.String())
+
+	return nil
+}
+
 // RebuildIndex populates the Redis sorted set from Postgres on startup or after Redis restart.
 func (s *Service) RebuildIndex(ctx context.Context) error {
 	rows, err := s.db.Query(ctx, `SELECT id, hold_until FROM escrow_holds WHERE status = 'held'`)

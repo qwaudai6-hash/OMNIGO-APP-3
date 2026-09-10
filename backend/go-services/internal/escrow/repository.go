@@ -146,6 +146,16 @@ func (r *Repository) CancelHoldForOrder(ctx context.Context, orderTrackingID str
 	return err
 }
 
+// ExtendHoldUntil extends the hold_until time for an existing held escrow.
+// Used when a return is requested to prevent auto-release during verification.
+func (r *Repository) ExtendHoldUntil(ctx context.Context, orderTrackingID string, newHoldUntil time.Time) error {
+	_, err := r.db.Exec(ctx,
+		`UPDATE escrow_holds SET hold_until = $1 WHERE order_tracking_id = $2 AND status = 'held'`,
+		newHoldUntil, orderTrackingID,
+	)
+	return err
+}
+
 // FreezeForDispute marks an escrow hold as disputed.
 func (r *Repository) FreezeForDispute(ctx context.Context, orderTrackingID string, disputeID uuid.UUID) error {
 	_, err := r.db.Exec(ctx,
