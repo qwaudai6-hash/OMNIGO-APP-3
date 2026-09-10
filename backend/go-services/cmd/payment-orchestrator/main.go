@@ -32,6 +32,7 @@ import (
 	returnHandlers "github.com/omnigo/backend/internal/return/handlers"
 	returnRepo "github.com/omnigo/backend/internal/return/repository"
 	returnSvc "github.com/omnigo/backend/internal/return/service"
+	returnFraud "github.com/omnigo/backend/internal/return/fraud"
 	"github.com/omnigo/backend/internal/shared/cache"
 	"github.com/omnigo/backend/internal/shared/config"
 	"github.com/omnigo/backend/internal/shared/database"
@@ -109,8 +110,6 @@ func main() {
 
 	// Return service (product return flow)
 	returnRepository := returnRepo.NewReturnRepository(db.Writer, db.Reader)
-	returnService := returnSvc.NewReturnService(returnRepository, escrowSvc, kafkaClient)
-	returnHandler := returnHandlers.NewReturnHandler(returnService)
 
 	cardVaultService := payfastSvc.NewCardVaultService(db.Writer)
 	cardVaultHandler := handlers.NewCardVaultHandler(cardVaultService)
@@ -120,6 +119,14 @@ func main() {
 		rdb = redisClient.Client
 	}
 	fraudDetector := fraud.NewDetector(rdb, db.Writer)
+
+	// Return fraud detector (Redis-backed)
+	var returnFraudDetector *returnFraud.ReturnFraudDetector
+	if rdb != nil {
+		returnFraudDetector = returnFraud.NewReturnFraudDetector(rdb)
+	}
+	returnService := returnSvc.NewReturnService(returnRepository, escrowSvc, kafkaClient, returnFraudDetector)
+	returnHandler := returnHandlers.NewReturnHandler(returnService)
 
 	// Stripe split handler — full lifecycle (checkout + webhook + refund + ledger split).
 	stripeClient := stripeClientPkg.NewClientFromEnv()

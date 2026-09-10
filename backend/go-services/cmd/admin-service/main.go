@@ -1389,6 +1389,170 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"message": "rider reassigned", "order_id": orderID, "new_rider": req.NewRiderID})
 	})
 
+	// ── Admin Return Management ─────────────────────────────────
+	adminRoutes.GET("/returns", func(c *gin.Context) {
+		status := c.Query("status")
+		limit, offset := parsePagination(c)
+
+		rows, err := dbPool.Query(ctx,
+			`SELECT id, order_tracking_id, customer_tracking_id, vendor_tracking_id,
+			        store_tracking_id, reason, status, requested_at, pickup_deadline,
+			        verified_at, completed_at, return_delivery_fee_paisa, payment_status,
+			        created_at, updated_at
+			 FROM return_requests
+			 WHERE ($1 = '' OR status = $1)
+			 ORDER BY created_at DESC
+			 LIMIT $2 OFFSET $3`,
+			status, limit, offset)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		defer rows.Close()
+
+		var returns []map[string]interface{}
+		for rows.Next() {
+			var id, orderID, customerID, vendorID, storeID, reason, retStatus, payStatus string
+			var requestedAt, createdAt, updatedAt time.Time
+			var pickupDeadline, verifiedAt, completedAt *time.Time
+			var returnFee int64
+			if err := rows.Scan(&id, &orderID, &customerID, &vendorID, &storeID,
+				&reason, &retStatus, &requestedAt, &pickupDeadline,
+				&verifiedAt, &completedAt, &returnFee, &payStatus,
+				&createdAt, &updatedAt); err != nil {
+				continue
+			}
+			returns = append(returns, map[string]interface{}{
+				"id": id, "order_tracking_id": orderID,
+				"customer_tracking_id": customerID, "vendor_tracking_id": vendorID,
+				"store_tracking_id": storeID, "reason": reason,
+				"status": retStatus, "requested_at": requestedAt,
+				"pickup_deadline": pickupDeadline, "verified_at": verifiedAt,
+				"completed_at": completedAt,
+				"return_delivery_fee_paisa": returnFee,
+				"payment_status": payStatus,
+				"created_at": createdAt, "updated_at": updatedAt,
+			})
+		}
+
+		var total int
+		_ = dbPool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM return_requests WHERE ($1 = '' OR status = $1)`,
+			status).Scan(&total)
+
+		c.JSON(http.StatusOK, gin.H{"returns": returns, "total": total})
+	})
+
+	adminRoutes.GET("/returns/stats", func(c *gin.Context) {
+		stats := map[string]interface{}{}
+
+		var total int
+		_ = dbPool.QueryRow(ctx, `SELECT COUNT(*) FROM return_requests`).Scan(&total)
+		stats["total_returns"] = total
+
+		// By status
+		rows, _ := dbPool.Query(ctx,
+			`SELECT status, COUNT(*) FROM return_requests GROUP BY status ORDER BY COUNT(*) DESC`)
+		if rows != nil {
+			defer rows.Close()
+			byStatus := map[string]int{}
+			for rows.Next() {
+				var s string
+				var cnt int
+				if rows.Scan(&s, &cnt) == nil {
+					byStatus[s] = cnt
+				}
+			}
+			stats["by_status"] = byStatus
+		}
+
+		// 7-day and 30-day counts
+		var last7, last30 int
+		_ = dbPool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM return_requests WHERE created_at > NOW() - INTERVAL '7 days'`).Scan(&last7)
+		_ = dbPool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM return_requests WHERE created_at > NOW() - INTERVAL '30 days'`).Scan(&last30)
+		stats["returns_last_7_days"] = last7
+		stats["returns_last_30_days"] = last30
+
+		// Total refund amount
+		var totalRefund int64
+		_ = dbPool.QueryRow(ctx,
+			`SELECT COALESCE(SUM(return_delivery_fee_paisa), 0) FROM return_requests WHERE payment_status = 'completed'`).Scan(&totalRefund)
+		stats["total_refund_paisa"] = totalRefund
+
+		c.JSON(http.StatusOK, stats)
+	})
+
+	adminRoutes.POST("/returns/:id/approve", func(c *gin.Context) {
+		returnID := c.Param("id")
+		var req struct {
+			Notes string `json:"notes"`
+		}
+		_ = c.ShouldBindJSON(&req)
+
+		// Update return status
+		tag, err := dbPool.Exec(ctx,
+			`UPDATE return_requests SET status = 'return_verified', verified_at = NOW(), updated_at = NOW()
+			 WHERE id = $1 AND status = 'return_delivered'`,
+			returnID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if tag.RowsAffected() == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "return not found or not in deliverable status"})
+			return
+		}
+
+		// Get order ID for refund
+		var orderID string
+		_ = dbPool.QueryRow(ctx,
+			`SELECT order_tracking_id FROM return_requests WHERE id = $1`, returnID).Scan(&orderID)
+
+		// Admin audit log
+		adminID := c.GetString("tracking_id")
+		_, _ = dbPool.Exec(ctx,
+			`INSERT INTO admin_audit_log (admin_tracking_id, action, target_id, target_type, reason, created_at)
+			 VALUES ($1, 'approve_return', $2, 'return', $3, NOW()) ON CONFLICT DO NOTHING`,
+			adminID, returnID, req.Notes)
+
+		c.JSON(http.StatusOK, gin.H{
+			"message": "return approved",
+			"return_id": returnID,
+			"order_id": orderID,
+		})
+	})
+
+	adminRoutes.POST("/returns/:id/reject", func(c *gin.Context) {
+		returnID := c.Param("id")
+		var req struct {
+			Reason string `json:"reason"`
+		}
+		_ = c.ShouldBindJSON(&req)
+
+		tag, err := dbPool.Exec(ctx,
+			`UPDATE return_requests SET status = 'return_disputed', dispute_reason = $1, updated_at = NOW()
+			 WHERE id = $1 AND status IN ('return_delivered', 'return_requested')`,
+			returnID, req.Reason)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if tag.RowsAffected() == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "return not found or not in rejectable status"})
+			return
+		}
+
+		adminID := c.GetString("tracking_id")
+		_, _ = dbPool.Exec(ctx,
+			`INSERT INTO admin_audit_log (admin_tracking_id, action, target_id, target_type, reason, created_at)
+			 VALUES ($1, 'reject_return', $2, 'return', $3, NOW()) ON CONFLICT DO NOTHING`,
+			adminID, returnID, req.Reason)
+
+		c.JSON(http.StatusOK, gin.H{"message": "return rejected", "return_id": returnID})
+	})
+
 	// ── Health check (public) ────────────────────────────────────
 	// Public geocode proxy (Nominatim): frontend reverse-geocodes
 	// through this so User-Agent / rate limits stay server-side.

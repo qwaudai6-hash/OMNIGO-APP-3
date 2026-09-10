@@ -356,3 +356,184 @@ func (r *ReturnRepository) GetOrderForReturn(ctx context.Context, orderTrackingI
 
 	return result, nil
 }
+
+// GetCustomerReturnCount returns the total number of return requests by a customer.
+func (r *ReturnRepository) GetCustomerReturnCount(ctx context.Context, customerTrackingID string) (int, error) {
+	var count int
+	err := r.reader.QueryRow(ctx,
+		`SELECT COUNT(*) FROM return_requests WHERE customer_tracking_id = $1`,
+		customerTrackingID,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get customer return count: %w", err)
+	}
+	return count, nil
+}
+
+// GetCustomerOrderCount returns the total number of orders by a customer.
+func (r *ReturnRepository) GetCustomerOrderCount(ctx context.Context, customerTrackingID string) (int, error) {
+	var count int
+	err := r.reader.QueryRow(ctx,
+		`SELECT COUNT(*) FROM orders WHERE customer_tracking_id = $1 AND status IN ('delivered', 'completed')`,
+		customerTrackingID,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get customer order count: %w", err)
+	}
+	return count, nil
+}
+
+// GetCustomerName returns the customer's name from the users table.
+func (r *ReturnRepository) GetCustomerName(ctx context.Context, customerTrackingID string) (string, error) {
+	var name string
+	err := r.reader.QueryRow(ctx,
+		`SELECT COALESCE(first_name || ' ' || last_name, name, 'Customer') FROM users WHERE tracking_id = $1`,
+		customerTrackingID,
+	).Scan(&name)
+	if err != nil {
+		return "Customer", nil
+	}
+	return name, nil
+}
+
+// GetVendorName returns the vendor's name from the users table.
+func (r *ReturnRepository) GetVendorName(ctx context.Context, vendorTrackingID string) (string, error) {
+	var name string
+	err := r.reader.QueryRow(ctx,
+		`SELECT COALESCE(first_name || ' ' || last_name, name, 'Vendor') FROM users WHERE tracking_id = $1`,
+		vendorTrackingID,
+	).Scan(&name)
+	if err != nil {
+		return "Vendor", nil
+	}
+	return name, nil
+}
+
+// ListReturns returns paginated return requests with optional filters.
+func (r *ReturnRepository) ListReturns(ctx context.Context, status string, limit, offset int) ([]map[string]interface{}, int, error) {
+	countQuery := `SELECT COUNT(*) FROM return_requests WHERE 1=1`
+	dataQuery := `
+		SELECT id, order_tracking_id, customer_tracking_id, vendor_tracking_id,
+		       store_tracking_id, reason, status, requested_at, pickup_deadline,
+		       verified_at, completed_at, return_delivery_fee_paisa, payment_status,
+		       created_at, updated_at
+		FROM return_requests WHERE 1=1`
+
+	args := []interface{}{}
+	argIdx := 1
+
+	if status != "" {
+		countQuery += fmt.Sprintf(" AND status = $%d", argIdx)
+		dataQuery += fmt.Sprintf(" AND status = $%d", argIdx)
+		args = append(args, status)
+		argIdx++
+	}
+
+	var total int
+	err := r.reader.QueryRow(ctx, countQuery, args...).Scan(&total)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to count returns: %w", err)
+	}
+
+	dataQuery += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
+	args = append(args, limit, offset)
+
+	rows, err := r.reader.Query(ctx, dataQuery, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to list returns: %w", err)
+	}
+	defer rows.Close()
+
+	var results []map[string]interface{}
+	for rows.Next() {
+		var id, orderID, customerID, vendorID, storeID, reason, retStatus, payStatus string
+		var requestedAt, createdAt, updatedAt time.Time
+		var pickupDeadline, verifiedAt, completedAt *time.Time
+		var returnFee int64
+
+		err := rows.Scan(&id, &orderID, &customerID, &vendorID, &storeID,
+			&reason, &retStatus, &requestedAt, &pickupDeadline,
+			&verifiedAt, &completedAt, &returnFee, &payStatus,
+			&createdAt, &updatedAt)
+		if err != nil {
+			continue
+		}
+
+		results = append(results, map[string]interface{}{
+			"id":                       id,
+			"order_tracking_id":        orderID,
+			"customer_tracking_id":     customerID,
+			"vendor_tracking_id":       vendorID,
+			"store_tracking_id":        storeID,
+			"reason":                   reason,
+			"status":                   retStatus,
+			"requested_at":             requestedAt,
+			"pickup_deadline":          pickupDeadline,
+			"verified_at":              verifiedAt,
+			"completed_at":             completedAt,
+			"return_delivery_fee_paisa": returnFee,
+			"payment_status":           payStatus,
+			"created_at":               createdAt,
+			"updated_at":               updatedAt,
+		})
+	}
+
+	return results, total, nil
+}
+
+// GetReturnStats returns aggregated return statistics.
+func (r *ReturnRepository) GetReturnStats(ctx context.Context) (map[string]interface{}, error) {
+	stats := map[string]interface{}{}
+
+	// Total returns
+	var total int
+	err := r.reader.QueryRow(ctx, `SELECT COUNT(*) FROM return_requests`).Scan(&total)
+	if err != nil {
+		return nil, err
+	}
+	stats["total_returns"] = total
+
+	// Returns by status
+	rows, err := r.reader.Query(ctx,
+		`SELECT status, COUNT(*) FROM return_requests GROUP BY status ORDER BY COUNT(*) DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	byStatus := map[string]int{}
+	for rows.Next() {
+		var status string
+		var count int
+		if rows.Scan(&status, &count) == nil {
+			byStatus[status] = count
+		}
+	}
+	stats["by_status"] = byStatus
+
+	// Total refund amount
+	var totalRefund int64
+	err = r.reader.QueryRow(ctx,
+		`SELECT COALESCE(SUM(return_delivery_fee_paisa), 0) FROM return_requests WHERE payment_status = 'completed'`).Scan(&totalRefund)
+	if err == nil {
+		stats["total_refund_paisa"] = totalRefund
+	}
+
+	// Returns in last 7 days
+	var last7Days int
+	err = r.reader.QueryRow(ctx,
+		`SELECT COUNT(*) FROM return_requests WHERE created_at > NOW() - INTERVAL '7 days'`).Scan(&last7Days)
+	if err == nil {
+		stats["returns_last_7_days"] = last7Days
+	}
+
+	// Returns in last 30 days
+	var last30Days int
+	err = r.reader.QueryRow(ctx,
+		`SELECT COUNT(*) FROM return_requests WHERE created_at > NOW() - INTERVAL '30 days'`).Scan(&last30Days)
+	if err == nil {
+		stats["returns_last_30_days"] = last30Days
+	}
+
+	return stats, nil
+}

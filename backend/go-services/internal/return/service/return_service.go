@@ -7,6 +7,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/omnigo/backend/internal/return/fraud"
 	"github.com/omnigo/backend/internal/return/models"
 	"github.com/omnigo/backend/internal/return/repository"
 	"github.com/omnigo/backend/internal/shared/messaging"
@@ -17,7 +18,7 @@ const (
 	returnWindowHours         = 36
 	pickupDeadlineHours       = 12
 	vendorVerifyDeadlineHours = 24
-	returnHoldHours           = 72 // Hold escrow for 3 days during return verification
+	returnHoldHours           = 72
 )
 
 // EscrowManager handles escrow operations for returns.
@@ -28,20 +29,23 @@ type EscrowManager interface {
 }
 
 type ReturnService struct {
-	repo    *repository.ReturnRepository
-	escrow  EscrowManager
-	kafka   *messaging.KafkaClient
+	repo   *repository.ReturnRepository
+	escrow EscrowManager
+	kafka  *messaging.KafkaClient
+	fraud  *fraud.ReturnFraudDetector
 }
 
 func NewReturnService(
 	repo *repository.ReturnRepository,
 	escrow EscrowManager,
 	kafka *messaging.KafkaClient,
+	fraudDetector *fraud.ReturnFraudDetector,
 ) *ReturnService {
 	return &ReturnService{
 		repo:   repo,
 		escrow: escrow,
 		kafka:  kafka,
+		fraud:  fraudDetector,
 	}
 }
 
@@ -112,10 +116,40 @@ func (s *ReturnService) RequestReturn(
 		return nil, fmt.Errorf("ORDER_NOT_RETURNABLE: order status is '%s', must be 'delivered' or 'completed'", status)
 	}
 
-	// 6. Calculate return delivery fee
+	// 6. Fraud detection
+	if s.fraud != nil {
+		totalAmount := int64(0)
+		if v, ok := orderData["total_amount_paisa"]; ok {
+			if amt, ok := v.(int64); ok {
+				totalAmount = amt
+			}
+		}
+
+		returnCount, err := s.repo.GetCustomerReturnCount(ctx, customerID)
+		if err != nil {
+			log.Printf("[RETURN-%s] Warning: failed to get customer return count: %v", orderTrackingID, err)
+			returnCount = 0
+		}
+		orderCount, err := s.repo.GetCustomerOrderCount(ctx, customerID)
+		if err != nil {
+			log.Printf("[RETURN-%s] Warning: failed to get customer order count: %v", orderTrackingID, err)
+			orderCount = 0
+		}
+
+		fraudResult, err := s.fraud.CheckReturn(ctx, customerID, totalAmount, returnCount, orderCount)
+		if err != nil {
+			log.Printf("[RETURN-%s] Warning: fraud check failed: %v", orderTrackingID, err)
+		} else if fraudResult.Blocked {
+			return nil, fmt.Errorf("RETURN_BLOCKED_BY_FRAUD_DETECTION: %v", fraudResult.Reasons)
+		} else if fraudResult.FlagOnly {
+			log.Printf("[RETURN-%s] RETURN FLAGGED FOR REVIEW: %v", orderTrackingID, fraudResult.Reasons)
+		}
+	}
+
+	// 7. Calculate return delivery fee
 	var returnFeePaisa int64 = 15000 // PKR 150 in paisa
 
-	// 7. Create return request
+	// 8. Create return request
 	now := time.Now()
 	pickupDeadline := now.Add(time.Duration(pickupDeadlineHours) * time.Hour)
 
@@ -139,7 +173,14 @@ func (s *ReturnService) RequestReturn(
 		return nil, fmt.Errorf("failed to create return request: %w", err)
 	}
 
-	// 8. Re-hold escrow for return verification
+	// Record return in fraud tracking windows (after successful creation)
+	if s.fraud != nil {
+		if err := s.fraud.RecordReturn(ctx, customerID); err != nil {
+			log.Printf("[RETURN-%s] Warning: failed to record return in fraud tracker: %v", orderTrackingID, err)
+		}
+	}
+
+	// 9. Re-hold escrow for return verification
 	if s.escrow != nil {
 		vendorID := orderData["vendor_tracking_id"].(string)
 		totalAmount := int64(0)
@@ -156,7 +197,7 @@ func (s *ReturnService) RequestReturn(
 		}
 	}
 
-	// 9. Emit Kafka event for delivery-service to create return gig
+	// 10. Emit Kafka event for delivery-service to create return gig
 	event := map[string]interface{}{
 		"return_request_id":    req.ID,
 		"order_tracking_id":    orderTrackingID,
