@@ -96,8 +96,11 @@ func main() {
 	escrowSvc := escrow.NewService(db.Writer, ledgerSvc, rdbForEscrow)
 	calculator := payment_orchestrator.NewCommissionCalculator(db.Writer)
 
+	// PayFast client (initialized early for COD card payment)
+	payfastClient := payfast.NewClientFromEnv()
+
 	// 4. Initialize Handlers
-	codHandler := handlers.NewCODHandler(db.Writer, ledgerSvc, escrowSvc, calculator)
+	codHandler := handlers.NewCODHandler(db.Writer, ledgerSvc, escrowSvc, calculator, payfastClient)
 	disputeHandler := handlers.NewDisputeHandler(db.Writer, escrowSvc)
 	vendorHandler := handlers.NewVendorHandler(db.Writer)
 
@@ -127,7 +130,6 @@ func main() {
 	}
 
 	// PayFast split handler
-	payfastClient := payfast.NewClientFromEnv()
 	var payfastSplitHandler *handlers.PayFastSplitHandler
 	if payfastClient.IsConfigured() {
 		payfastService := payfastSvc.NewPayFastService(

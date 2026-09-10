@@ -2,9 +2,7 @@ package handlers
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -17,10 +15,11 @@ import (
 
 	"github.com/omnigo/backend/internal/escrow"
 	"github.com/omnigo/backend/internal/ledger"
+	"github.com/omnigo/backend/internal/payment/payfast"
 	"github.com/omnigo/backend/internal/payment_orchestrator"
+	"github.com/omnigo/backend/internal/payment_orchestrator/service"
 	"github.com/omnigo/backend/internal/shared/database"
 	"github.com/omnigo/backend/internal/shared/middleware"
-	"github.com/omnigo/backend/internal/shared/security"
 )
 
 // CODHandler handles Cash on Delivery payment flows.
@@ -29,14 +28,16 @@ type CODHandler struct {
 	ledger     *ledger.Service
 	escrow     *escrow.Service
 	calculator *payment_orchestrator.CommissionCalculator
+	payfast    *payfast.Client
 }
 
-func NewCODHandler(db *pgxpool.Pool, ledgerSvc *ledger.Service, escrowSvc *escrow.Service, calc *payment_orchestrator.CommissionCalculator) *CODHandler {
+func NewCODHandler(db *pgxpool.Pool, ledgerSvc *ledger.Service, escrowSvc *escrow.Service, calc *payment_orchestrator.CommissionCalculator, payfastClient *payfast.Client) *CODHandler {
 	return &CODHandler{
 		db:         db,
 		ledger:     ledgerSvc,
 		escrow:     escrowSvc,
 		calculator: calc,
+		payfast:    payfastClient,
 	}
 }
 
@@ -151,14 +152,16 @@ func (h *CODHandler) Confirm(c *gin.Context) {
 	})
 }
 
-// CODPayNowRequest is the payload for generating a deep-link.
+// CODPayNowRequest is the payload for generating a hosted checkout redirect.
+// Deprecated: Use CardPayment endpoint for in-app card settlement.
 type CODPayNowRequest struct {
 	CodDebtID string `json:"cod_debt_id" binding:"required"`
-	Gateway   string `json:"gateway" binding:"required"` // "jazzcash" or "easypaisa"
+	Gateway   string `json:"gateway" binding:"required"` // must be "payfast"
 }
 
 // PayNow handles POST /api/v1/payments/cod/pay-now
-// Generates a deep-link for the Rider to pay via JazzCash/EasyPaisa/PayFast.
+// Deprecated: Generates a PayFast hosted checkout redirect URL.
+// Use CardPayment endpoint for direct card settlement.
 func (h *CODHandler) PayNow(c *gin.Context) {
 	var req CODPayNowRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -166,8 +169,8 @@ func (h *CODHandler) PayNow(c *gin.Context) {
 		return
 	}
 
-	if req.Gateway != "jazzcash" && req.Gateway != "easypaisa" && req.Gateway != "payfast" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "gateway must be 'jazzcash', 'easypaisa', or 'payfast'"})
+	if req.Gateway != "payfast" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "gateway must be 'payfast'. JazzCash/EasyPaisa are no longer supported."})
 		return
 	}
 
@@ -191,100 +194,122 @@ func (h *CODHandler) PayNow(c *gin.Context) {
 		return
 	}
 
-	// PayFast gateway: generate hosted checkout redirect URL
-	if req.Gateway == "payfast" {
-		merchantID := os.Getenv("PAYFAST_MERCHANT_ID")
-		if merchantID == "" {
-			merchantID = "10001"
-		}
-		baseURL := os.Getenv("PAYFAST_BASE_URL")
-		if baseURL == "" {
-			baseURL = os.Getenv("PAYFAST_API_URL")
-		}
-		if baseURL == "" {
-			baseURL = "https://ipguat.apps.net.pk/Ecommerce/api/Transaction"
-		}
-		returnURL := os.Getenv("PUBLIC_BASE_URL")
-		if returnURL == "" {
-			returnURL = "https://omnigo-app-3-production.up.railway.app"
-		}
-		returnURL += "/api/v1/payments/cod/settlement"
-
-		basketID := fmt.Sprintf("COD%s", req.CodDebtID[:min(len(req.CodDebtID), 20)])
-		amountStr := fmt.Sprintf("%.2f", amountOwed)
-
-		var redirectURL string
-		if strings.Contains(baseURL, "apps.net.pk") {
-			formEndpoint := strings.TrimRight(baseURL, "/")
-			if !strings.HasSuffix(formEndpoint, "/PostTransaction") {
-				if strings.HasSuffix(formEndpoint, "/Transaction") {
-					formEndpoint += "/PostTransaction"
-				} else {
-					formEndpoint += "/Transaction/PostTransaction"
-				}
-			}
-			redirectURL = fmt.Sprintf(
-				"%s?merchant_id=%s&basket_id=%s&txnamt=%s&currency_code=PKR&success_url=%s&checkout_url=%s",
-				formEndpoint,
-				url.QueryEscape(merchantID),
-				url.QueryEscape(basketID),
-				amountStr,
-				url.QueryEscape(returnURL),
-				url.QueryEscape(returnURL),
-			)
-		} else {
-			redirectURL = fmt.Sprintf(
-				"%s/hosted?merchant_id=%s&basket_id=%s&txnamt=%s&currency_code=PKR&success_url=%s&checkout_url=%s",
-				strings.TrimRight(baseURL, "/"),
-				url.QueryEscape(merchantID),
-				url.QueryEscape(basketID),
-				amountStr,
-				url.QueryEscape(returnURL),
-				url.QueryEscape(returnURL),
-			)
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"status":          "redirect_ready",
-			"gateway":         "payfast",
-			"redirect_url":    redirectURL,
-			"basket_id":       basketID,
-			"amount_owed":     amountOwed,
-			"amount_owed_paisa": amountOwedPaisa,
-			"rider_id":        riderID,
-		})
-		return
+	// PayFast hosted checkout redirect URL
+	merchantID := os.Getenv("PAYFAST_MERCHANT_ID")
+	if merchantID == "" {
+		merchantID = "10001"
 	}
-
-	// JazzCash/EasyPaisa: generate deep-link
-	salt := security.MustEnv("JAZZCASH_SALT")
-	if req.Gateway == "easypaisa" {
-		salt = security.MustEnv("EASYPAISA_SALT")
+	baseURL := os.Getenv("PAYFAST_BASE_URL")
+	if baseURL == "" {
+		baseURL = os.Getenv("PAYFAST_API_URL")
 	}
-	if salt == "" && req.Gateway == "jazzcash" {
-		salt = os.Getenv("JAZZCASH_INTEGRITY_SALT")
+	if baseURL == "" {
+		baseURL = "https://ipguat.apps.net.pk/Ecommerce/api/Transaction"
 	}
+	returnURL := os.Getenv("PUBLIC_BASE_URL")
+	if returnURL == "" {
+		returnURL = "https://omnigo-app-3-production.up.railway.app"
+	}
+	returnURL += "/api/v1/payments/cod/settlement"
 
+	basketID := fmt.Sprintf("COD%s", req.CodDebtID[:min(len(req.CodDebtID), 20)])
 	amountStr := fmt.Sprintf("%.2f", amountOwed)
-	payload := fmt.Sprintf("amount=%s&to=OMNIGO_SETTLEMENT&ref=%s", amountStr, req.CodDebtID)
-	mac := hmac.New(sha256.New, []byte(salt))
-	mac.Write([]byte(payload))
-	signature := hex.EncodeToString(mac.Sum(nil))
 
-	deepLink := fmt.Sprintf("%s://transfer?amount=%s&to=OMNIGO_SETTLEMENT&ref=%s&hash=%s",
-		req.Gateway, amountStr, req.CodDebtID, signature)
+	var redirectURL string
+	if strings.Contains(baseURL, "apps.net.pk") {
+		formEndpoint := strings.TrimRight(baseURL, "/")
+		if !strings.HasSuffix(formEndpoint, "/PostTransaction") {
+			if strings.HasSuffix(formEndpoint, "/Transaction") {
+				formEndpoint += "/PostTransaction"
+			} else {
+				formEndpoint += "/Transaction/PostTransaction"
+			}
+		}
+		redirectURL = fmt.Sprintf(
+			"%s?merchant_id=%s&basket_id=%s&txnamt=%s&currency_code=PKR&success_url=%s&checkout_url=%s",
+			formEndpoint,
+			url.QueryEscape(merchantID),
+			url.QueryEscape(basketID),
+			amountStr,
+			url.QueryEscape(returnURL),
+			url.QueryEscape(returnURL),
+		)
+	} else {
+		redirectURL = fmt.Sprintf(
+			"%s/hosted?merchant_id=%s&basket_id=%s&txnamt=%s&currency_code=PKR&success_url=%s&checkout_url=%s",
+			strings.TrimRight(baseURL, "/"),
+			url.QueryEscape(merchantID),
+			url.QueryEscape(basketID),
+			amountStr,
+			url.QueryEscape(returnURL),
+			url.QueryEscape(returnURL),
+		)
+	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":           "deep_link_ready",
-		"gateway":          req.Gateway,
-		"deep_link":        deepLink,
-		"amount_owed":      amountOwed,
+		"status":          "redirect_ready",
+		"gateway":         "payfast",
+		"redirect_url":    redirectURL,
+		"basket_id":       basketID,
+		"amount_owed":     amountOwed,
 		"amount_owed_paisa": amountOwedPaisa,
-		"rider_id":         riderID,
+		"rider_id":        riderID,
 	})
 }
 
-// CODSettlementRequest is the webhook payload from JazzCash/EasyPaisa.
+// CODCardPaymentRequest is the payload for card-based COD settlement.
+type CODCardPaymentRequest struct {
+	OrderTrackingID string `json:"order_tracking_id" binding:"required"`
+	CardNumber      string `json:"card_number" binding:"required"`
+	ExpiryMonth     string `json:"expiry_month" binding:"required"`
+	ExpiryYear      string `json:"expiry_year" binding:"required"`
+	CVV             string `json:"cvv" binding:"required"`
+}
+
+// CardPayment handles POST /api/v1/payments/cod/card-payment
+// Allows riders to settle COD debt via PayFast debit/credit card.
+func (h *CODHandler) CardPayment(c *gin.Context) {
+	var req CODCardPaymentRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx := c.Request.Context()
+	riderID := middleware.GetTrackingID(c)
+	if riderID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	// Create PayFast service with the injected client
+	payfastSvc := service.NewPayFastService(h.db, h.ledger, h.escrow, h.calculator, h.payfast)
+
+	resp, err := payfastSvc.ProcessCODCardPayment(ctx, riderID, c.ClientIP(), &service.CODCardPaymentRequest{
+		OrderTrackingID: req.OrderTrackingID,
+		CardNumber:      req.CardNumber,
+		ExpiryMonth:     req.ExpiryMonth,
+		ExpiryYear:      req.ExpiryYear,
+		CVV:             req.CVV,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		case errors.Is(err, service.ErrForbidden):
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		case errors.Is(err, service.ErrValidation):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// CODSettlementRequest is the webhook payload from PayFast gateway.
 type CODSettlementRequest struct {
 	CodDebtID      string  `json:"cod_debt_id" binding:"required"`
 	TransactionID  string  `json:"transaction_id" binding:"required"`
@@ -295,7 +320,7 @@ type CODSettlementRequest struct {
 }
 
 // Settlement handles POST /api/v1/payments/cod/settlement
-// Webhook from JazzCash/EasyPaisa confirming the rider has paid.
+// Webhook from PayFast gateway confirming the rider has paid.
 // FIX: All DB operations wrapped in transaction for atomicity.
 // Ledger transfers use idempotency keys for safe retry.
 func (h *CODHandler) Settlement(c *gin.Context) {
@@ -516,6 +541,7 @@ func (h *CODHandler) RegisterRoutes(router *gin.Engine) {
 	router.POST("/api/v1/payments/cod/confirm", middleware.JWTAuth(), middleware.RoleRequired("rider", "admin"), h.Confirm)
 	router.POST("/api/v1/payments/cod/pay-now", middleware.JWTAuth(), middleware.RoleRequired("rider", "admin"), h.PayNow)
 	router.POST("/api/v1/payments/cod/settlement", middleware.JWTAuth(), middleware.RoleRequired("rider", "admin"), h.Settlement)
+	router.POST("/api/v1/payments/cod/card-payment", middleware.JWTAuth(), middleware.RoleRequired("rider", "admin"), h.CardPayment)
 	router.GET("/api/v1/payments/cod/debts", middleware.JWTAuth(), h.ListDebts)
 }
 

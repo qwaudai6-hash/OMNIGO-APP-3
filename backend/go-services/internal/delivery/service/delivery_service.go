@@ -466,7 +466,7 @@ func (s *DeliveryService) UpdateGigStatus(ctx context.Context, trackingID string
 				log.Printf("Warning: failed to add COD collection to wallet for rider %s: %v", assignedRider, err)
 			}
 
-			// Ensure active debt record is created so the rider sees it and can settle via JazzCash/EasyPaisa
+			// Ensure active debt record is created so the rider sees it and can settle via card payment
 			if err := s.repo.RecordCODDebt(ctx, gig.OrderTrackingID, assignedRider, orderTotalPaisa); err != nil {
 				log.Printf("Warning: failed to record COD debt for rider %s: %v", assignedRider, err)
 			}
@@ -480,7 +480,7 @@ func (s *DeliveryService) UpdateGigStatus(ctx context.Context, trackingID string
 			}
 
 			// NOTE: Settlement ledger entries and escrow hold are created by cod_handler.SettleWebhook
-			// when the rider deposits cash via JazzCash/EasyPaisa. We do NOT create them here
+			// when the rider pays via card. We do NOT create them here
 			// because at this point the rider is still holding the cash — the platform hasn't
 			// received it yet. Creating settlement entries now would cause double-counting.
 		}

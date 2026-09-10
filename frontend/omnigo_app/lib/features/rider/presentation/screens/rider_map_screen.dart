@@ -24,6 +24,7 @@ import '../../../shared/presentation/widgets/map_libre_map_widget.dart';
 import '../../services/telemetry_service.dart';
 import '../../services/offline_gig_storage.dart';
 import '../widgets/notification_alert_dialog.dart';
+import 'rider_cod_card_payment_screen.dart';
 
 class RiderMapScreen extends StatefulWidget {
   const RiderMapScreen({super.key, required this.trackingId});
@@ -2251,159 +2252,20 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
     );
   }
 
-  void _showPayDebtDialog(String codDebtId, double amount) {
-    String selectedGateway = 'jazzcash';
-    bool isSubmitting = false;
-
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-          title: const Row(
-            children: [
-              Icon(Icons.account_balance_wallet_outlined, color: AppTheme.blackAccent),
-              SizedBox(width: 10),
-              Text('COD Debt Settlement', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-            ],
-          ),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: Colors.red.shade50,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: Colors.red.shade200),
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Text('Total Payable:', style: TextStyle(fontWeight: FontWeight.w600, color: Colors.black87)),
-                      Text('PKR ${amount.toStringAsFixed(2)}', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Colors.red.shade800)),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 20),
-                const Text('Select Payment Gateway:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.black87)),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    Expanded(
-                      child: InkWell(
-                        onTap: () => setDialogState(() => selectedGateway = 'jazzcash'),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          decoration: BoxDecoration(
-                            color: selectedGateway == 'jazzcash' ? AppTheme.limeAccent.withOpacity(0.2) : Colors.grey.shade100,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: selectedGateway == 'jazzcash' ? AppTheme.blackAccent : Colors.grey.shade300, width: 2),
-                          ),
-                          child: const Column(
-                            children: [
-                              Icon(Icons.flash_on, color: Colors.orange, size: 24),
-                              SizedBox(height: 4),
-                              Text('JazzCash', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: InkWell(
-                        onTap: () => setDialogState(() => selectedGateway = 'easypaisa'),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          decoration: BoxDecoration(
-                            color: selectedGateway == 'easypaisa' ? AppTheme.limeAccent.withOpacity(0.2) : Colors.grey.shade100,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: selectedGateway == 'easypaisa' ? AppTheme.blackAccent : Colors.grey.shade300, width: 2),
-                          ),
-                          child: const Column(
-                            children: [
-                              Icon(Icons.account_balance, color: Colors.green, size: 24),
-                              SizedBox(height: 4),
-                              Text('EasyPaisa', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 20),
-                // FIX C8: Removed MPIN input — it was collected but never sent to the API.
-                // The settlement is handled server-side via JazzCash/EasyPaisa webhook callback.
-                // Payment is initiated by launching the deep link returned from codPayNow.
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: isSubmitting ? null : () => Navigator.pop(ctx),
-              child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
-            ),
-            ElevatedButton(
-              onPressed: isSubmitting ? null : () async {
-                final messenger = ScaffoldMessenger.of(context);
-                final dialogNavigator = Navigator.of(ctx);
-                setDialogState(() => isSubmitting = true);
-                try {
-                  final respBody = await _apiClient.post(
-                    ApiEndpoints.codPayNow(),
-                    {
-                      'cod_debt_id': codDebtId,
-                      'gateway': selectedGateway,
-                    },
-                  ) as Map<String, dynamic>;
-
-                  final deepLink = respBody['deep_link'] as String?;
-                  if (deepLink != null && deepLink.isNotEmpty) {
-                    final uri = Uri.parse(deepLink);
-                    if (await canLaunchUrl(uri)) {
-                      await launchUrl(uri, mode: LaunchMode.externalApplication);
-                    }
-                  }
-
-                  if (mounted) {
-                    dialogNavigator.pop();
-                    messenger.showSnackBar(
-                      SnackBar(
-                        content: Text('Payment initiated via ${selectedGateway.toUpperCase()}. Complete payment in the ${selectedGateway} app.'),
-                        backgroundColor: Colors.green,
-                      ),
-                    );
-                    _fetchCodDebts();
-                    _fetchWalletSummary();
-                  }
-                } catch (e) {
-                  if (mounted) {
-                    messenger.showSnackBar(
-                      SnackBar(content: Text('Settlement Error: $e')),
-                    );
-                  }
-                } finally {
-                  setDialogState(() => isSubmitting = false);
-                }
-              },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppTheme.blackAccent,
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              ),
-              child: isSubmitting
-                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
-                  : const Text('Confirm Payment', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
-            ),
-          ],
+  void _showPayDebtDialog(String codDebtId, double amount, String orderId) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => RiderCODCardPaymentScreen(
+          orderTrackingID: orderId,
+          amountOwed: amount,
+          riderTrackingID: widget.trackingId,
         ),
       ),
-    );
+    ).then((_) {
+      _fetchCodDebts();
+      _fetchWalletSummary();
+    });
   }
 
   Widget _buildWalletTab() {
@@ -2739,7 +2601,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                   const SizedBox(height: 8),
                   Text(
                     totalOwed > 0
-                        ? 'Cash collected from customer deliveries to be deposited to platform via JazzCash/EasyPaisa.'
+                        ? 'Cash collected from customer deliveries to be deposited to platform via card payment.'
                         : 'No pending Cash on Delivery debt. All customer collections are fully settled.',
                     style: const TextStyle(color: Colors.white70, fontSize: 12),
                   ),
@@ -2811,9 +2673,9 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                       SizedBox(
                         width: double.infinity,
                         child: ElevatedButton.icon(
-                          onPressed: () => _showPayDebtDialog(debtId, amount),
+                          onPressed: () => _showPayDebtDialog(debtId, amount, orderId),
                           icon: const Icon(Icons.payment, size: 18, color: Colors.white),
-                          label: const Text('Pay Settlement (MPIN Required)', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
+                          label: const Text('Pay with Card', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
                           style: ElevatedButton.styleFrom(
                             backgroundColor: Colors.red.shade800,
                             padding: const EdgeInsets.symmetric(vertical: 12),

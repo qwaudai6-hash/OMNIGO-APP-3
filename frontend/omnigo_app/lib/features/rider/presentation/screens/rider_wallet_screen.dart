@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
 import '../../../../core/network/api_client.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/theme/app_theme.dart';
+import 'rider_cod_card_payment_screen.dart';
 
 class RiderWalletScreen extends StatefulWidget {
   const RiderWalletScreen({super.key, required this.trackingId});
@@ -59,69 +59,6 @@ class _RiderWalletScreenState extends State<RiderWalletScreen> {
       }
     }
     throw Exception('unreachable');
-  }
-
-  Future<void> _payNow(String codDebtId, String gateway) async {
-    try {
-      final data = await ApiClient().post(
-        ApiEndpoints.codPayNow(),
-        {
-          'cod_debt_id': codDebtId,
-          'gateway': gateway,
-        },
-      );
-
-      if (mounted) {
-        final deepLink = (data['deep_link'] as String?) ?? '';
-
-        if (deepLink.isNotEmpty) {
-          // Auto-launch the gateway via the system handler. Fall back to a
-          // snackbar with a manual Open action if the device cannot resolve
-          // the URL (no browser, no app, no handler).
-          final uri = Uri.parse(deepLink);
-          bool launched = false;
-          try {
-            launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
-          } catch (e) {
-            debugPrint('launchUrl threw: $e');
-            launched = false;
-          }
-          if (!launched && mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('Could not open $gateway automatically. Tap to retry.'),
-                action: SnackBarAction(
-                  label: 'Open',
-                  onPressed: () {
-                    launchUrl(uri, mode: LaunchMode.externalApplication);
-                  },
-                ),
-                duration: const Duration(seconds: 6),
-              ),
-            );
-          }
-        } else {
-          // Backend returned 200 but no deep link (e.g. JazzCash/EasyPaisa
-          // failure simulated in dev) — refresh wallet and tell the user.
-          // Capture the messenger BEFORE the await so the analyzer is
-          // satisfied we aren't using a stale context after the gap.
-          if (mounted) {
-            final messenger = ScaffoldMessenger.of(context);
-            await _fetchWallet();
-            if (!mounted) return;
-            messenger.showSnackBar(
-              SnackBar(content: Text('$gateway session created. Complete payment in the gateway app or contact support if amount is not reflected.')),
-            );
-          }
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Payment failed: $e')),
-        );
-      }
-    }
   }
 
   @override
@@ -303,8 +240,8 @@ class _RiderWalletScreenState extends State<RiderWalletScreen> {
                     ),
                   ),
                   ElevatedButton.icon(
-                    onPressed: () => _showPaymentDialog(debtId, amount),
-                    icon: const Icon(Icons.payment, size: 16),
+                    onPressed: () => _showPaymentDialog(debtId, amount, orderId),
+                    icon: const Icon(Icons.credit_card, size: 16),
                     label: const Text('Pay Now', style: TextStyle(fontSize: 12)),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.red[700],
@@ -321,26 +258,19 @@ class _RiderWalletScreenState extends State<RiderWalletScreen> {
     );
   }
 
-  void _showPaymentDialog(String codDebtId, double amount) {
+  void _showPaymentDialog(String codDebtId, double amount, String orderTrackingId) {
     showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Pay COD Debt'),
-        content: Text('Pay PKR ${amount.toStringAsFixed(2)} via:'),
+        content: Text('Pay PKR ${amount.toStringAsFixed(2)} via debit/credit card:'),
         actions: [
           TextButton(
             onPressed: () {
               Navigator.pop(ctx);
-              _payNow(codDebtId, 'jazzcash');
+              _navigateToCardPayment(orderTrackingId, amount);
             },
-            child: const Text('JazzCash'),
-          ),
-          TextButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              _payNow(codDebtId, 'easypaisa');
-            },
-            child: const Text('EasyPaisa'),
+            child: const Text('Pay with Card'),
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx),
@@ -349,6 +279,22 @@ class _RiderWalletScreenState extends State<RiderWalletScreen> {
         ],
       ),
     );
+  }
+
+  void _navigateToCardPayment(String orderTrackingId, double amount) async {
+    final result = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (context) => RiderCODCardPaymentScreen(
+          orderTrackingID: orderTrackingId,
+          amountOwed: amount,
+          riderTrackingID: widget.trackingId,
+        ),
+      ),
+    );
+    if (result == true && mounted) {
+      _fetchWallet(); // Refresh wallet data
+    }
   }
 
   Widget _buildCreditCard(Map<String, dynamic> c) {

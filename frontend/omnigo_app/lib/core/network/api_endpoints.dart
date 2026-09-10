@@ -300,6 +300,7 @@ class ApiEndpoints {
   static String codConfirm() => '$paymentBase/payments/cod/confirm';
   static String codPayNow() => '$paymentBase/payments/cod/pay-now';
   static String codSettlement() => '$paymentBase/payments/cod/settlement';
+  static String codCardPayment() => '$paymentBase/payments/cod/card-payment';
   static String codDebts(String riderId) =>
       '$paymentBase/payments/cod/debts?rider_id=$riderId';
 
