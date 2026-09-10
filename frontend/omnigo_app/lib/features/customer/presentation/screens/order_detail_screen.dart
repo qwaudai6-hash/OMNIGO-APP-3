@@ -180,58 +180,95 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     final canCancel = ['pending', 'paid', 'accepted', 'shipped', 'in_transit', 'picked_up'].contains(status);
     final canRefund = ['completed', 'delivered'].contains(status);
 
+    // For return requests, let user select items
+    List<dynamic> items = (_currentOrder['items'] as List<dynamic>?) ??
+        (_currentOrder['products'] as List<dynamic>?) ??
+        [];
+    final Set<int> selectedIndices = {};
+
     final action = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-        title: const Text('Order Issue', style: TextStyle(fontWeight: FontWeight.bold, color: AppTheme.blackAccent)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              canCancel
-                  ? 'This order can still be cancelled before delivery.'
-                  : canRefund
-                      ? 'Request a refund for this delivered order.'
-                      : 'No refund or cancellation is available for this order state.',
-              style: const TextStyle(color: Colors.grey, fontSize: 13),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: reasonController,
-              maxLines: 3,
-              decoration: InputDecoration(
-                hintText: 'Reason (e.g. changed my mind, item damaged)',
-                hintStyle: const TextStyle(color: Colors.grey, fontSize: 13),
-                filled: true,
-                fillColor: Colors.grey.shade50,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(16),
-                  borderSide: BorderSide(color: Colors.grey.shade300),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          backgroundColor: Colors.white,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+          title: const Text('Order Issue', style: TextStyle(fontWeight: FontWeight.bold, color: AppTheme.blackAccent)),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  canCancel
+                      ? 'This order can still be cancelled before delivery.'
+                      : canRefund
+                          ? 'Select items to return and provide a reason.'
+                          : 'No refund or cancellation is available for this order state.',
+                  style: const TextStyle(color: Colors.grey, fontSize: 13),
                 ),
-              ),
+                if (canRefund && items.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  const Text('Items to return:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                  const SizedBox(height: 8),
+                  ...items.asMap().entries.map((entry) {
+                    final idx = entry.key;
+                    final item = entry.value;
+                    final name = item['name'] ?? item['product_name'] ?? 'Item ${idx + 1}';
+                    final qty = item['quantity'] ?? 1;
+                    return CheckboxListTile(
+                      value: selectedIndices.contains(idx),
+                      onChanged: (val) {
+                        setDialogState(() {
+                          if (val == true) {
+                            selectedIndices.add(idx);
+                          } else {
+                            selectedIndices.remove(idx);
+                          }
+                        });
+                      },
+                      title: Text('$name x$qty', style: const TextStyle(fontSize: 13)),
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                    );
+                  }),
+                ],
+                const SizedBox(height: 12),
+                TextField(
+                  controller: reasonController,
+                  maxLines: 3,
+                  decoration: InputDecoration(
+                    hintText: 'Reason (e.g. changed my mind, item damaged)',
+                    hintStyle: const TextStyle(color: Colors.grey, fontSize: 13),
+                    filled: true,
+                    fillColor: Colors.grey.shade50,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(16),
+                      borderSide: BorderSide(color: Colors.grey.shade300),
+                    ),
+                  ),
+                ),
+              ],
             ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close', style: TextStyle(color: Colors.grey)),
+            ),
+            if (canCancel)
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context, 'cancel'),
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.orange, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+                child: const Text('Cancel Order', style: TextStyle(color: Colors.white)),
+              ),
+            if (canRefund)
+              ElevatedButton(
+                onPressed: selectedIndices.isEmpty ? null : () => Navigator.pop(context, 'return'),
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+                child: const Text('Request Return', style: TextStyle(color: Colors.white)),
+              ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Close', style: TextStyle(color: Colors.grey)),
-          ),
-          if (canCancel)
-            ElevatedButton(
-              onPressed: () => Navigator.pop(context, 'cancel'),
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.orange, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
-              child: const Text('Cancel Order', style: TextStyle(color: Colors.white)),
-            ),
-          if (canRefund)
-            ElevatedButton(
-              onPressed: () => Navigator.pop(context, 'refund'),
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
-              child: const Text('Request Refund', style: TextStyle(color: Colors.white)),
-            ),
-        ],
       ),
     );
 
@@ -240,12 +277,12 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     setState(() => _isSubmitting = true);
     try {
       final orderId = (_currentOrder['order_tracking_id'] ?? 'ORD-UNKNOWN').toString();
-      final body = {
-        'order_tracking_id': orderId,
-        'reason': reasonController.text.trim().isNotEmpty ? reasonController.text.trim() : 'Customer requested',
-      };
 
       if (action == 'cancel') {
+        final body = {
+          'order_tracking_id': orderId,
+          'reason': reasonController.text.trim().isNotEmpty ? reasonController.text.trim() : 'Customer requested',
+        };
         await sl<ApiClient>().post(ApiEndpoints.customerCancelOrder(orderId), body);
         setState(() => _currentOrder['status'] = 'cancelled');
         if (mounted) {
@@ -254,10 +291,26 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
           );
         }
       } else {
-        await sl<ApiClient>().post(ApiEndpoints.customerReturnOrder(orderId), body);
+        // Build return items from selected indices
+        final returnItems = selectedIndices.map((idx) {
+          final item = items[idx];
+          return {
+            'product_tracking_id': item['product_tracking_id'] ?? item['product_id'] ?? '',
+            'name': item['name'] ?? item['product_name'] ?? '',
+            'quantity': item['quantity'] ?? 1,
+            'unit_price_paisa': item['unit_price_paisa'] ?? item['price_paisa'] ?? 0,
+          };
+        }).toList();
+
+        final body = {
+          'order_tracking_id': orderId,
+          'reason': reasonController.text.trim().isNotEmpty ? reasonController.text.trim() : 'Customer requested',
+          'items': returnItems,
+        };
+        await sl<ApiClient>().post(ApiEndpoints.customerReturnRequest(orderId), body);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Return request submitted'), backgroundColor: Colors.green),
+            const SnackBar(content: Text('Return request submitted. A rider will pick up your items.'), backgroundColor: Colors.green),
           );
         }
       }
@@ -840,7 +893,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
               const SizedBox(height: 12),
             ],
 
-            // ── Refund / Cancel Action (NEW) ──────────────────────────────
+            // ── Return / Cancel Action ──────────────────────────────
             if (['pending', 'paid', 'accepted', 'shipped', 'in_transit', 'picked_up', 'completed', 'delivered'].contains(status)) ...[
               SizedBox(
                 width: double.infinity,
@@ -848,7 +901,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
                   onPressed: _isSubmitting ? null : _requestRefundOrCancel,
                   icon: const Icon(Icons.request_page_outlined, color: Colors.orange),
                   label: Text(
-                    status == 'completed' || status == 'delivered' ? 'Request Refund' : 'Cancel Order',
+                    status == 'completed' || status == 'delivered' ? 'Request Return' : 'Cancel Order',
                     style: const TextStyle(color: Colors.orange, fontWeight: FontWeight.bold),
                   ),
                   style: OutlinedButton.styleFrom(
