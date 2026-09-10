@@ -1,6 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/network/api_client.dart';
+import '../../../../core/network/api_endpoints.dart';
+import '../../../../core/services/cart_provider.dart';
+import '../../data/models/cart_item.dart';
+import 'checkout_screen.dart';
 import 'order_detail_screen.dart';
 
 class MyOrdersScreen extends StatefulWidget {
@@ -24,6 +29,7 @@ class _MyOrdersScreenState extends State<MyOrdersScreen> with SingleTickerProvid
   int _offset = 0;
   final int _limit = 20;
   String _searchQuery = '';
+  DateTimeRange? _selectedDateRange;
 
   static const _activeStatuses = {'pending', 'paid', 'accepted', 'processing', 'shipped', 'in_transit'};
   static const _completedStatuses = {'delivered', 'completed'};
@@ -125,13 +131,125 @@ class _MyOrdersScreenState extends State<MyOrdersScreen> with SingleTickerProvid
             matchesTab = true;
         }
 
-        bool matchesSearch = query.isEmpty ||
+        final matchesSearch = query.isEmpty ||
             orderId.contains(query) ||
             storeId.contains(query);
 
-        return matchesTab && matchesSearch;
+        bool matchesDate = true;
+        if (_selectedDateRange != null) {
+          final rawCreated = order['created_at']?.toString();
+          if (rawCreated != null && rawCreated.isNotEmpty) {
+            final dt = DateTime.tryParse(rawCreated);
+            if (dt != null) {
+              final start = DateTime(_selectedDateRange!.start.year, _selectedDateRange!.start.month, _selectedDateRange!.start.day);
+              final end = DateTime(_selectedDateRange!.end.year, _selectedDateRange!.end.month, _selectedDateRange!.end.day, 23, 59, 59);
+              matchesDate = dt.isAfter(start.subtract(const Duration(seconds: 1))) &&
+                  dt.isBefore(end.add(const Duration(seconds: 1)));
+            }
+          }
+        }
+
+        return matchesTab && matchesSearch && matchesDate;
       }).toList();
     });
+  }
+
+  Future<void> _pickDateRange() async {
+    final picked = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(2023),
+      lastDate: DateTime.now().add(const Duration(days: 1)),
+      initialDateRange: _selectedDateRange,
+      builder: (context, child) {
+        return Theme(
+          data: Theme.of(context).copyWith(
+            colorScheme: const ColorScheme.light(
+              primary: AppTheme.blackAccent,
+              onPrimary: Colors.white,
+              surface: Colors.white,
+              onSurface: AppTheme.blackAccent,
+            ),
+          ),
+          child: child!,
+        );
+      },
+    );
+    if (picked != null) {
+      setState(() {
+        _selectedDateRange = picked;
+      });
+      _applyFilter();
+    }
+  }
+
+  void _clearDateFilter() {
+    setState(() {
+      _selectedDateRange = null;
+    });
+    _applyFilter();
+  }
+
+  Future<void> _reorder(Map<String, dynamic> order) async {
+    try {
+      List<dynamic> items = (order['items'] as List<dynamic>?) ??
+          (order['products'] as List<dynamic>?) ??
+          [];
+      if (items.isEmpty) {
+        final orderId = order['order_tracking_id']?.toString() ?? '';
+        if (orderId.isNotEmpty) {
+          final detail = await ApiClient().get(ApiEndpoints.orderDetail(orderId));
+          if (detail is Map<String, dynamic>) {
+            items = (detail['items'] as List<dynamic>?) ??
+                (detail['products'] as List<dynamic>?) ??
+                [];
+          }
+        }
+      }
+      if (items.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('No item details available to reorder.')),
+          );
+        }
+        return;
+      }
+
+      if (!mounted) return;
+      final cart = Provider.of<CartProvider>(context, listen: false);
+      for (final rawItem in items) {
+        if (rawItem is Map<String, dynamic>) {
+          final cartItem = CartItem.fromJson(rawItem);
+          if (cartItem.productId.isNotEmpty) {
+            await cart.addCartItem(cartItem, clearIfDifferentStore: true);
+          }
+        }
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('Items added to cart!'),
+            backgroundColor: Colors.green,
+            action: SnackBarAction(
+              label: 'Checkout',
+              textColor: Colors.white,
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(builder: (_) => const CheckoutScreen()),
+                );
+              },
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to reorder: $e')),
+        );
+      }
+    }
   }
 
   void _onSearchChanged(String value) {
@@ -198,16 +316,63 @@ class _MyOrdersScreenState extends State<MyOrdersScreen> with SingleTickerProvid
         backgroundColor: AppTheme.bgColor,
         elevation: 0,
         title: const Text(
-          'Order',
+          'Orders',
           style: TextStyle(
             color: AppTheme.blackAccent,
             fontWeight: FontWeight.bold,
           ),
         ),
+        actions: [
+          if (_selectedDateRange != null)
+            IconButton(
+              icon: const Icon(Icons.filter_alt_off, color: Colors.redAccent),
+              tooltip: 'Clear Date Filter',
+              onPressed: _clearDateFilter,
+            ),
+          IconButton(
+            icon: Icon(
+              Icons.date_range_outlined,
+              color: _selectedDateRange != null ? AppTheme.blackAccent : Colors.grey.shade700,
+            ),
+            tooltip: 'Filter by Date Range',
+            onPressed: _pickDateRange,
+          ),
+        ],
         bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(110),
+          preferredSize: Size.fromHeight(_selectedDateRange != null ? 144 : 110),
           child: Column(
             children: [
+              if (_selectedDateRange != null)
+                Padding(
+                  padding: const EdgeInsets.only(left: 16, right: 16, bottom: 8),
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: AppTheme.limeAccent.withOpacity(0.4),
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.calendar_today, size: 12),
+                            const SizedBox(width: 6),
+                            Text(
+                              '${_selectedDateRange!.start.day}/${_selectedDateRange!.start.month}/${_selectedDateRange!.start.year} - ${_selectedDateRange!.end.day}/${_selectedDateRange!.end.month}/${_selectedDateRange!.end.year}',
+                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                            ),
+                            const SizedBox(width: 4),
+                            GestureDetector(
+                              onTap: _clearDateFilter,
+                              child: const Icon(Icons.close, size: 14),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: TextField(
@@ -465,52 +630,75 @@ class _MyOrdersScreenState extends State<MyOrdersScreen> with SingleTickerProvid
                       ),
                     ],
                   ),
-                  if (isActive)
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: AppTheme.limeAccent.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.radar, size: 14, color: AppTheme.blackAccent),
-                          SizedBox(width: 4),
-                          Text(
-                            'Track',
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              color: AppTheme.blackAccent,
-                              fontSize: 12,
-                            ),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (!isActive) ...[
+                        ElevatedButton.icon(
+                          onPressed: () => _reorder(order),
+                          icon: const Icon(Icons.repeat, size: 14),
+                          label: const Text(
+                            'Reorder',
+                            style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
                           ),
-                        ],
-                      ),
-                    )
-                  else if (isCancelled)
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: Colors.red.withOpacity(0.1),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.help_outline, size: 14, color: Colors.red),
-                          SizedBox(width: 4),
-                          Text(
-                            'Get Help',
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              color: Colors.red,
-                              fontSize: 12,
-                            ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: isCancelled ? Colors.grey.shade200 : AppTheme.limeAccent,
+                            foregroundColor: AppTheme.blackAccent,
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                            elevation: 0,
                           ),
-                        ],
-                      ),
-                    ),
+                        ),
+                        const SizedBox(width: 8),
+                      ],
+                      if (isActive)
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: AppTheme.limeAccent.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.radar, size: 14, color: AppTheme.blackAccent),
+                              SizedBox(width: 4),
+                              Text(
+                                'Track',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  color: AppTheme.blackAccent,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      else if (isCancelled)
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: Colors.red.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.help_outline, size: 14, color: Colors.red),
+                              SizedBox(width: 4),
+                              Text(
+                                'Get Help',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.red,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
                 ],
               ),
             ),

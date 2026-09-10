@@ -30,8 +30,8 @@ func TestReleaseExpiredHolds_SQLPatternContainsAtomicClaim(t *testing.T) {
 	if idx == -1 {
 		t.Fatal("ReleaseExpiredHolds function not found in service.go")
 	}
-	// Take a 6KB window after the function declaration — enough to cover the body.
-	end := idx + 6000
+	// Take a 12KB window after the function declaration — enough to cover the body and helpers.
+	end := idx + 12000
 	if end > len(src) {
 		end = len(src)
 	}
@@ -98,3 +98,19 @@ func TestEscrowStatusConstants(t *testing.T) {
 		t.Errorf("StatusPaidOut = %q, want %q", StatusPaidOut, "paid_out")
 	}
 }
+
+// TestReleaseExpiredHolds_CODDebtSettlementCheck validates BUG SP-GO-14 fix:
+// Escrow release must verify cod_debts settlement status for COD orders before releasing.
+func TestReleaseExpiredHolds_CODDebtSettlementCheck(t *testing.T) {
+	src := readSourceFile(t)
+	if !strings.Contains(src, "cod_debts WHERE order_tracking_id = $1") {
+		t.Error("SP-GO-14 fix missing: cod_debts status is not queried for order")
+	}
+	if !strings.Contains(src, `strings.EqualFold(codDebtStatus, "settled")`) {
+		t.Error("SP-GO-14 fix missing: codDebtStatus is not validated against 'settled'")
+	}
+	if !strings.Contains(src, "payment_gateway") {
+		t.Error("SP-GO-14 fix missing: payment_gateway is not inspected before release")
+	}
+}
+

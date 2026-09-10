@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -208,6 +210,8 @@ func (r *DeliveryRepository) UpdateRiderLocation(ctx context.Context, riderTrack
 	})
 	if jsonErr == nil {
 		r.redis.Set(ctx, coordsKey, coordsJSON, 300*time.Second)
+		// Phase 2 Telemetry Bridge: Publish to Pub/Sub for real-time WebSocket routing
+		r.redis.Publish(ctx, "rider:telemetry:pubsub", coordsJSON)
 		// Publish telemetry coordinates to Redis Stream for durable delivery to clients.
 		// Unlike Pub/Sub, messages persist and survive client disconnects/reconnects.
 		r.redis.XAdd(ctx, &redis.XAddArgs{
@@ -320,15 +324,30 @@ func (r *DeliveryRepository) AcceptGigWithEligibility(ctx context.Context, track
 		return fmt.Errorf("conflict: rider KYC verification required. Please submit CNIC and Driving License documents for admin approval")
 	}
 
-	// Block COD gig if rider has >= 5000 PKR cash in hand (500000 paisa)
+	// FINANCIAL-AUDIT FIX #5: Block COD gig if rider has cash-in-hand exceeding threshold.
+	// Uses env var RIDER_CASH_BLOCK_THRESHOLD (default 5000 PKR) for configurability.
+	// Also checks is_cash_blocked column and fails closed on DB errors.
 	if isCod {
 		var cashInHandPaisa int64
-		walletQuery := `SELECT COALESCE(cash_in_hand_paisa, 0) FROM rider_wallet WHERE rider_tracking_id = $1`
-		if walletErr := tx.QueryRow(ctx, walletQuery, riderID).Scan(&cashInHandPaisa); walletErr != nil {
-			log.Printf("Warning: could not read rider_wallet for %s: %v", riderID, walletErr)
+		var isCashBlocked bool
+		walletQuery := `SELECT COALESCE(cash_in_hand_paisa, 0), COALESCE(is_cash_blocked, false) FROM rider_wallet WHERE rider_tracking_id = $1`
+		if walletErr := tx.QueryRow(ctx, walletQuery, riderID).Scan(&cashInHandPaisa, &isCashBlocked); walletErr != nil {
+			// FINANCIAL-AUDIT FIX: Fail closed — reject COD assignment if we can't verify cash status
+			return fmt.Errorf("conflict: unable to verify rider cash status. Please try again")
 		}
-		if cashInHandPaisa >= 500000 { // 5000 PKR in paisa
-			return fmt.Errorf("conflict: cash limit reached (>= 5000). Please deposit to accept COD orders")
+		// Check explicit block flag
+		if isCashBlocked {
+			return fmt.Errorf("conflict: rider cash account is blocked. Please deposit cash to proceed")
+		}
+		// Check threshold from env var (default 5000 PKR = 500000 paisa)
+		cashThresholdPaisa := int64(500000) // default 5000 PKR
+		if envThreshold := os.Getenv("RIDER_CASH_BLOCK_THRESHOLD"); envThreshold != "" {
+			if parsed, err := strconv.ParseFloat(envThreshold, 64); err == nil && parsed > 0 {
+				cashThresholdPaisa = int64(parsed * 100)
+			}
+		}
+		if cashInHandPaisa >= cashThresholdPaisa {
+			return fmt.Errorf("conflict: cash limit reached (>= %d PKR). Please deposit to accept COD orders", cashThresholdPaisa/100)
 		}
 	}
 

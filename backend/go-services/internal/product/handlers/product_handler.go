@@ -174,6 +174,7 @@ func (h *ProductHandler) RegisterRoutes(router *gin.Engine) {
 		products.GET("", h.ListProducts)
 		products.GET("/", h.ListProducts)
 		products.GET("/:tracking_id", h.GetProduct)
+		products.GET("/tracking/:tracking_id", h.GetProduct)
 		products.GET("/:tracking_id/recommendations", h.GetRecommendations)
 		// Auth required — vendor/admin only
 		products.POST("", middleware.JWTAuth(), h.CreateProduct)
@@ -187,6 +188,7 @@ func (h *ProductHandler) RegisterRoutes(router *gin.Engine) {
 			internal.POST("/reserve", h.ReserveStock)
 			internal.POST("/release", h.ReleaseStock)
 			internal.GET("/:id", h.GetProductByID)
+			internal.GET("/tracking/:tracking_id", h.GetProduct)
 		}
 	}
 }

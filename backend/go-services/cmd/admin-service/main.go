@@ -1266,6 +1266,129 @@ func main() {
 		})
 	}
 
+	// ── Emergency Order Intervention Routes ──────────────────────────────────
+	// POST /admin/orders/:order_id/force-cancel
+	adminRoutes.POST("/orders/:order_id/force-cancel", func(c *gin.Context) {
+		orderID := c.Param("order_id")
+		adminID := c.GetString("tracking_id")
+		var req struct {
+			Reason string `json:"reason" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "reason is required"})
+			return
+		}
+		ctx := c.Request.Context()
+		cmdTag, err := dbPool.Exec(ctx,
+			`UPDATE orders SET status = 'cancelled', updated_at = NOW()
+			 WHERE order_tracking_id = $1 AND status NOT IN ('cancelled','delivered')`,
+			orderID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if cmdTag.RowsAffected() == 0 {
+			c.JSON(http.StatusConflict, gin.H{"error": "order not found or already in terminal state"})
+			return
+		}
+		_, _ = dbPool.Exec(ctx,
+			`INSERT INTO admin_audit_log (admin_tracking_id, action, target_id, target_type, reason, created_at)
+			 VALUES ($1,'force_cancel',$2,'order',$3,NOW()) ON CONFLICT DO NOTHING`,
+			adminID, orderID, req.Reason)
+		c.JSON(http.StatusOK, gin.H{"message": "order force-cancelled", "order_id": orderID})
+	})
+
+	// POST /admin/orders/:order_id/manual-refund
+	adminRoutes.POST("/orders/:order_id/manual-refund", func(c *gin.Context) {
+		orderID := c.Param("order_id")
+		adminID := c.GetString("tracking_id")
+		var req struct {
+			Reason string `json:"reason" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "reason is required"})
+			return
+		}
+		ctx := c.Request.Context()
+		var customerID string
+		var totalPaisa int64
+		if err := dbPool.QueryRow(ctx,
+			`SELECT customer_tracking_id, total_amount_paisa FROM orders WHERE order_tracking_id = $1`,
+			orderID).Scan(&customerID, &totalPaisa); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "order not found: " + err.Error()})
+			return
+		}
+		tx, err := dbPool.Begin(ctx)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		if _, err := tx.Exec(ctx,
+			`UPDATE customer_wallet SET balance_paisa = balance_paisa + $1, updated_at = NOW()
+			 WHERE customer_tracking_id = $2`, totalPaisa, customerID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		_, _ = tx.Exec(ctx,
+			`UPDATE escrow_holds SET status='refunded', released_at=NOW()
+			 WHERE order_tracking_id=$1 AND status IN ('held','disputed')`, orderID)
+		_, _ = tx.Exec(ctx,
+			`UPDATE orders SET payment_status='refunded', updated_at=NOW() WHERE order_tracking_id=$1`, orderID)
+		if err := tx.Commit(ctx); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		_, _ = dbPool.Exec(ctx,
+			`INSERT INTO admin_audit_log (admin_tracking_id, action, target_id, target_type, reason, created_at)
+			 VALUES ($1,'manual_refund',$2,'order',$3,NOW()) ON CONFLICT DO NOTHING`,
+			adminID, orderID, req.Reason)
+		c.JSON(http.StatusOK, gin.H{"message": "refund processed", "order_id": orderID, "refunded_paisa": totalPaisa})
+	})
+
+	// POST /admin/orders/:order_id/reassign-rider
+	adminRoutes.POST("/orders/:order_id/reassign-rider", func(c *gin.Context) {
+		orderID := c.Param("order_id")
+		adminID := c.GetString("tracking_id")
+		var req struct {
+			NewRiderID string `json:"new_rider_tracking_id" binding:"required"`
+			Reason     string `json:"reason" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "new_rider_tracking_id and reason are required"})
+			return
+		}
+		ctx := c.Request.Context()
+		var exists bool
+		_ = dbPool.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM users WHERE tracking_id=$1 AND role='rider' AND status='approved')`,
+			req.NewRiderID).Scan(&exists)
+		if !exists {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "rider not found or not approved"})
+			return
+		}
+		cmdTag, err := dbPool.Exec(ctx,
+			`UPDATE deliveries SET rider_tracking_id=$1, updated_at=NOW()
+			 WHERE order_tracking_id=$2 AND status NOT IN ('delivered','cancelled')`,
+			req.NewRiderID, orderID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if cmdTag.RowsAffected() == 0 {
+			c.JSON(http.StatusConflict, gin.H{"error": "delivery not found or in terminal state"})
+			return
+		}
+		_, _ = dbPool.Exec(ctx,
+			`UPDATE orders SET rider_tracking_id=$1, updated_at=NOW() WHERE order_tracking_id=$2`,
+			req.NewRiderID, orderID)
+		_, _ = dbPool.Exec(ctx,
+			`INSERT INTO admin_audit_log (admin_tracking_id, action, target_id, target_type, reason, created_at)
+			 VALUES ($1,'reassign_rider',$2,'order',$3,NOW()) ON CONFLICT DO NOTHING`,
+			adminID, orderID, req.Reason)
+		c.JSON(http.StatusOK, gin.H{"message": "rider reassigned", "order_id": orderID, "new_rider": req.NewRiderID})
+	})
+
 	// ── Health check (public) ────────────────────────────────────
 	// Public geocode proxy (Nominatim): frontend reverse-geocodes
 	// through this so User-Agent / rate limits stay server-side.

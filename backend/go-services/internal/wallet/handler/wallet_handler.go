@@ -496,6 +496,38 @@ func (h *WalletHandler) DepositCOD(c *gin.Context) {
 	})
 }
 
+// RequestRiderWithdrawal handles POST /api/v1/wallet/rider/:tracking_id/withdraw.
+// Allows riders to request a payout/cash-out of their earned balance.
+func (h *WalletHandler) RequestRiderWithdrawal(c *gin.Context) {
+	if h.riderWallet == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "rider wallet service not configured"})
+		return
+	}
+
+	targetID := c.Param("tracking_id")
+	requesterID := middleware.GetTrackingID(c)
+	role := middleware.GetRole(c)
+	if role != "admin" && requesterID != targetID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "can only withdraw from your own wallet"})
+		return
+	}
+
+	var req service.RiderWithdrawalRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid withdrawal request: " + err.Error()})
+		return
+	}
+	req.RiderTrackingID = targetID
+
+	resp, err := h.riderWallet.RequestWithdrawal(c.Request.Context(), req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
 // RegisterRoutes registers wallet endpoints on the Gin engine.
 // User-facing routes require JWT auth. Payment gateway callbacks are public
 // but verify signatures in their respective handlers.
@@ -518,6 +550,7 @@ func (h *WalletHandler) RegisterRoutes(router *gin.Engine) {
 			// Rider earnings wallet
 			auth.GET("/rider/:tracking_id", h.GetRiderWallet)
 			auth.POST("/rider/:tracking_id/deposit", h.DepositCOD)
+			auth.POST("/rider/:tracking_id/withdraw", h.RequestRiderWithdrawal)
 
 			// Customer Wallet
 			auth.GET("/customer/:tracking_id", h.GetCustomerWallet)

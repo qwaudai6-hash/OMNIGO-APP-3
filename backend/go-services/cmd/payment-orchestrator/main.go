@@ -307,6 +307,10 @@ func main() {
 	go workers.NewStripeReplayWorker(db.Writer, stripeClient).Start(workerCtx)
 	go reconWorker.Start(workerCtx)
 
+	// FINANCIAL-AUDIT FIX #1: Refund processor — directly credits customer wallet
+	// from outbox_events (replaces broken Kafka-only path where nobody consumed orders.refunded)
+	go workers.NewRefundProcessorWorker(db.Writer, 5*time.Second).Start(workerCtx)
+
 	// TigerBeetle Outbox Worker — relays pending transfers to TB
 	if tbService != nil {
 		go ledger.NewTBOutboxWorker(db.Writer, tbService).Start(workerCtx)

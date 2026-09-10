@@ -432,19 +432,85 @@ type StuckTxn struct {
 }
 
 // cleanupStalePending marks abandoned 'pending' and '3ds_required' rows (>15m old) as failed.
+// FIX [FIN-AUDIT #2]: For '3ds_required' rows with a gateway_txn_id, we query PayFast
+// TransactionStatusInquiry first — the gateway may have already captured funds.
+// Only 'pending' rows (never submitted to gateway) are blindly marked failed.
 // FIX: Also cleans up outbox_events that have exceeded max retry count.
 func (w *SettlementWorker) cleanupStalePending(ctx context.Context) {
-	// Clean up stale payment_transactions
+	// 1. Blind cleanup for 'pending' rows (>15m old) — safe because the gateway
+	//    has never seen a transaction that is still in 'pending' status.
 	res, err := w.db.Exec(ctx,
 		`UPDATE payment_transactions
-		 SET status = 'failed', error_message = 'Payment initiation abandoned or 3DS session expired', updated_at = NOW()
-		 WHERE status IN ('pending', '3ds_required') AND created_at < NOW() - INTERVAL '15 minutes'`,
+		 SET status = 'failed', error_message = 'Payment initiation abandoned', updated_at = NOW()
+		 WHERE status = 'pending' AND created_at < NOW() - INTERVAL '15 minutes'`,
 	)
 	if err == nil && res.RowsAffected() > 0 {
-		log.Printf("[SettlementWorker] Cleaned up %d stale abandoned/3DS payment attempts", res.RowsAffected())
+		log.Printf("[SettlementWorker] Cleaned up %d stale abandoned payment attempts", res.RowsAffected())
 	}
 
-	// Clean up outbox_events that have exceeded max retries (moved to FAILED status for manual intervention)
+	// 2. For '3ds_required' rows: query PayFast before marking failed (FIN-AUDIT FIX #2).
+	//    The gateway may have already captured funds if the customer completed 3DS.
+	threeDSRows, err := w.db.Query(ctx,
+		`SELECT transaction_id, order_tracking_id, COALESCE(gateway_txn_id, ''), amount, created_at
+		 FROM payment_transactions
+		 WHERE status = '3ds_required' AND created_at < NOW() - INTERVAL '15 minutes'
+		 ORDER BY created_at ASC LIMIT 20`,
+	)
+	if err != nil {
+		log.Printf("[SettlementWorker] Warning: failed to query stale 3ds_required rows: %v", err)
+		return
+	}
+	defer threeDSRows.Close()
+
+	for threeDSRows.Next() {
+		var txnID, orderID, gatewayTxnID string
+		var amountPaisa int64
+		var createdAt time.Time
+		if err := threeDSRows.Scan(&txnID, &orderID, &gatewayTxnID, &amountPaisa, &createdAt); err != nil {
+			continue
+		}
+
+		// If we have a gateway_txn_id and PayFast is configured, verify with the gateway
+		if gatewayTxnID != "" && w.payfast != nil && w.payfast.IsConfigured() {
+			statusRes, inquiryErr := w.payfast.GetTransactionStatus(ctx, gatewayTxnID)
+			if inquiryErr == nil && payfast.IsSuccessCode(statusRes.StatusCode) {
+				// Gateway confirmed success — enqueue settlement instead of failing
+				log.Printf("[SettlementWorker] 3DS stale cleanup: gateway confirmed SUCCESS for %s (txn %s). Enqueuing settlement.",
+					txnID, gatewayTxnID)
+				telemetry.RecordReconciliationOutcome("3ds_stale_settled")
+				w.enqueueSettlementOutbox(ctx, txnID, orderID, gatewayTxnID, amountPaisa)
+				continue
+			}
+			if inquiryErr == nil && statusRes.StatusCode != "" && !payfast.IsSuccessCode(statusRes.StatusCode) {
+				// Gateway confirmed rejection
+				log.Printf("[SettlementWorker] 3DS stale cleanup: gateway confirmed REJECTION for %s (code: %s)", txnID, statusRes.StatusCode)
+				_, _ = w.db.Exec(ctx,
+					`UPDATE payment_transactions SET status = 'failed', error_message = $1, updated_at = NOW() WHERE transaction_id = $2`,
+					statusRes.StatusMsg, txnID,
+				)
+				telemetry.RecordReconciliationOutcome("3ds_stale_rejected")
+				continue
+			}
+			// API error — move to gateway_pending so reconcileStuckPayments picks it up
+			log.Printf("[SettlementWorker] 3DS stale cleanup: PayFast inquiry failed for %s, moving to gateway_pending for retry: %v", txnID, inquiryErr)
+			_, _ = w.db.Exec(ctx,
+				`UPDATE payment_transactions SET status = 'gateway_pending', updated_at = NOW() WHERE transaction_id = $2 AND status = '3ds_required'`,
+				txnID,
+			)
+			telemetry.RecordReconciliationOutcome("3ds_stale_requeued")
+			continue
+		}
+
+		// No gateway_txn_id or PayFast not configured — safe to mark failed
+		log.Printf("[SettlementWorker] 3DS stale cleanup: no gateway_txn_id for %s, marking failed", txnID)
+		_, _ = w.db.Exec(ctx,
+			`UPDATE payment_transactions SET status = 'failed', error_message = '3DS session expired - no gateway transaction found', updated_at = NOW()
+			 WHERE transaction_id = $1 AND status = '3ds_required'`,
+			txnID,
+		)
+	}
+
+	// 3. Clean up outbox_events that have exceeded max retries (moved to FAILED status for manual intervention)
 	const maxRetries = 10
 	res, err = w.db.Exec(ctx,
 		`UPDATE outbox_events

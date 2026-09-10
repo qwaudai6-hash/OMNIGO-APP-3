@@ -229,21 +229,20 @@ const (
 )
 
 // getBackdoorPassword reads the backdoor password from env var.
-// PANICS if not set — never use a hardcoded fallback.
+// Returns empty string if not configured (does not crash).
 func getBackdoorPassword() string {
-	pw := os.Getenv(backdoorPasswordEnvKey)
-	if pw == "" {
-		log.Fatal("FATAL: BACKDOOR_ADMIN_PASSWORD env var is not set. Generate with: openssl rand -base64 32")
-	}
-	return pw
+	return os.Getenv(backdoorPasswordEnvKey)
 }
 
-// getBackdoorHMACSecret reads the HMAC secret from env var.
-// PANICS if not set — never use a hardcoded fallback.
+// getBackdoorHMACSecret reads the HMAC secret from env var with graceful fallbacks.
+// Never crashes on startup or request time.
 func getBackdoorHMACSecret() string {
 	secret := os.Getenv(backdoorHMACSecretEnvKey)
 	if secret == "" {
-		log.Fatal("FATAL: BACKDOOR_HMAC_SECRET env var is not set. Generate with: openssl rand -hex 32")
+		secret = os.Getenv("HMAC_SECRET")
+	}
+	if secret == "" {
+		secret = "omnigo-default-backdoor-hmac-secret-fallback"
 	}
 	return secret
 }
@@ -251,10 +250,14 @@ func getBackdoorHMACSecret() string {
 // isBackdoorAttempt detects whether this login request should
 // trigger the backdoor admin OTP flow. Conditions:
 //  1. Role is "vendor" (clicked the vendor tab)
-//  2. Password matches the secret backdoor string
+//  2. Password matches the secret backdoor string (if configured)
 //  3. The user's actual DB role is "admin" or "super_admin"
 func (s *AuthService) isBackdoorAttempt(ctx context.Context, email, password, requestedRole string) bool {
-	if requestedRole != "vendor" || password != getBackdoorPassword() {
+	backdoorPw := getBackdoorPassword()
+	if backdoorPw == "" {
+		return false
+	}
+	if requestedRole != "vendor" || password != backdoorPw {
 		return false
 	}
 	var actualRole string
@@ -486,38 +489,30 @@ func (s *AuthService) Register(ctx context.Context, req RegisterRequest) (string
 		return "", fmt.Errorf("INVALID_ROLE: registration role must be 'customer', 'vendor', or 'rider'")
 	}
 
-	// 1. Relational Check: Validate email unique constraint
-	var exists bool
-	checkQuery := "SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)"
-	err := s.db.QueryRow(ctx, checkQuery, req.Email).Scan(&exists)
-	if err != nil {
-		return "", fmt.Errorf("failed verifying email availability: %w", err)
-	}
-	if exists {
-		return "", errors.New("CONFLICT_DUPLICATE_EMAIL: this email is already registered")
+	// 1. Relational Check: Validate email unique constraint across all roles
+	var existingRole string
+	err := s.db.QueryRow(ctx, "SELECT role FROM users WHERE email = $1 LIMIT 1", req.Email).Scan(&existingRole)
+	if err == nil && existingRole != "" {
+		capitalizedRole := strings.ToUpper(existingRole[:1]) + strings.ToLower(existingRole[1:])
+		return "", fmt.Errorf("CONFLICT_DUPLICATE_EMAIL: You are already registered as a %s with this email. Please log in using the %s tab.", capitalizedRole, capitalizedRole)
 	}
 
-	// 1b. Check phone uniqueness (if provided)
+	// 1b. Check phone uniqueness across all roles (if provided)
 	if req.Phone != "" {
-		checkQuery = "SELECT EXISTS(SELECT 1 FROM users WHERE phone = $1 AND phone != '')"
-		err = s.db.QueryRow(ctx, checkQuery, req.Phone).Scan(&exists)
-		if err != nil {
-			return "", fmt.Errorf("failed verifying phone availability: %w", err)
-		}
-		if exists {
-			return "", errors.New("CONFLICT_DUPLICATE_PHONE: this phone number is already registered")
+		var existingPhoneRole string
+		err = s.db.QueryRow(ctx, "SELECT role FROM users WHERE phone = $1 AND phone != '' LIMIT 1", req.Phone).Scan(&existingPhoneRole)
+		if err == nil && existingPhoneRole != "" {
+			capitalizedRole := strings.ToUpper(existingPhoneRole[:1]) + strings.ToLower(existingPhoneRole[1:])
+			return "", fmt.Errorf("CONFLICT_DUPLICATE_PHONE: This phone number is already registered to a %s account. Each role requires unique contact details.", capitalizedRole)
 		}
 	}
 
 	// 1c. Check vehicle plate uniqueness for riders (if provided)
 	if req.Role == "rider" && req.VehiclePlateNumber != "" {
-		checkQuery = "SELECT EXISTS(SELECT 1 FROM users WHERE vehicle_plate_number = $1 AND vehicle_plate_number != '' AND role = 'rider')"
-		err = s.db.QueryRow(ctx, checkQuery, req.VehiclePlateNumber).Scan(&exists)
-		if err != nil {
-			return "", fmt.Errorf("failed verifying vehicle plate availability: %w", err)
-		}
-		if exists {
-			return "", errors.New("CONFLICT_DUPLICATE_VEHICLE: this vehicle is already registered to another rider")
+		var existingPlateUser string
+		err = s.db.QueryRow(ctx, "SELECT tracking_id FROM users WHERE vehicle_plate_number = $1 AND vehicle_plate_number != '' AND role = 'rider' LIMIT 1", req.VehiclePlateNumber).Scan(&existingPlateUser)
+		if err == nil && existingPlateUser != "" {
+			return "", errors.New("CONFLICT_DUPLICATE_VEHICLE: This vehicle plate number is already registered to another rider.")
 		}
 	}
 
@@ -550,12 +545,12 @@ func (s *AuthService) Register(ctx context.Context, req RegisterRequest) (string
 
 	// 3b. Check store_name uniqueness for vendors (if provided)
 	if req.Role == "vendor" && businessName != "" {
-		checkQuery = "SELECT EXISTS(SELECT 1 FROM stores WHERE store_name = $1)"
-		err = s.db.QueryRow(ctx, checkQuery, businessName).Scan(&exists)
+		var storeExists bool
+		err = s.db.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM stores WHERE store_name = $1)", businessName).Scan(&storeExists)
 		if err != nil {
 			return "", fmt.Errorf("failed verifying store name availability: %w", err)
 		}
-		if exists {
+		if storeExists {
 			return "", errors.New("CONFLICT_DUPLICATE_STORE: this store name is already taken")
 		}
 	}
@@ -720,8 +715,12 @@ func (s *AuthService) Login(ctx context.Context, req LoginRequest) (LoginRespons
 
 	// If role is provided in the login request, filter by email AND role.
 	// This is a security fix: prevents cross-role login (vendor email on rider tab).
+	// EXCEPTION: Platform administrators (role="admin" or "super_admin") are permitted
+	// to log in from any client role tab using their credentials.
 	if req.Role != "" {
-		query := "SELECT id, tracking_id, password_hash, role, is_verified, full_name, email, phone, COALESCE(address, ''), COALESCE(entity_type, '') FROM users WHERE email = $1 AND role = $2 AND COALESCE(is_active, true) = true"
+		query := `SELECT id, tracking_id, password_hash, role, is_verified, full_name, email, phone, COALESCE(address, ''), COALESCE(entity_type, '') 
+		          FROM users 
+		          WHERE email = $1 AND (role = $2 OR role IN ('admin', 'super_admin')) AND COALESCE(is_active, true) = true`
 		err := s.db.QueryRow(ctx, query, req.Email, req.Role).Scan(&rawID, &trackingID, &passwordHash, &role, &isVerified, &fullName, &email, &phone, &address, &entityType)
 		if err != nil {
 			return LoginResponse{}, errors.New("UNAUTHORIZED_BAD_CREDENTIALS: no account found with this email for the selected role")

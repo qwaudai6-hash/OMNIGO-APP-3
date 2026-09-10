@@ -558,6 +558,7 @@ func (gw *WebSocketGateway) dispatchTelemetryBroadcast(ctx context.Context, raw 
 
 	envelope := map[string]interface{}{
 		"action":    "RIDER_TELEMETRY",
+		"topic":     "telemetry",
 		"rider_id":  frame.RiderID,
 		"lat":       frame.Lat,
 		"lng":       frame.Lng,
@@ -720,6 +721,7 @@ func (gw *WebSocketGateway) handleOrderUpdated(ctx context.Context, data []byte)
 
 	msg := map[string]interface{}{
 		"action":   "ORDER_STATUS_UPDATED",
+		"topic":    "orders",
 		"order_id": event.OrderID,
 		"status":   event.Status,
 		"timestamp": event.Timestamp,
@@ -765,6 +767,7 @@ func (gw *WebSocketGateway) handleDeliveryStatusUpdated(ctx context.Context, dat
 
 	msg := map[string]interface{}{
 		"action":            "ORDER_STATUS_UPDATED",
+		"topic":             "orders",
 		"order_id":          event.OrderTrackingID,
 		"status":            event.Status,
 		"rider_id":          event.AssignedRiderID,

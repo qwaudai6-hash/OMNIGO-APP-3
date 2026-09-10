@@ -289,3 +289,148 @@ func (s *RiderWalletService) DecrementCODCollection(ctx context.Context, riderTr
 	}
 	return nil
 }
+
+// RiderWithdrawalRequest represents a cash-out request from a rider.
+type RiderWithdrawalRequest struct {
+	RiderTrackingID string  `json:"rider_tracking_id"`
+	Amount          float64 `json:"amount"`
+	AmountPaisa     int64   `json:"amount_paisa"`
+	Method          string  `json:"method"` // easypaisa, jazzcash, bank_transfer
+	AccountNumber   string  `json:"account_number"`
+	AccountTitle    string  `json:"account_title"`
+}
+
+// RiderWithdrawalResponse is returned after a cash-out request is created.
+type RiderWithdrawalResponse struct {
+	PayoutID              string  `json:"payout_id"`
+	RiderTrackingID       string  `json:"rider_tracking_id"`
+	Amount                float64 `json:"amount"`
+	AmountPaisa           int64   `json:"amount_paisa"`
+	Method                string  `json:"method"`
+	Status                string  `json:"status"`
+	RemainingBalance      float64 `json:"remaining_balance"`
+	RemainingBalancePaisa int64   `json:"remaining_balance_paisa"`
+	CreatedAt             string  `json:"created_at"`
+}
+
+// RequestWithdrawal initiates a withdrawal request for the rider, locking the wallet row,
+// ensuring no COD block or float exceeds threshold, and deducting the balance atomically.
+func (s *RiderWalletService) RequestWithdrawal(ctx context.Context, req RiderWithdrawalRequest) (*RiderWithdrawalResponse, error) {
+	if req.AmountPaisa <= 0 && req.Amount > 0 {
+		req.AmountPaisa = money.RupeesToPaisa(req.Amount)
+	}
+	if req.AmountPaisa <= 0 {
+		return nil, fmt.Errorf("withdrawal amount must be greater than zero")
+	}
+
+	// Enforce minimum withdrawal (PKR 500 = 50,000 paisa)
+	minWithdrawalPaisa := int64(envFloat("RIDER_MIN_WITHDRAWAL_PKR", 500.0) * 100)
+	if req.AmountPaisa < minWithdrawalPaisa {
+		return nil, fmt.Errorf("minimum withdrawal amount is PKR %.2f", float64(minWithdrawalPaisa)/100.0)
+	}
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start withdrawal transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Check wallet row and lock FOR UPDATE
+	var balancePaisa, cashInHandPaisa int64
+	var isCashBlocked bool
+	lockQuery := `
+		SELECT COALESCE(balance_paisa, 0), COALESCE(cash_in_hand_paisa, 0), COALESCE(is_cash_blocked, false)
+		FROM rider_wallet
+		WHERE rider_tracking_id = $1
+		FOR UPDATE
+	`
+	err = tx.QueryRow(ctx, lockQuery, req.RiderTrackingID).Scan(&balancePaisa, &cashInHandPaisa, &isCashBlocked)
+	if err != nil {
+		return nil, fmt.Errorf("rider wallet not found: %w", err)
+	}
+
+	if isCashBlocked {
+		return nil, fmt.Errorf("withdrawal blocked: rider has an active cash block")
+	}
+
+	cashThresholdPaisa := int64(envFloat("RIDER_CASH_BLOCK_THRESHOLD", 5000.0) * 100)
+	if cashInHandPaisa >= cashThresholdPaisa {
+		return nil, fmt.Errorf("withdrawal blocked: cash-in-hand float (PKR %.2f) exceeds threshold, deposit float first", float64(cashInHandPaisa)/100.0)
+	}
+
+	if balancePaisa < req.AmountPaisa {
+		return nil, fmt.Errorf("insufficient wallet balance (available: PKR %.2f, requested: PKR %.2f)",
+			float64(balancePaisa)/100.0, float64(req.AmountPaisa)/100.0)
+	}
+
+	var remainingBalancePaisa int64
+	updateQuery := `
+		UPDATE rider_wallet
+		SET balance_paisa = balance_paisa - $1,
+		    balance = (balance_paisa - $1)::decimal / 100.0,
+		    updated_at = NOW()
+		WHERE rider_tracking_id = $2 AND balance_paisa >= $1
+		RETURNING balance_paisa
+	`
+	err = tx.QueryRow(ctx, updateQuery, req.AmountPaisa, req.RiderTrackingID).Scan(&remainingBalancePaisa)
+	if err != nil {
+		return nil, fmt.Errorf("failed to deduct withdrawal amount: %w", err)
+	}
+
+	var payoutID string
+	var createdAt time.Time
+	insertPayoutQuery := `
+		INSERT INTO rider_payouts (
+			id, rider_tracking_id, amount, amount_paisa, method, account_number, account_title, status, created_at, updated_at
+		) VALUES (
+			gen_random_uuid(), $1, $2, $3, $4, $5, $6, 'pending', NOW(), NOW()
+		)
+		RETURNING id::text, created_at
+	`
+	amountRupees := float64(req.AmountPaisa) / 100.0
+	err = tx.QueryRow(ctx, insertPayoutQuery,
+		req.RiderTrackingID,
+		amountRupees,
+		req.AmountPaisa,
+		req.Method,
+		req.AccountNumber,
+		req.AccountTitle,
+	).Scan(&payoutID, &createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to record rider payout: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("failed to commit withdrawal transaction: %w", err)
+	}
+
+	// Double-entry ledger transfer: rider_wallet → gateway_clearing
+	if s.ledger != nil {
+		idempotencyKey := fmt.Sprintf("rider:payout:%s", payoutID)
+		if _, err := s.ledger.Transfer(ctx, ledger.TransferRequest{
+			DebitAccount:   ledger.AccountRiderWallet,
+			CreditAccount:  ledger.AccountGatewayClearing,
+			Amount:         req.AmountPaisa,
+			Currency:       "PKR",
+			ReferenceType:  "rider_payout",
+			ReferenceID:    payoutID,
+			Description:    fmt.Sprintf("Rider payout request %s: %d paisa to %s (%s)", payoutID, req.AmountPaisa, req.Method, req.AccountNumber),
+			IdempotencyKey: idempotencyKey,
+		}); err != nil {
+			fmt.Printf("[RiderWallet] Warning: payout ledger transfer failed: %v\n", err)
+		}
+	}
+
+	return &RiderWithdrawalResponse{
+		PayoutID:              payoutID,
+		RiderTrackingID:       req.RiderTrackingID,
+		Amount:                amountRupees,
+		AmountPaisa:           req.AmountPaisa,
+		Method:                req.Method,
+		Status:                "pending",
+		RemainingBalance:      float64(remainingBalancePaisa) / 100.0,
+		RemainingBalancePaisa: remainingBalancePaisa,
+		CreatedAt:             createdAt.UTC().Format(time.RFC3339),
+	}, nil
+}
+

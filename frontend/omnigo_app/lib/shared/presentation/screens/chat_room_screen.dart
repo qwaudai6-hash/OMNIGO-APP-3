@@ -34,7 +34,11 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   bool _isSending = false;
   bool _isLoading = false;
   StreamSubscription<ChatMessage>? _msgSub;
+  StreamSubscription<Map<String, dynamic>>? _typingSub;
   Timer? _pollTimer;
+  Timer? _typingDebounceTimer;
+  Timer? _otherUserTypingTimeout;
+  bool _isOtherUserTyping = false;
 
   @override
   void initState() {
@@ -53,20 +57,67 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         if (!_messages.any((m) => m.id == msg.id)) {
           _messages.add(msg);
         }
+        _isOtherUserTyping = false;
       });
       _scrollToBottom();
       _markRead();
       _markDelivered();
     });
+
+    // Listen to real-time typing indicators
+    _typingSub = ChatService.instance.typingEvents.listen((event) {
+      if (event['order_id']?.toString() != widget.orderId) return;
+      final senderId = event['sender_id']?.toString() ?? '';
+      if (senderId == ChatService.instance.myUserId) return;
+
+      final isTyping = event['is_typing'] == true;
+      if (!mounted) return;
+      setState(() {
+        _isOtherUserTyping = isTyping;
+      });
+      _otherUserTypingTimeout?.cancel();
+      if (isTyping) {
+        _scrollToBottom();
+        _otherUserTypingTimeout = Timer(const Duration(seconds: 4), () {
+          if (mounted) setState(() => _isOtherUserTyping = false);
+        });
+      }
+    });
+
+    _inputController.addListener(_onInputChanged);
+
     _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       if (mounted) _fetchHistory();
     });
   }
 
+  void _onInputChanged() {
+    final text = _inputController.text;
+    if (text.isNotEmpty) {
+      ChatService.instance.sendTyping(
+        orderId: widget.orderId,
+        receiverId: widget.otherUserId,
+        isTyping: true,
+      );
+      _typingDebounceTimer?.cancel();
+      _typingDebounceTimer = Timer(const Duration(seconds: 3), () {
+        ChatService.instance.sendTyping(
+          orderId: widget.orderId,
+          receiverId: widget.otherUserId,
+          isTyping: false,
+        );
+      });
+    }
+  }
+
   @override
   void dispose() {
+    _inputController.removeListener(_onInputChanged);
     _msgSub?.cancel();
+    _typingSub?.cancel();
     _pollTimer?.cancel();
+    _typingDebounceTimer?.cancel();
+    _otherUserTypingTimeout?.cancel();
     _inputController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -235,11 +286,50 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                   : ListView.builder(
                       controller: _scrollController,
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                      itemCount: _messages.length,
-                      itemBuilder: (_, i) => _buildBubble(_messages[i]),
+                      itemCount: _messages.length + (_isOtherUserTyping ? 1 : 0),
+                      itemBuilder: (_, i) {
+                        if (i == _messages.length) {
+                          return _buildTypingIndicator();
+                        }
+                        return _buildBubble(_messages[i]);
+                      },
                     ),
             ),
             _buildComposer(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTypingIndicator() {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.grey.shade200,
+          borderRadius: const BorderRadius.only(
+            topLeft: Radius.circular(16),
+            topRight: Radius.circular(16),
+            bottomLeft: Radius.circular(2),
+            bottomRight: Radius.circular(16),
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              '${widget.otherUserName} is typing',
+              style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic, color: Colors.grey.shade700),
+            ),
+            const SizedBox(width: 8),
+            const SizedBox(
+              width: 10,
+              height: 10,
+              child: CircularProgressIndicator(strokeWidth: 1.5, color: Colors.grey),
+            ),
           ],
         ),
       ),

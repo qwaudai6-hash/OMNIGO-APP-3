@@ -226,10 +226,7 @@ func (h *DisputeHandler) List(c *gin.Context) {
 
 // RegisterRoutes registers dispute endpoints.
 func (h *DisputeHandler) RegisterRoutes(router *gin.Engine) {
-	payments := router.Group("/api/v1/payments", middleware.JWTAuth())
-	{
-		payments.POST("/disputes", h.File)
-		payments.PATCH("/disputes/:id", middleware.RoleRequired("admin"), h.Resolve)
-		payments.GET("/disputes", middleware.RoleRequired("admin"), h.List)
-	}
+	router.POST("/api/v1/payments/disputes", middleware.JWTAuth(), h.File)
+	router.PATCH("/api/v1/payments/disputes/:id", middleware.JWTAuth(), middleware.RoleRequired("admin"), h.Resolve)
+	router.GET("/api/v1/payments/disputes", middleware.JWTAuth(), middleware.RoleRequired("admin"), h.List)
 }

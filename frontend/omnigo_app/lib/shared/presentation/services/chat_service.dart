@@ -119,7 +119,13 @@ class ChatService {
   final StreamController<int> _unreadController = StreamController<int>.broadcast();
   Stream<int> get unreadCount => _unreadController.stream;
 
+  // `typingEvents` fires when a chat partner sends a typing indicator frame.
+  final StreamController<Map<String, dynamic>> _typingController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  Stream<Map<String, dynamic>> get typingEvents => _typingController.stream;
+
   StreamSubscription<dynamic>? _wsSubscription;
+  WebSocketClient? _ws;
   String? _myUserId;
 
   // ── Public API ─────────────────────────────────────────────────────────
@@ -127,6 +133,7 @@ class ChatService {
   /// Bind the chat service to the shared WebSocket so incoming chat
   /// messages are forwarded to UI. Safe to call multiple times.
   Future<void> bindToWebSocket(WebSocketClient ws) async {
+    _ws = ws;
     await _wsSubscription?.cancel();
     _wsSubscription = ws.stream.listen((raw) {
       if (raw is! String) return;
@@ -135,6 +142,8 @@ class ChatService {
         if (frame['action'] == 'CHAT_MESSAGE') {
           final msg = ChatMessage.fromJson(frame);
           _messageController.add(msg);
+        } else if (frame['action'] == 'CHAT_TYPING') {
+          _typingController.add(frame);
         }
       } catch (_) {
         // ignore non-chat frames
@@ -142,10 +151,27 @@ class ChatService {
     });
   }
 
+  /// Broadcast typing state to the other participant over WebSocket.
+  void sendTyping({required String orderId, required String receiverId, required bool isTyping}) {
+    if (_ws == null) return;
+    try {
+      final payload = jsonEncode({
+        'action': 'CHAT_TYPING',
+        'order_id': orderId,
+        'sender_id': myUserId,
+        'receiver_id': receiverId,
+        'is_typing': isTyping,
+        'timestamp': DateTime.now().toUtc().toIso8601String(),
+      });
+      _ws?.sendMessage(payload);
+    } catch (_) {}
+  }
+
   /// Cancel WebSocket subscription and reset binding state.
   Future<void> unbind() async {
     await _wsSubscription?.cancel();
     _wsSubscription = null;
+    _ws = null;
   }
 
   /// Dispose of resources, subscriptions, and stream controllers.
@@ -154,6 +180,7 @@ class ChatService {
     await _conversationsController.close();
     await _messageController.close();
     await _unreadController.close();
+    await _typingController.close();
   }
 
   /// Cache the JWT-derived user id so [isMine] works without hitting

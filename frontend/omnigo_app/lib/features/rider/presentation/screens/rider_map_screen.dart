@@ -15,6 +15,7 @@ import '../../../../core/theme/app_theme.dart';
 import '../../../../core/network/websocket_client.dart';
 import '../../../../core/network/api_client.dart';
 import '../../../../shared/presentation/screens/chat_list_screen.dart';
+import '../../../../shared/presentation/screens/chat_room_screen.dart';
 import '../../../../shared/presentation/services/chat_service.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/di/service_locator.dart';
@@ -208,15 +209,30 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
         _activeGigStatus = (cachedGig['status'] as String?) ?? 'accepted';
       });
       unawaited(_loadRoute());
-      
-      // Retry any pending syncs
-      final pending = await OfflineGigStorage.consumePendingStatusSync();
-      if (pending != null) {
+
+      // SP-FL-11: Drain the full FIFO pending sync queue, not just one item
+      unawaited(_drainOfflineQueue());
+    }
+  }
+
+  bool _isDrainingQueue = false;
+
+  /// SP-FL-11: Drains all pending status syncs from the FIFO queue sequentially.
+  /// Idempotency keys ensure duplicate drains are safe.
+  Future<void> _drainOfflineQueue() async {
+    if (_isDrainingQueue) return;
+    _isDrainingQueue = true;
+    try {
+      while (true) {
+        final pending = await OfflineGigStorage.consumePendingStatusSync();
+        if (pending == null) break;
         final status = pending['status'] as String;
         final otp = pending['otp_code'] as String?;
         final localPhotoPath = pending['local_photo_path'] as String?;
-        unawaited(_syncPendingOfflineStatus(status, otp, localPhotoPath));
+        await _syncPendingOfflineStatus(status, otp, localPhotoPath);
       }
+    } finally {
+      _isDrainingQueue = false;
     }
   }
 
@@ -238,16 +254,23 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
     _wsSubscription?.cancel();
     _wsGigTopicSub?.cancel();
     _positionStream?.cancel();
+    _positionStream = null;
     _heatmapTimer?.cancel();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
+    // SP-FL-05: Cancel & nullify position stream on background to prevent battery drain
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+      _positionStream?.cancel();
+      _positionStream = null;
+    } else if (state == AppLifecycleState.resumed) {
       if (_isConnected) {
         _initLocationTracking();
       }
+      // Drain any queued offline syncs that accumulated while backgrounded
+      unawaited(_drainOfflineQueue());
     }
   }
 
@@ -284,6 +307,8 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Internet Restored'), backgroundColor: Colors.green),
           );
+          // SP-FL-11: Drain any queued offline syncs now that we're back online
+          unawaited(_drainOfflineQueue());
         }
       }
     });
@@ -1519,28 +1544,65 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                       style: const TextStyle(color: Colors.grey, fontSize: 13),
                     ),
                   ],
-                  const SizedBox(height: 20),
-                  if (_broadcastedGig != null && _broadcastedGig!['customer_phone'] != null && _broadcastedGig!['customer_phone'].toString().isNotEmpty)
-                    OutlinedButton.icon(
-                      onPressed: () async {
-                        final messenger = ScaffoldMessenger.of(context);
-                        final Uri launchUri = Uri(
-                          scheme: 'tel',
-                          path: (_broadcastedGig!['customer_phone']?.toString()) ?? '',
-                        );
-                        if (await canLaunchUrl(launchUri)) {
-                          await launchUrl(launchUri);
-                        } else {
-                          if (mounted) messenger.showSnackBar(const SnackBar(content: Text('Could not launch dialer.')));
-                        }
-                      },
-                      icon: const Icon(Icons.phone, color: Colors.green),
-                      label: const Text('Call Customer', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.green)),
-                      style: OutlinedButton.styleFrom(
-                        side: const BorderSide(color: Colors.green),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                      ),
+                  const SizedBox(height: 16),
+                  if (_broadcastedGig != null) ...[
+                    Row(
+                      children: [
+                        if (_broadcastedGig!['customer_phone'] != null && _broadcastedGig!['customer_phone'].toString().isNotEmpty) ...[
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: () async {
+                                final messenger = ScaffoldMessenger.of(context);
+                                final Uri launchUri = Uri(
+                                  scheme: 'tel',
+                                  path: (_broadcastedGig!['customer_phone']?.toString()) ?? '',
+                                );
+                                if (await canLaunchUrl(launchUri)) {
+                                  await launchUrl(launchUri);
+                                } else {
+                                  if (mounted) messenger.showSnackBar(const SnackBar(content: Text('Could not launch dialer.')));
+                                }
+                              },
+                              icon: const Icon(Icons.phone, color: Colors.green, size: 18),
+                              label: const Text('Call', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.green)),
+                              style: OutlinedButton.styleFrom(
+                                side: const BorderSide(color: Colors.green),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                        ],
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: () {
+                              final orderId = _broadcastedGig?['order_tracking_id']?.toString() ?? '';
+                              final customerId = _broadcastedGig?['customer_tracking_id']?.toString() ?? 'customer';
+                              if (orderId.isEmpty) return;
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute<void>(
+                                  builder: (_) => ChatRoomScreen(
+                                    orderId: orderId,
+                                    otherUserId: customerId,
+                                    otherUserName: 'Customer',
+                                    otherUserRole: 'customer',
+                                  ),
+                                ),
+                              );
+                            },
+                            icon: const Icon(Icons.chat_bubble_outline, color: Colors.blue, size: 18),
+                            label: const Text('Chat', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blue)),
+                            style: OutlinedButton.styleFrom(
+                              side: const BorderSide(color: Colors.blue),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
+                    const SizedBox(height: 10),
+                  ],
                   if (_nextStatusButtonLabel() != null)
                     ElevatedButton(
                       onPressed: () => _handleNextStatusTransition(),
@@ -2391,6 +2453,21 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
                 ],
               ),
             ),
+            const SizedBox(height: 16),
+            // Cash Out / Withdraw Button
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                icon: const Icon(Icons.account_balance_wallet_outlined, color: Colors.black),
+                label: const Text('Cash Out / Withdraw', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 15)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppTheme.limeAccent,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                ),
+                onPressed: balance > 0 ? () => _showWithdrawalSheet(balance) : null,
+              ),
+            ),
             const SizedBox(height: 24),
             const Text('Recent Completed Gig Earnings', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: AppTheme.blackAccent)),
             const SizedBox(height: 12),
@@ -2454,6 +2531,168 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
           ],
         ),
       ),
+    );
+  }
+
+  /// Shows a bottom sheet modal for rider Cash Out / Withdrawal.
+  void _showWithdrawalSheet(double availableBalance) {
+    final amountController = TextEditingController();
+    final accountNumberController = TextEditingController();
+    final accountTitleController = TextEditingController();
+    String selectedMethod = 'easypaisa';
+    bool isSubmitting = false;
+
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) {
+            return Padding(
+              padding: EdgeInsets.only(
+                left: 24, right: 24, top: 24,
+                bottom: MediaQuery.of(ctx).viewInsets.bottom + 32,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('Cash Out / Withdraw', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                      IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.pop(ctx)),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Available: PKR ${availableBalance.toStringAsFixed(2)} • Minimum PKR 500',
+                    style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
+                  ),
+                  const SizedBox(height: 20),
+                  // Amount
+                  TextField(
+                    controller: amountController,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    decoration: InputDecoration(
+                      labelText: 'Amount (PKR)',
+                      prefixIcon: const Icon(Icons.currency_rupee),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  // Method
+                  DropdownButtonFormField<String>(
+                    value: selectedMethod,
+                    decoration: InputDecoration(
+                      labelText: 'Payment Method',
+                      prefixIcon: const Icon(Icons.payment),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
+                    items: const [
+                      DropdownMenuItem(value: 'easypaisa', child: Text('EasyPaisa')),
+                      DropdownMenuItem(value: 'jazzcash', child: Text('JazzCash')),
+                      DropdownMenuItem(value: 'bank_transfer', child: Text('Bank Transfer')),
+                    ],
+                    onChanged: (v) => setSheetState(() => selectedMethod = v ?? 'easypaisa'),
+                  ),
+                  const SizedBox(height: 14),
+                  // Account number
+                  TextField(
+                    controller: accountNumberController,
+                    keyboardType: TextInputType.phone,
+                    decoration: InputDecoration(
+                      labelText: 'Account / Mobile Number',
+                      prefixIcon: const Icon(Icons.phone_android),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  // Account title
+                  TextField(
+                    controller: accountTitleController,
+                    decoration: InputDecoration(
+                      labelText: 'Account Title / Name',
+                      prefixIcon: const Icon(Icons.person_outline),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppTheme.limeAccent,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                      ),
+                      onPressed: isSubmitting ? null : () async {
+                        final amount = double.tryParse(amountController.text.trim());
+                        if (amount == null || amount < 500) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Enter a valid amount (minimum PKR 500)'), backgroundColor: Colors.red),
+                          );
+                          return;
+                        }
+                        if (amount > availableBalance) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('Insufficient balance (available PKR ${availableBalance.toStringAsFixed(2)})'), backgroundColor: Colors.red),
+                          );
+                          return;
+                        }
+                        if (accountNumberController.text.trim().isEmpty) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Enter account / mobile number'), backgroundColor: Colors.red),
+                          );
+                          return;
+                        }
+                        setSheetState(() => isSubmitting = true);
+                        final nav = Navigator.of(ctx);
+                        final messenger = ScaffoldMessenger.of(context);
+                        try {
+                          await _apiClient.post(
+                            ApiEndpoints.riderWithdraw(widget.trackingId),
+                            {
+                              'amount': amount,
+                              'method': selectedMethod,
+                              'account_number': accountNumberController.text.trim(),
+                              'account_title': accountTitleController.text.trim(),
+                            },
+                          );
+                          if (mounted) {
+                            nav.pop();
+                            messenger.showSnackBar(
+                              SnackBar(
+                                content: Text('Withdrawal of PKR ${amount.toStringAsFixed(2)} submitted! Pending admin approval.'),
+                                backgroundColor: Colors.green,
+                              ),
+                            );
+                            unawaited(_fetchWalletSummary());
+                          }
+                        } catch (e) {
+                          setSheetState(() => isSubmitting = false);
+                          if (mounted) {
+                            messenger.showSnackBar(
+                              SnackBar(content: Text('Withdrawal failed: $e'), backgroundColor: Colors.red),
+                            );
+                          }
+                        }
+                      },
+                      child: isSubmitting
+                          ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
+                          : const Text('Submit Withdrawal', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 15)),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
     );
   }
 

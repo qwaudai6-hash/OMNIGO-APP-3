@@ -189,6 +189,7 @@ class ApiEndpoints {
   // for top-ups and walletCharge below for product checkout.
   static String walletCharge() => '$orderBase/wallet/charge';
   static String orderCheckout() => '$orderBase/orders/';
+  static String orderDetail(String orderId) => '$orderBase/orders/$orderId';
   static String orderConfirm() => '$orderBase/orders/confirm';
   static String orderHandover() => '$orderBase/orders/handover';
   static String customerOrders(String customerId) =>
@@ -210,6 +211,11 @@ class ApiEndpoints {
 
   // ── Stripe Card Checkout (Order Service) ───────────────────────────
   static String stripeCheckout() => '$orderBase/payment/checkout';
+
+  // ── Cart Service (Order Service) ──────────────────────────────────
+  static String cart() => '$orderBase/cart';
+  static String cartItems() => '$orderBase/cart/items';
+  static String cartItem(String productTrackingId) => '$orderBase/cart/items/$productTrackingId';
 
   // ── Delivery Gigs ────────────────────────────────────────────────
   static String deliveryGigAccept() => '$deliveryBase/delivery/gig/accept';
@@ -287,6 +293,8 @@ class ApiEndpoints {
   // ── Rider Wallet ─────────────────────────────────────────────────
   static String riderWallet(String riderId) =>
       '$orderBase/wallet/rider/$riderId';
+  static String riderWithdraw(String riderId) =>
+      '$orderBase/wallet/rider/$riderId/withdraw';
 
   // ── COD + JazzCash + EasyPaisa (Payment Orchestrator :8092) ──────
   static String codConfirm() => '$paymentBase/payments/cod/confirm';

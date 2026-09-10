@@ -213,7 +213,11 @@ Future<Map<String, String>?> showPayFastCardDetailsSheet(BuildContext context) a
 /// completed the challenge, mirroring standard 3DS app UX.
 ///
 /// Returns true when the user indicates they completed verification.
-Future<bool> showPayFast3DSChallenge(BuildContext context, String htmlContent) async {
+Future<bool> showPayFast3DSChallenge(
+  BuildContext context,
+  String htmlContent, {
+  String? redirectUrl,
+}) async {
   final controller = WebViewController();
   await controller.setJavaScriptMode(JavaScriptMode.unrestricted);
 
@@ -231,7 +235,30 @@ Future<bool> showPayFast3DSChallenge(BuildContext context, String htmlContent) a
     },
   );
 
-  await controller.loadHtmlString(htmlContent);
+  await controller.setNavigationDelegate(
+    NavigationDelegate(
+      onNavigationRequest: (NavigationRequest request) {
+        final urlLower = request.url.toLowerCase();
+        if (urlLower.contains('ipn') ||
+            urlLower.contains('err_code=000') ||
+            urlLower.contains('err_code=00') ||
+            urlLower.contains('status=success') ||
+            urlLower.contains('success_url')) {
+          if (!urlLower.contains('err_code=001') && !urlLower.contains('fail')) {
+            if (context.mounted) Navigator.of(context, rootNavigator: true).pop(true);
+            return NavigationDecision.prevent;
+          }
+        }
+        return NavigationDecision.navigate;
+      },
+    ),
+  );
+
+  if (htmlContent.isNotEmpty) {
+    await controller.loadHtmlString(htmlContent);
+  } else if (redirectUrl != null && redirectUrl.isNotEmpty) {
+    await controller.loadRequest(Uri.parse(redirectUrl));
+  }
 
   // The WebView load above is async — bail out if the screen went away mid-load.
   if (!context.mounted) return false;

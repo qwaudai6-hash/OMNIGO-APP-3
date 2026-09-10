@@ -151,6 +151,10 @@ type OrderItem struct {
 	Quantity             int     `json:"quantity"`
 	PriceAtCheckoutPaisa int64   `json:"price_at_checkout_paisa"`
 	PriceAtCheckoutRupees float64 `json:"price_at_checkout_rupees"`
+	// FINANCIAL-AUDIT FIX #3: Per-item fulfillment and refund tracking
+	FulfillmentStatus string `json:"fulfillment_status"` // pending | fulfilled | unfulfilled | cancelled
+	RefundStatus      string `json:"refund_status"`      // not_refunded | partial_refunded | fully_refunded
+	RefundAmountPaisa int64  `json:"refund_amount_paisa"` // amount refunded for this line item
 	// Legacy
 	PriceAtCheckout float64 `json:"price_at_checkout,omitempty"`
 }

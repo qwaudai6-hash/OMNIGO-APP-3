@@ -44,10 +44,10 @@ func (s *CartService) GetCart(ctx context.Context, userID string) (*models.Cart,
 	return cart, nil
 }
 
-// fetchProductPrice calls the Product Service to get the real price using product_tracking_id
-func (s *CartService) fetchProductPrice(ctx context.Context, productTrackingID string) (float64, error) {
+// fetchProductDetails calls the Product Service to get the real price and available stock using product_tracking_id
+func (s *CartService) fetchProductDetails(ctx context.Context, productTrackingID string) (float64, int, error) {
 	if s.productServiceURL == "" {
-		return 0, errors.New("product service URL not configured")
+		return 0, 0, errors.New("product service URL not configured")
 	}
 
 	var url string
@@ -58,43 +58,45 @@ func (s *CartService) fetchProductPrice(ctx context.Context, productTrackingID s
 		url = fmt.Sprintf("%s/api/v1/internal/products/tracking/%s", s.productServiceURL, productTrackingID)
 		req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		s.internalSigner.SignRequest(req, nil)
 	} else {
 		url = fmt.Sprintf("%s/api/v1/products/tracking/%s", s.productServiceURL, productTrackingID)
 		req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 	}
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("failed to call product service: %w", err)
+		return 0, 0, fmt.Errorf("failed to call product service: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("product service returned status %d", resp.StatusCode)
+		return 0, 0, fmt.Errorf("product service returned status %d", resp.StatusCode)
 	}
 
 	var data struct {
 		Price     float64 `json:"price"`
 		BasePrice float64 `json:"base_price"`
+		Stock     int     `json:"stock"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return 0, fmt.Errorf("failed to decode product response: %w", err)
+		return 0, 0, fmt.Errorf("failed to decode product response: %w", err)
 	}
 
+	price := data.Price
 	if data.BasePrice > 0 {
-		return data.BasePrice, nil
+		price = data.BasePrice
 	}
-	return data.Price, nil
+	return price, data.Stock, nil
 }
 
-// AddItem adds an item to the cart. It enforces the single-store constraint.
+// AddItem adds an item to the cart. It enforces the single-store constraint and stock limits.
 func (s *CartService) AddItem(ctx context.Context, userID string, req models.AddToCartRequest) error {
 	cart, err := s.repo.GetCart(ctx, userID)
 	if err != nil {
@@ -119,20 +121,32 @@ func (s *CartService) AddItem(ctx context.Context, userID string, req models.Add
 		return fmt.Errorf("invalid quantity %d: must be between 1 and 999", req.Quantity)
 	}
 
-	// Fetch real price from Product Service using product_tracking_id
-	realPrice, err := s.fetchProductPrice(ctx, req.ProductTrackingID)
+	// Fetch real price and stock from Product Service using product_tracking_id
+	realPrice, stock, err := s.fetchProductDetails(ctx, req.ProductTrackingID)
 	if err != nil {
-		return fmt.Errorf("failed to verify product price: %w", err)
+		return fmt.Errorf("failed to verify product details: %w", err)
+	}
+
+	// SP-GO-20: Prevent adding unavailable quantities beyond current stock
+	if req.Quantity > stock {
+		return fmt.Errorf("insufficient stock: requested %d, available %d", req.Quantity, stock)
 	}
 
 	return s.repo.AddItem(ctx, cart.ID, req.ProductTrackingID, req.Quantity, realPrice)
 }
 
-// UpdateItemQuantity updates the quantity of a specific item
+// UpdateItemQuantity updates the quantity of a specific item with stock check
 func (s *CartService) UpdateItemQuantity(ctx context.Context, userID string, productTrackingID string, quantity int) error {
 	if quantity <= 0 || quantity > 999 {
 		return fmt.Errorf("invalid quantity %d: must be between 1 and 999", quantity)
 	}
+
+	// SP-GO-20: Validate updated quantity against current stock
+	_, stock, err := s.fetchProductDetails(ctx, productTrackingID)
+	if err == nil && quantity > stock {
+		return fmt.Errorf("insufficient stock: requested %d, available %d", quantity, stock)
+	}
+
 	cart, err := s.repo.GetCart(ctx, userID)
 	if err != nil {
 		return errors.New("cart not found")

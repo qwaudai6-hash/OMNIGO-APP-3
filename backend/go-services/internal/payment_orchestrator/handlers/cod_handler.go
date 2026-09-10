@@ -97,8 +97,24 @@ func (h *CODHandler) Confirm(c *gin.Context) {
 		return
 	}
 
-	// Convert rupees to paisa
-	amountPaisa := int64(req.Amount * 100)
+	// FINANCIAL-AUDIT FIX #4: Validate amount against order's authoritative total.
+	// Never trust client-supplied amount for financial records.
+	var orderTotalPaisa int64
+	err = h.db.QueryRow(ctx,
+		`SELECT COALESCE(total_amount_paisa, 0) FROM orders WHERE order_tracking_id = $1`,
+		req.OrderTrackingID,
+	).Scan(&orderTotalPaisa)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to look up order total: " + err.Error()})
+		return
+	}
+	if orderTotalPaisa <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "order has no valid total amount for COD"})
+		return
+	}
+
+	// Use authoritative order total, not client-supplied amount
+	amountPaisa := orderTotalPaisa
 
 	// Insert cod_debts record — the actual ledger entry is created by the delivery
 	// service at delivery completion (CreateCODDebtLedger) to ensure the rider_cod_debt
@@ -124,7 +140,7 @@ func (h *CODHandler) Confirm(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":          "cod_debt_created",
 		"cod_debt_id":     codDebtID.String(),
-		"amount_owed":     req.Amount,
+		"amount_owed":     float64(amountPaisa) / 100.0,
 		"amount_owed_paisa": amountPaisa,
 		"split": gin.H{
 			"admin_revenue_paisa":   split.AdminRevenue,
@@ -497,13 +513,10 @@ func (h *CODHandler) ListDebts(c *gin.Context) {
 
 // RegisterRoutes registers COD payment endpoints.
 func (h *CODHandler) RegisterRoutes(router *gin.Engine) {
-	payments := router.Group("/api/v1/payments", middleware.JWTAuth())
-	{
-		payments.POST("/cod/confirm", middleware.RoleRequired("rider", "admin"), h.Confirm)
-		payments.POST("/cod/pay-now", middleware.RoleRequired("rider", "admin"), h.PayNow)
-		payments.POST("/cod/settlement", middleware.RoleRequired("rider", "admin"), h.Settlement)
-		payments.GET("/cod/debts", h.ListDebts)
-	}
+	router.POST("/api/v1/payments/cod/confirm", middleware.JWTAuth(), middleware.RoleRequired("rider", "admin"), h.Confirm)
+	router.POST("/api/v1/payments/cod/pay-now", middleware.JWTAuth(), middleware.RoleRequired("rider", "admin"), h.PayNow)
+	router.POST("/api/v1/payments/cod/settlement", middleware.JWTAuth(), middleware.RoleRequired("rider", "admin"), h.Settlement)
+	router.GET("/api/v1/payments/cod/debts", middleware.JWTAuth(), h.ListDebts)
 }
 
 // vendorFallback prefers the vendor USER id, falling back to the store id for

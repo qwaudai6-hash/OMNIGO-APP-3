@@ -3,6 +3,10 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../features/customer/data/models/cart_item.dart';
 import '../../features/customer/data/models/product.dart';
+import '../di/service_locator.dart';
+import '../network/api_client.dart';
+import '../network/api_endpoints.dart';
+import 'session_registry.dart';
 
 class CartProvider extends ChangeNotifier {
   final Map<String, CartItem> _items = {};
@@ -19,6 +23,10 @@ class CartProvider extends ChangeNotifier {
   double get grandTotal => totalAmount + _deliveryFee;
 
   String? get currentStoreId => _items.values.isNotEmpty ? _items.values.first.storeTrackingId : null;
+
+  bool get _isAuthenticated =>
+      SessionRegistry.instance.token != null &&
+      SessionRegistry.instance.token!.isNotEmpty;
 
   void setDeliveryFee(double fee) {
     _deliveryFee = fee;
@@ -41,6 +49,32 @@ class CartProvider extends ChangeNotifier {
         _items[item.productId] = item;
       }
       notifyListeners();
+
+      // Background sync with Go backend Cart Service if user is authenticated
+      if (_isAuthenticated) {
+        try {
+          final res = await sl<ApiClient>().get(ApiEndpoints.cart());
+          if (res is Map<String, dynamic>) {
+            final backendItems = res['items'] as List<dynamic>?;
+            final backendStoreId = (res['store_id'] ?? '').toString();
+            if (backendItems != null && backendItems.isNotEmpty) {
+              _items.clear();
+              for (var raw in backendItems) {
+                final map = raw as Map<String, dynamic>;
+                if (!map.containsKey('store_id') && backendStoreId.isNotEmpty) {
+                  map['store_id'] = backendStoreId;
+                }
+                final item = CartItem.fromJson(map);
+                _items[item.productId] = item;
+              }
+              await _saveToStorage();
+              notifyListeners();
+            }
+          }
+        } catch (netErr) {
+          debugPrint('Backend cart sync skipped: $netErr');
+        }
+      }
     } catch (e) {
       debugPrint('Error loading cart: $e');
     }
@@ -59,6 +93,23 @@ class CartProvider extends ChangeNotifier {
         _items.clear();
       } else {
         throw Exception('DIFFERENT_STORE');
+      }
+    }
+
+    // Attempt backend sync first if authenticated to enforce stock limits (SP-GO-20)
+    if (_isAuthenticated) {
+      try {
+        await sl<ApiClient>().post(
+          ApiEndpoints.cartItems(),
+          {
+            'product_tracking_id': productId,
+            'store_id': storeTrackingId,
+            'quantity': quantity,
+          },
+        );
+      } catch (e) {
+        debugPrint('Failed to sync added item with backend: $e');
+        rethrow;
       }
     }
 
@@ -82,28 +133,71 @@ class CartProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> addCartItem(CartItem item, {bool clearIfDifferentStore = false}) async {
+    final product = Product(
+      productTrackingId: item.productId,
+      storeTrackingId: item.storeTrackingId,
+      name: item.name,
+      description: '',
+      basePrice: item.price,
+    );
+    await addItem(product, quantity: item.quantity, clearIfDifferentStore: clearIfDifferentStore);
+  }
+
   Future<void> removeItem(String productId) async {
     _items.remove(productId);
     await _saveToStorage();
     notifyListeners();
+
+    if (_isAuthenticated) {
+      try {
+        await sl<ApiClient>().delete(ApiEndpoints.cartItem(productId));
+      } catch (e) {
+        debugPrint('Failed to sync removed item with backend: $e');
+      }
+    }
   }
 
   Future<void> updateQuantity(String productId, int quantity) async {
-    if (_items.containsKey(productId)) {
-      if (quantity <= 0) {
-        _items.remove(productId);
-      } else {
-        _items[productId] = _items[productId]!.copyWith(quantity: quantity);
+    if (!_items.containsKey(productId)) return;
+
+    if (_isAuthenticated) {
+      try {
+        if (quantity <= 0) {
+          await sl<ApiClient>().delete(ApiEndpoints.cartItem(productId));
+        } else {
+          await sl<ApiClient>().put(
+            ApiEndpoints.cartItem(productId),
+            {'quantity': quantity},
+          );
+        }
+      } catch (e) {
+        debugPrint('Failed to sync updated quantity with backend: $e');
+        rethrow;
       }
-      await _saveToStorage();
-      notifyListeners();
     }
+
+    if (quantity <= 0) {
+      _items.remove(productId);
+    } else {
+      _items[productId] = _items[productId]!.copyWith(quantity: quantity);
+    }
+    await _saveToStorage();
+    notifyListeners();
   }
 
   Future<void> clearCart() async {
     _items.clear();
     await _saveToStorage();
     notifyListeners();
+
+    if (_isAuthenticated) {
+      try {
+        await sl<ApiClient>().delete(ApiEndpoints.cart());
+      } catch (e) {
+        debugPrint('Failed to clear cart on backend: $e');
+      }
+    }
   }
 
   Future<void> _saveToStorage() async {
@@ -122,7 +216,7 @@ class CartProvider extends ChangeNotifier {
       _isSaving = false;
       if (_pendingSave) {
         _pendingSave = false;
-        _saveToStorage();
+        await _saveToStorage();
       }
     }
   }

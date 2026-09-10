@@ -139,6 +139,14 @@ func (c *Client) MerchantID() string {
 	return c.merchantID
 }
 
+// MerchantName returns the configured merchant name.
+func (c *Client) MerchantName() string {
+	if c.merchantName != "" {
+		return c.merchantName
+	}
+	return "OMNIGO"
+}
+
 // VerifyIPNHash verifies the integrity hash PayFast attaches to Instant Payment Notification (IPN)
 // callbacks sent to the merchant's registered checkout_url. Per PayFast's documented spec, this is
 // a PLAIN SHA256 (not HMAC) of "basket_id|merchant_secured_key|merchant_id|payfast_err_code".

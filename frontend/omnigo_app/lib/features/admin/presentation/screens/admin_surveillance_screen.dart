@@ -30,6 +30,11 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
   List<dynamic> _verifications = [];
   bool _isLoadingVerifications = false;
 
+  // Emergency actions
+  final TextEditingController _emergencyOrderIdController = TextEditingController();
+  final TextEditingController _emergencyReasonController = TextEditingController();
+  final TextEditingController _emergencyRiderIdController = TextEditingController();
+  bool _isEmergencyLoading = false;
 
   @override
   void initState() {
@@ -269,13 +274,16 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
   @override
   void dispose() {
     _orderIdController.dispose();
+    _emergencyOrderIdController.dispose();
+    _emergencyReasonController.dispose();
+    _emergencyRiderIdController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 4,
+      length: 5,
       child: Scaffold(
         backgroundColor: Colors.grey[100],
         appBar: AppBar(
@@ -297,11 +305,13 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
             ),
           ],
           bottom: TabBar(
+            isScrollable: true,
             tabs: const [
               Tab(icon: Icon(Icons.search_outlined), text: 'Lineage'),
               Tab(icon: Icon(Icons.pending_actions_outlined), text: 'Pending'),
               Tab(icon: Icon(Icons.people_outline), text: 'Users'),
               Tab(icon: Icon(Icons.verified_user_outlined), text: 'KYC/KYB'),
+              Tab(icon: Icon(Icons.emergency_outlined), text: 'Emergency'),
             ],
             indicatorColor: AppTheme.limeAccent,
             labelColor: AppTheme.limeAccent,
@@ -315,6 +325,7 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
             _buildPendingTab(),
             _buildUsersTab(),
             _buildVerificationsTab(),
+            _buildEmergencyTab(),
           ],
         ),
       ),
@@ -822,6 +833,332 @@ class _AdminSurveillanceScreenState extends State<AdminSurveillanceScreen> {
                 },
               ),
             ),
+        ],
+      ),
+    );
+  }
+
+  // ── Emergency Tab & Actions ──────────────────────────────────────────
+
+  Future<void> _forceCancelOrder() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final orderId = _emergencyOrderIdController.text.trim();
+    final reason = _emergencyReasonController.text.trim();
+    if (orderId.isEmpty || reason.isEmpty) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Please provide both Order Tracking ID and Reason'), backgroundColor: Colors.redAccent),
+      );
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Confirm Force Cancel', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
+        content: Text('Are you sure you want to forcibly cancel order $orderId?\n\nThis action is irreversible and recorded in the audit log.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Back')),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Force Cancel', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    setState(() => _isEmergencyLoading = true);
+    try {
+      await sl<ApiClient>().post('/admin/orders/$orderId/force-cancel', {
+        'reason': reason,
+      });
+      if (mounted) {
+        messenger.showSnackBar(
+          SnackBar(content: Text('Order $orderId force cancelled successfully'), backgroundColor: Colors.green),
+        );
+        _emergencyReasonController.clear();
+      }
+    } catch (e) {
+      if (mounted) {
+        messenger.showSnackBar(
+          SnackBar(content: Text('Force cancel failed: $e'), backgroundColor: Colors.redAccent),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isEmergencyLoading = false);
+    }
+  }
+
+  Future<void> _manualRefund() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final orderId = _emergencyOrderIdController.text.trim();
+    final reason = _emergencyReasonController.text.trim();
+    if (orderId.isEmpty || reason.isEmpty) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Please provide both Order Tracking ID and Reason'), backgroundColor: Colors.redAccent),
+      );
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Confirm Manual Refund', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.orange)),
+        content: Text('Are you sure you want to refund order $orderId?\n\nThis credits customer wallet, updates escrow status, and logs audit record.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Back')),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.orange),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Refund Order', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    setState(() => _isEmergencyLoading = true);
+    try {
+      await sl<ApiClient>().post('/admin/orders/$orderId/manual-refund', {
+        'reason': reason,
+      });
+      if (mounted) {
+        messenger.showSnackBar(
+          SnackBar(content: Text('Refund processed for order $orderId'), backgroundColor: Colors.green),
+        );
+        _emergencyReasonController.clear();
+      }
+    } catch (e) {
+      if (mounted) {
+        messenger.showSnackBar(
+          SnackBar(content: Text('Refund failed: $e'), backgroundColor: Colors.redAccent),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isEmergencyLoading = false);
+    }
+  }
+
+  Future<void> _reassignRider() async {
+    final orderId = _emergencyOrderIdController.text.trim();
+    final newRiderId = _emergencyRiderIdController.text.trim();
+    final reason = _emergencyReasonController.text.trim();
+    if (orderId.isEmpty || newRiderId.isEmpty || reason.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please provide Order ID, New Rider ID, and Reason'), backgroundColor: Colors.redAccent),
+      );
+      return;
+    }
+
+    setState(() => _isEmergencyLoading = true);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await sl<ApiClient>().post('/admin/orders/$orderId/reassign-rider', {
+        'new_rider_tracking_id': newRiderId,
+        'reason': reason,
+      });
+      if (mounted) {
+        messenger.showSnackBar(
+          SnackBar(content: Text('Rider reassigned for order $orderId to $newRiderId'), backgroundColor: Colors.green),
+        );
+        _emergencyReasonController.clear();
+        _emergencyRiderIdController.clear();
+      }
+    } catch (e) {
+      if (mounted) {
+        messenger.showSnackBar(
+          SnackBar(content: Text('Reassignment failed: $e'), backgroundColor: Colors.redAccent),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isEmergencyLoading = false);
+    }
+  }
+
+  Widget _buildEmergencyTab() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: Colors.red.shade50,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.red.shade200),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.warning_amber_rounded, color: Colors.red, size: 28),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: const [
+                      Text('Emergency Operator Controls', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red, fontSize: 14)),
+                      SizedBox(height: 2),
+                      Text(
+                        'Interventions bypass regular state transitions. Every event is written immutably to the audit log.',
+                        style: TextStyle(color: Colors.black87, fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+
+          // Order Tracking ID Input
+          const Text('Target Order & Reason', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.black87)),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _emergencyOrderIdController,
+            decoration: InputDecoration(
+              labelText: 'Order Tracking ID',
+              hintText: 'e.g. ORDR-12345678',
+              prefixIcon: const Icon(Icons.receipt_long),
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _emergencyReasonController,
+            decoration: InputDecoration(
+              labelText: 'Audit Justification / Reason',
+              hintText: 'e.g. Customer dispute verified, rider bike breakdown',
+              prefixIcon: const Icon(Icons.edit_note),
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+          ),
+          const SizedBox(height: 24),
+
+          // Action 1: Force Cancel
+          Card(
+            elevation: 1,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: const [
+                      Icon(Icons.cancel_outlined, color: Colors.red, size: 20),
+                      SizedBox(width: 8),
+                      Text('Force Cancel Order', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  const Text('Immediately mark the order as cancelled regardless of current state.', style: TextStyle(color: Colors.black54, fontSize: 12)),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red.shade700,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                      onPressed: _isEmergencyLoading ? null : _forceCancelOrder,
+                      icon: const Icon(Icons.cancel, color: Colors.white, size: 18),
+                      label: const Text('Execute Force Cancel', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+
+          // Action 2: Manual Refund
+          Card(
+            elevation: 1,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: const [
+                      Icon(Icons.account_balance_wallet_outlined, color: Colors.orange, size: 20),
+                      SizedBox(width: 8),
+                      Text('Trigger Manual Refund', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  const Text('Directly credit customer wallet with order amount & resolve escrow holds.', style: TextStyle(color: Colors.black54, fontSize: 12)),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.orange.shade800,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                      onPressed: _isEmergencyLoading ? null : _manualRefund,
+                      icon: const Icon(Icons.currency_exchange, color: Colors.white, size: 18),
+                      label: const Text('Execute Manual Refund', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+
+          // Action 3: Reassign Rider
+          Card(
+            elevation: 1,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: const [
+                      Icon(Icons.delivery_dining_outlined, color: Colors.blue, size: 20),
+                      SizedBox(width: 8),
+                      Text('Reassign Delivery Rider', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  const Text('Assign active delivery to a different verified rider.', style: TextStyle(color: Colors.black54, fontSize: 12)),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _emergencyRiderIdController,
+                    decoration: InputDecoration(
+                      labelText: 'New Rider Tracking ID',
+                      hintText: 'e.g. USR-rider-abc',
+                      prefixIcon: const Icon(Icons.person_pin_outlined),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blue.shade800,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                      onPressed: _isEmergencyLoading ? null : _reassignRider,
+                      icon: const Icon(Icons.swap_horiz, color: Colors.white, size: 18),
+                      label: const Text('Execute Rider Reassignment', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_isEmergencyLoading) ...[
+            const SizedBox(height: 24),
+            const Center(child: CircularProgressIndicator(color: Colors.black87)),
+          ],
         ],
       ),
     );

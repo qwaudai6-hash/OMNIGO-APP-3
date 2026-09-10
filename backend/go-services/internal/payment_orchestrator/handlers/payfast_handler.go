@@ -218,5 +218,23 @@ func (h *PayFastSplitHandler) IPNCallback(c *gin.Context) {
 		return
 	}
 
+	if strings.Contains(c.GetHeader("Accept"), "text/html") || c.Request.Method == http.MethodGet {
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head><title>Payment Successful</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="font-family:sans-serif;text-align:center;padding:50px 20px;">
+    <h2 style="color:#2e7d32;">Payment Received Successfully</h2>
+    <p>Your order #<strong>%s</strong> has been confirmed.</p>
+    <script>
+        if (window.FlutterChannel) { window.FlutterChannel.postMessage('success'); }
+        if (window.opener) { window.opener.postMessage({status: 'success', order_id: '%s'}, '*'); }
+        if (window.parent) { window.parent.postMessage({status: 'success', order_id: '%s'}, '*'); }
+    </script>
+</body>
+</html>`, html.EscapeString(params.BasketID), html.EscapeString(params.BasketID), html.EscapeString(params.BasketID)))
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{"status": "received"})
 }

@@ -7,6 +7,11 @@ import '../../../../core/di/service_locator.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/network/api_client.dart';
+import 'package:provider/provider.dart';
+import '../../../../core/services/cart_provider.dart';
+import '../../data/models/cart_item.dart';
+import 'checkout_screen.dart';
+import '../../../../shared/presentation/screens/chat_room_screen.dart';
 
 /// OrderDetailScreen displays the full breakdown of a single order:
 /// products, store info, rider info, payment details, a visual
@@ -267,6 +272,72 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     }
   }
 
+  Future<void> _reorderOrder() async {
+    setState(() => _isSubmitting = true);
+    try {
+      List<dynamic> items = (_currentOrder['items'] as List<dynamic>?) ??
+          (_currentOrder['products'] as List<dynamic>?) ??
+          [];
+      if (items.isEmpty) {
+        final orderId = _currentOrder['order_tracking_id']?.toString() ?? '';
+        if (orderId.isNotEmpty) {
+          final detail = await sl<ApiClient>().get(ApiEndpoints.orderDetail(orderId));
+          if (detail is Map<String, dynamic>) {
+            items = (detail['items'] as List<dynamic>?) ??
+                (detail['products'] as List<dynamic>?) ??
+                [];
+          }
+        }
+      }
+      if (items.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('No item details available to reorder.')),
+          );
+        }
+        return;
+      }
+
+      if (!mounted) return;
+      final cart = Provider.of<CartProvider>(context, listen: false);
+      for (final rawItem in items) {
+        if (rawItem is Map<String, dynamic>) {
+          final cartItem = CartItem.fromJson(rawItem);
+          if (cartItem.productId.isNotEmpty) {
+            await cart.addCartItem(cartItem, clearIfDifferentStore: true);
+          }
+        }
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('Items added to cart!'),
+            backgroundColor: Colors.green,
+            action: SnackBarAction(
+              label: 'Checkout',
+              textColor: Colors.white,
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(builder: (_) => const CheckoutScreen()),
+                );
+              },
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to reorder: $e'), backgroundColor: Colors.redAccent),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSubmitting = false);
+    }
+  }
+
   void _showDisputeDialog() {
     showDialog<void>(
       context: context,
@@ -457,6 +528,107 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
     );
   }
 
+  void _openChatOptions(BuildContext context, String orderId, String? riderId, String vendorId) {
+    final hasRider = riderId != null && riderId.isNotEmpty && riderId != 'N/A';
+    final hasVendor = vendorId.isNotEmpty && vendorId != 'N/A';
+
+    if (!hasRider && !hasVendor) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No active vendor or rider assigned to chat with yet.')),
+      );
+      return;
+    }
+
+    // If only rider or only vendor available, navigate directly
+    if (hasRider && !hasVendor) {
+      Navigator.push(
+        context,
+        MaterialPageRoute<void>(
+          builder: (_) => ChatRoomScreen(
+            orderId: orderId,
+            otherUserId: riderId,
+            otherUserName: 'Delivery Rider',
+            otherUserRole: 'rider',
+          ),
+        ),
+      );
+      return;
+    }
+    if (!hasRider && hasVendor) {
+      Navigator.push(
+        context,
+        MaterialPageRoute<void>(
+          builder: (_) => ChatRoomScreen(
+            orderId: orderId,
+            otherUserId: vendorId,
+            otherUserName: 'Store Vendor',
+            otherUserRole: 'vendor',
+          ),
+        ),
+      );
+      return;
+    }
+
+    // Both available: show picker sheet
+    showModalBottomSheet<void>(
+      context: context,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Order Messages', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 12),
+              ListTile(
+                leading: const CircleAvatar(backgroundColor: Colors.blue, child: Icon(Icons.delivery_dining, color: Colors.white)),
+                title: const Text('Chat with Rider'),
+                subtitle: Text('Rider: $riderId'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute<void>(
+                      builder: (_) => ChatRoomScreen(
+                        orderId: orderId,
+                        otherUserId: riderId!,
+                        otherUserName: 'Delivery Rider',
+                        otherUserRole: 'rider',
+                      ),
+                    ),
+                  );
+                },
+              ),
+              ListTile(
+                leading: const CircleAvatar(backgroundColor: Colors.orange, child: Icon(Icons.storefront, color: Colors.white)),
+                title: const Text('Chat with Store Vendor'),
+                subtitle: Text('Vendor: $vendorId'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute<void>(
+                      builder: (_) => ChatRoomScreen(
+                        orderId: orderId,
+                        otherUserId: vendorId,
+                        otherUserName: 'Store Vendor',
+                        otherUserRole: 'vendor',
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final orderId = _currentOrder['order_tracking_id'] ?? 'ORD-UNKNOWN';
@@ -491,6 +663,13 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
           icon: const Icon(Icons.arrow_back_rounded, color: Colors.black),
           onPressed: () => Navigator.pop(context),
         ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.chat_outlined, color: Colors.black87),
+            tooltip: 'Order Chat',
+            onPressed: () => _openChatOptions(context, orderId.toString(), riderId, vendorId),
+          ),
+        ],
       ),
       body: SingleChildScrollView(
         physics: const BouncingScrollPhysics(),
@@ -682,6 +861,25 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
               const SizedBox(height: 24),
             ],
 
+            // ── Reorder This Order ──────────────────────────────────
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _isSubmitting ? null : _reorderOrder,
+                icon: const Icon(Icons.repeat_rounded, color: AppTheme.blackAccent),
+                label: const Text(
+                  'Reorder This Order',
+                  style: TextStyle(color: AppTheme.blackAccent, fontWeight: FontWeight.bold),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppTheme.limeAccent,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                ),
+              ),
+            ),
+            const SizedBox(height: 24),
+
             // ── Products ──────────────────────────────────────────
             const Text('Products', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.blackAccent)),
             const SizedBox(height: 12),
@@ -692,14 +890,60 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
             const SizedBox(height: 24),
 
             // ── Store & Vendor ────────────────────────────────────
-            const Text('Store & Vendor', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.blackAccent)),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('Store & Vendor', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.blackAccent)),
+                if (vendorId.isNotEmpty && vendorId != 'N/A')
+                  TextButton.icon(
+                    icon: const Icon(Icons.chat_bubble_outline, size: 16, color: Colors.orange),
+                    label: const Text('Chat', style: TextStyle(color: Colors.orange, fontWeight: FontWeight.bold, fontSize: 13)),
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute<void>(
+                          builder: (_) => ChatRoomScreen(
+                            orderId: orderId.toString(),
+                            otherUserId: vendorId,
+                            otherUserName: 'Store Vendor',
+                            otherUserRole: 'vendor',
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+              ],
+            ),
             const SizedBox(height: 12),
             _buildInfoCard(Icons.storefront_outlined, 'Store', storeId),
             _buildInfoCard(Icons.person_outline, 'Vendor', vendorId),
             const SizedBox(height: 24),
 
             // ── Rider ─────────────────────────────────────────────
-            const Text('Rider', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.blackAccent)),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('Rider', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.blackAccent)),
+                if (riderId != null && riderId.isNotEmpty && riderId != 'N/A')
+                  TextButton.icon(
+                    icon: const Icon(Icons.chat_bubble_outline, size: 16, color: Colors.blue),
+                    label: const Text('Chat', style: TextStyle(color: Colors.blue, fontWeight: FontWeight.bold, fontSize: 13)),
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute<void>(
+                          builder: (_) => ChatRoomScreen(
+                            orderId: orderId.toString(),
+                            otherUserId: riderId,
+                            otherUserName: 'Delivery Rider',
+                            otherUserRole: 'rider',
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+              ],
+            ),
             const SizedBox(height: 12),
             _buildInfoCard(Icons.delivery_dining_outlined, 'Assigned Rider',
                 riderId != null && riderId.isNotEmpty ? riderId : 'Not yet assigned',),

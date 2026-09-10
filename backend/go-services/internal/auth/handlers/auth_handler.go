@@ -54,8 +54,34 @@ func (h *AuthHandler) Register(c *gin.Context) {
 
 	trackingID, err := h.svc.Register(c.Request.Context(), req)
 	if err != nil {
-		if strings.Contains(err.Error(), "CONFLICT_DUPLICATE_EMAIL") {
-			c.JSON(http.StatusConflict, gin.H{"error": "This email address is already in use"})
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "CONFLICT_DUPLICATE_EMAIL") {
+			cleanMsg := strings.TrimSpace(strings.TrimPrefix(errMsg, "CONFLICT_DUPLICATE_EMAIL:"))
+			if cleanMsg == "" {
+				cleanMsg = "This email address is already in use"
+			}
+			c.JSON(http.StatusConflict, gin.H{"error": cleanMsg})
+			return
+		}
+		if strings.Contains(errMsg, "CONFLICT_DUPLICATE_PHONE") {
+			cleanMsg := strings.TrimSpace(strings.TrimPrefix(errMsg, "CONFLICT_DUPLICATE_PHONE:"))
+			if cleanMsg == "" {
+				cleanMsg = "This phone number is already in use"
+			}
+			c.JSON(http.StatusConflict, gin.H{"error": cleanMsg})
+			return
+		}
+		if strings.Contains(errMsg, "CONFLICT_DUPLICATE_VEHICLE") {
+			cleanMsg := strings.TrimSpace(strings.TrimPrefix(errMsg, "CONFLICT_DUPLICATE_VEHICLE:"))
+			if cleanMsg == "" {
+				cleanMsg = "This vehicle is already registered"
+			}
+			c.JSON(http.StatusConflict, gin.H{"error": cleanMsg})
+			return
+		}
+		if strings.Contains(errMsg, "INVALID_ROLE") {
+			cleanMsg := strings.TrimSpace(strings.TrimPrefix(errMsg, "INVALID_ROLE:"))
+			c.JSON(http.StatusBadRequest, gin.H{"error": cleanMsg})
 			return
 		}
 		log.Printf("[ERROR] Register: %v", err)

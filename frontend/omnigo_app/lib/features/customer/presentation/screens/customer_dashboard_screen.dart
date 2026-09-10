@@ -376,12 +376,10 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     ChatService.instance.bindToWebSocket(_wsClient!);
     ChatService.instance.setUserId(SessionRegistry.instance.trackingId ?? '');
 
-    _wsSub = _wsClient!.stream.listen((raw) {
+    _wsSub = _wsClient!.topicStream('telemetry').listen((raw) {
       if (raw is! String) return;
       try {
         final frame = jsonDecode(raw) as Map<String, dynamic>;
-        // Skip chat frames — the ChatService handles those.
-        if (frame['action'] == 'CHAT_MESSAGE') return;
 
         // Handle rider telemetry for live map
         final riderId = frame['rider_id']?.toString() ??

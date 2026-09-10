@@ -475,6 +475,25 @@ CREATE TABLE IF NOT EXISTS vendor_payouts (
 CREATE INDEX IF NOT EXISTS idx_vendor_payouts_vendor ON vendor_payouts(vendor_tracking_id, status);
 CREATE INDEX IF NOT EXISTS idx_vendor_payouts_batch ON vendor_payouts(batch_id);
 
+-- Rider Payouts (Cash-out requests & settlement records)
+CREATE TABLE IF NOT EXISTS rider_payouts (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    rider_tracking_id   VARCHAR(50) NOT NULL,
+    amount              DECIMAL(14,2) NOT NULL,
+    amount_paisa        BIGINT NOT NULL DEFAULT 0,
+    method              VARCHAR(30) NOT NULL DEFAULT 'bank_transfer',
+    account_number      VARCHAR(100),
+    account_title       VARCHAR(100),
+    status              VARCHAR(20) NOT NULL DEFAULT 'pending',
+    batch_id            UUID,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at        TIMESTAMPTZ,
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_rider_payouts_rider ON rider_payouts(rider_tracking_id, status);
+CREATE INDEX IF NOT EXISTS idx_rider_payouts_batch ON rider_payouts(batch_id);
+
 -- Disputes
 CREATE TABLE IF NOT EXISTS disputes (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -695,3 +714,19 @@ CREATE TABLE IF NOT EXISTS payment_api_key_audit (
 );
 
 CREATE INDEX IF NOT EXISTS idx_payment_api_key_audit_provider ON payment_api_key_audit(provider, created_at DESC);
+
+-- ── Admin Audit Log ───────────────────────────────────────────────────────
+-- Records all administrative emergency interventions with immutable entries.
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+    id                 BIGSERIAL PRIMARY KEY,
+    admin_tracking_id  VARCHAR(80) NOT NULL,
+    action             VARCHAR(40) NOT NULL,   -- 'force_cancel', 'manual_refund', 'reassign_rider'
+    target_id          VARCHAR(120) NOT NULL,  -- order_tracking_id or other entity
+    target_type        VARCHAR(30) NOT NULL DEFAULT 'order',
+    reason             TEXT,
+    metadata           JSONB,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_audit_log_admin ON admin_audit_log(admin_tracking_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_log_target ON admin_audit_log(target_id, created_at DESC);

@@ -42,6 +42,27 @@ class UserFriendlyError {
       );
     }
 
+    // Try extracting clean JSON error message from backend if present: e.g. {"error":"..."}
+    final errorMatch = RegExp(r'"error"\s*:\s*"([^"]+)"').firstMatch(error.toString());
+    if (errorMatch != null && errorMatch.group(1) != null) {
+      final msg = errorMatch.group(1)!;
+      final msgLower = msg.toLowerCase();
+      String title = 'Notice';
+      if (msgLower.contains('already registered') || msgLower.contains('already exists')) {
+        title = 'Account Already Exists';
+      } else if (msgLower.contains('phone')) {
+        title = 'Phone Already Registered';
+      } else if (msgLower.contains('vehicle')) {
+        title = 'Vehicle Already Registered';
+      } else if (msgLower.contains('store name')) {
+        title = 'Store Name Taken';
+      }
+      return UserFriendlyError(
+        title: title,
+        message: msg,
+      );
+    }
+
     if (str.contains('409') || str.contains('conflict_duplicate_email') || str.contains('already registered') || str.contains('already exists')) {
       return const UserFriendlyError(
         title: 'Already Registered',
@@ -75,16 +96,6 @@ class UserFriendlyError {
         title: 'Server Maintenance',
         message: 'OMNIGO cloud servers are temporarily undergoing maintenance. Please try again shortly.',
         isNetworkIssue: true,
-      );
-    }
-
-    // Try extracting clean JSON error message if present: e.g. {"error":"..."}
-    final errorMatch = RegExp(r'"error"\s*:\s*"([^"]+)"').firstMatch(error.toString());
-    if (errorMatch != null && errorMatch.group(1) != null) {
-      final msg = errorMatch.group(1)!;
-      return UserFriendlyError(
-        title: 'Notice',
-        message: msg,
       );
     }
 

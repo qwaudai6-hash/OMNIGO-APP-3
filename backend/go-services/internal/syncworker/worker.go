@@ -375,6 +375,20 @@ func (w *Worker) cacheLiveGPS(ctx context.Context, loc LocationPayload) {
 	// Raw JSON copy for clients that need full payload (status, clock).
 	raw, _ := json.Marshal(loc)
 	pipe.Set(ctx, "rider:live:gps:"+loc.RiderID, raw, 30*time.Second)
+
+	// Phase 2 Telemetry Bridge: Publish GPS frame to Redis Pub/Sub so WebSocket Gateway
+	// dispatches it live to the customer tracking the active delivery and the vendor store.
+	telemetryFrame := map[string]interface{}{
+		"rider_id":   loc.RiderID,
+		"lat":        loc.Latitude,
+		"lng":        loc.Longitude,
+		"updated_at": loc.TimestampMS,
+		"order_id":   loc.OrderID,
+	}
+	if frameBytes, fErr := json.Marshal(telemetryFrame); fErr == nil {
+		pipe.Publish(ctx, "rider:telemetry:pubsub", frameBytes)
+	}
+
 	if _, err := pipe.Exec(ctx); err != nil {
 		log.Printf("live GPS cache write failed for rider %s: %v", loc.RiderID, err)
 	}

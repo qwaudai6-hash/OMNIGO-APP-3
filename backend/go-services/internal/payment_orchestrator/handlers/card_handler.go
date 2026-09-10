@@ -22,13 +22,10 @@ func NewCardVaultHandler(vault *payfastSvc.CardVaultService) *CardVaultHandler {
 
 // RegisterRoutes registers card vault routes with Gin.
 func (h *CardVaultHandler) RegisterRoutes(r gin.IRoutes) {
-	cardsGroup := r.Use(middleware.JWTAuth())
-	{
-		cardsGroup.GET("/api/v1/payments/cards", h.ListCards)
-		cardsGroup.POST("/api/v1/payments/cards", h.SaveCard)
-		cardsGroup.DELETE("/api/v1/payments/cards/:card_id", h.DeleteCard)
-		cardsGroup.POST("/api/v1/payments/cards/default", h.SetDefaultCard)
-	}
+	r.GET("/api/v1/payments/cards", middleware.JWTAuth(), h.ListCards)
+	r.POST("/api/v1/payments/cards", middleware.JWTAuth(), h.SaveCard)
+	r.DELETE("/api/v1/payments/cards/:card_id", middleware.JWTAuth(), h.DeleteCard)
+	r.POST("/api/v1/payments/cards/default", middleware.JWTAuth(), h.SetDefaultCard)
 }
 
 // SaveCard handles POST /api/v1/payments/cards

@@ -76,14 +76,22 @@ func (h *RefundHandler) executeRefund(ctx context.Context, req RefundRequest) (g
 	}
 
 	// Convert rupees to paisa for internal processing
+	// FINANCIAL-AUDIT FIX #3: Support partial refunds — if Amount > 0 and < TotalAmount,
+	// refund only the specified partial amount. Multiple partial refunds are allowed.
 	refundAmountRupees := req.Amount
-	if refundAmountRupees == 0 || refundAmountRupees > order.TotalAmount {
+	if refundAmountRupees <= 0 || refundAmountRupees > order.TotalAmount {
 		refundAmountRupees = order.TotalAmount
 	}
 	refundAmountPaisa := int64(refundAmountRupees * 100)
+	isPartialRefund := req.Amount > 0 && req.Amount < order.TotalAmount
 
-	// Idempotency: one successful refund per order for now.
-	idempotencyKey := fmt.Sprintf("refund:%s", req.OrderID)
+	// Idempotency: full refund uses order-level key, partial refunds use amount-specific key
+	var idempotencyKey string
+	if isPartialRefund {
+		idempotencyKey = fmt.Sprintf("refund:%s:partial:%d", req.OrderID, refundAmountPaisa)
+	} else {
+		idempotencyKey = fmt.Sprintf("refund:%s", req.OrderID)
+	}
 	if existing, err := h.txnRepo.GetByIDempotencyKey(ctx, idempotencyKey); err == nil && existing != nil {
 		return gin.H{
 			"status":         "already_processed",
@@ -223,14 +231,19 @@ func (h *RefundHandler) executeRefund(ctx context.Context, req RefundRequest) (g
 	}
 
 	// Update order status to refunded via ORDER SERVICE (not repo directly).
+	// FINANCIAL-AUDIT FIX #3: Use 'partially_refunded' for partial refunds, 'refunded' for full.
 	// The service layer handles escrow cancellation (CancelForOrder) and
 	// COD debt cleanup, which the repo layer does not.
+	newStatus := "refunded"
+	if isPartialRefund {
+		newStatus = "partially_refunded"
+	}
 	if h.orderSvc != nil {
-		if err := h.orderSvc.UpdateOrderStatus(ctx, req.OrderID, "refunded"); err != nil {
+		if err := h.orderSvc.UpdateOrderStatus(ctx, req.OrderID, newStatus); err != nil {
 			return gin.H{"error": "refund recorded but order status update failed: " + err.Error()}, http.StatusInternalServerError, err
 		}
 	} else {
-		if err := h.orderRepo.UpdateOrderStatus(ctx, req.OrderID, "refunded"); err != nil {
+		if err := h.orderRepo.UpdateOrderStatus(ctx, req.OrderID, newStatus); err != nil {
 			return gin.H{"error": "refund recorded but order status update failed: " + err.Error()}, http.StatusInternalServerError, err
 		}
 	}

@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_stripe/flutter_stripe.dart';
@@ -6,6 +8,7 @@ import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import '../../data/models/saved_address.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/services/cart_provider.dart';
 import '../../../../core/network/api_client.dart';
@@ -27,13 +30,17 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   int _currentStep = 0;
   String _selectedPaymentMethod = 'cod';
   bool _isLoading = false;
-  late final String _checkoutSessionNonce;
+  late String _checkoutSessionNonce;
   String? _createdOrderTrackingId;
   double _deliveryFee = 0.0;
   bool _deliveryFeeLoading = false;
   String _routingStatus = 'DYNAMIC_CALCULATED'; // H3: tracks how delivery fee was calculated
 
-  // Real delivery location — fetched from GPS
+  // Saved addresses
+  List<SavedAddress> _savedAddresses = [];
+  String? _selectedSavedAddressId; // null = Live GPS
+
+  // Real delivery location — fetched from GPS or selected from Saved Address
   String _deliveryAddress = 'Fetching your location...';
   LatLng? _deliveryLocation;
   bool _isFetchingLocation = true;
@@ -48,9 +55,176 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   @override
   void initState() {
     super.initState();
-    _checkoutSessionNonce = '${DateTime.now().millisecondsSinceEpoch}_${UniqueKey().toString()}';
+    _regenerateSessionNonce();
+    _loadSavedAddresses();
     _fetchCurrentLocation();
     _fetchVendorStoreInfo();
+  }
+
+  void _regenerateSessionNonce() {
+    _checkoutSessionNonce = '${DateTime.now().millisecondsSinceEpoch}_${UniqueKey().toString()}';
+    _createdOrderTrackingId = null;
+  }
+
+  Future<void> _loadSavedAddresses() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('customer_saved_addresses') ?? '[]';
+      final list = jsonDecode(raw) as List<dynamic>;
+      if (mounted) {
+        setState(() {
+          _savedAddresses = list
+              .map((e) => SavedAddress.fromJson(e as Map<String, dynamic>))
+              .toList();
+        });
+      }
+    } catch (e) {
+      debugPrint('Error loading saved addresses: $e');
+    }
+  }
+
+  Future<void> _saveNewAddress(SavedAddress addr) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final updated = [..._savedAddresses, addr];
+      final raw = jsonEncode(updated.map((e) => e.toJson()).toList());
+      await prefs.setString('customer_saved_addresses', raw);
+      if (mounted) {
+        setState(() {
+          _savedAddresses = updated;
+          _selectedSavedAddressId = addr.id;
+          _deliveryAddress = addr.address;
+          _deliveryLocation = LatLng(addr.latitude, addr.longitude);
+          _locationError = null;
+        });
+        unawaited(_estimateDeliveryFee());
+      }
+    } catch (e) {
+      debugPrint('Error saving address: $e');
+    }
+  }
+
+  void _selectSavedAddress(SavedAddress addr) {
+    setState(() {
+      _selectedSavedAddressId = addr.id;
+      _deliveryAddress = addr.address;
+      _deliveryLocation = LatLng(addr.latitude, addr.longitude);
+      _locationError = null;
+    });
+    unawaited(_estimateDeliveryFee());
+  }
+
+  void _showAddAddressSheet(BuildContext ctx) {
+    final labelCtrl = TextEditingController();
+    final addressCtrl = TextEditingController();
+    final latCtrl = TextEditingController(text: _deliveryLocation?.latitude.toStringAsFixed(6) ?? '');
+    final lngCtrl = TextEditingController(text: _deliveryLocation?.longitude.toStringAsFixed(6) ?? '');
+
+    showModalBottomSheet<void>(
+      context: ctx,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (sheetCtx) {
+        return Padding(
+          padding: EdgeInsets.only(
+            left: 20, right: 20, top: 20,
+            bottom: MediaQuery.of(sheetCtx).viewInsets.bottom + 20,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Add New Address', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 16),
+              TextField(
+                controller: labelCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Label (e.g. Home, Office)',
+                  prefixIcon: Icon(Icons.label_outline),
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: addressCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Full Address',
+                  prefixIcon: Icon(Icons.location_on_outlined),
+                  border: OutlineInputBorder(),
+                ),
+                maxLines: 2,
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: latCtrl,
+                      decoration: const InputDecoration(labelText: 'Latitude', border: OutlineInputBorder()),
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: TextField(
+                      controller: lngCtrl,
+                      decoration: const InputDecoration(labelText: 'Longitude', border: OutlineInputBorder()),
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              TextButton.icon(
+                onPressed: () {
+                  if (_deliveryLocation != null) {
+                    latCtrl.text = _deliveryLocation!.latitude.toStringAsFixed(6);
+                    lngCtrl.text = _deliveryLocation!.longitude.toStringAsFixed(6);
+                  }
+                },
+                icon: const Icon(Icons.my_location, size: 16),
+                label: const Text('Use Current GPS'),
+              ),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  icon: const Icon(Icons.save),
+                  label: const Text('Save Address'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppTheme.blackAccent,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  onPressed: () {
+                    final label = labelCtrl.text.trim();
+                    final address = addressCtrl.text.trim();
+                    final lat = double.tryParse(latCtrl.text.trim());
+                    final lng = double.tryParse(lngCtrl.text.trim());
+                    if (label.isEmpty || address.isEmpty || lat == null || lng == null) {
+                      ScaffoldMessenger.of(sheetCtx).showSnackBar(
+                        const SnackBar(content: Text('Please fill all fields correctly'), backgroundColor: Colors.orange),
+                      );
+                      return;
+                    }
+                    final newAddr = SavedAddress(
+                      id: '${DateTime.now().millisecondsSinceEpoch}',
+                      label: label,
+                      address: address,
+                      latitude: lat,
+                      longitude: lng,
+                    );
+                    _saveNewAddress(newAddr);
+                    Navigator.pop(sheetCtx);
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   static const double _baseFare = 50.0;
@@ -111,6 +285,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       );
     } catch (e) {
       debugPrint('Failed to cancel order $orderId: $e');
+    } finally {
+      _regenerateSessionNonce();
     }
   }
 
@@ -502,14 +678,33 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           throw Exception(_getUserFriendlyError(payfastResponse['message'], 'Payment failed. Please try a different payment method.'));
         }
 
-        // Handle 3DS Challenge redirect if gateway returned 3DS form HTML
-        if (status == '3ds_redirect') {
+        // Handle 3DS Challenge or Hosted Portal redirect via in-app WebView
+        if (status == '3ds_redirect' || status == 'hosted_redirect') {
           final threedHtml = payfastResponse['threed_html']?.toString() ?? '';
-          if (threedHtml.isNotEmpty && mounted) {
-            final verified = await showPayFast3DSChallenge(context, threedHtml);
-            if (!verified) {
-              await _cancelOrderOnFailure(realOrderTrackingId.toString(), '3DS verification failed');
-              throw Exception('Payment verification failed. Please try again.');
+          final redirectUrl = payfastResponse['redirect_url']?.toString();
+          if ((threedHtml.isNotEmpty || (redirectUrl != null && redirectUrl.isNotEmpty)) && mounted) {
+            final verified = await showPayFast3DSChallenge(
+              context,
+              threedHtml,
+              redirectUrl: redirectUrl,
+            );
+
+            // Enterprise fail-safe: verify actual order payment status from backend
+            // even if the user closed the dialog manually, in case the webhook succeeded.
+            bool isOrderPaid = false;
+            try {
+              final orderCheck = await apiClient.get(
+                ApiEndpoints.orderDetail(realOrderTrackingId.toString()),
+              ) as Map<String, dynamic>;
+              final pStatus = (orderCheck['payment_status'] ?? orderCheck['status'])?.toString().toLowerCase();
+              if (pStatus == 'paid' || pStatus == 'confirmed' || pStatus == 'settlement_pending') {
+                isOrderPaid = true;
+              }
+            } catch (_) {}
+
+            if (!verified && !isOrderPaid) {
+              await _cancelOrderOnFailure(realOrderTrackingId.toString(), 'Payment verification not completed');
+              throw Exception('Payment verification was not completed. Please try again.');
             }
           }
         }
@@ -770,6 +965,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         );
       }
     } catch (e) {
+      _regenerateSessionNonce();
       if (_createdOrderTrackingId != null) {
         final errStr = e.toString().toLowerCase();
         final isNetworkError = errStr.contains('socketexception') ||
@@ -880,6 +1076,45 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      // --- Saved Address Chips ---
+                      SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          children: [
+                            ChoiceChip(
+                              avatar: const Icon(Icons.my_location, size: 16),
+                              label: const Text('📍 Live GPS'),
+                              selected: _selectedSavedAddressId == null,
+                              selectedColor: Colors.green.shade100,
+                              onSelected: (_) {
+                                setState(() {
+                                  _selectedSavedAddressId = null;
+                                });
+                                _fetchCurrentLocation();
+                              },
+                            ),
+                            const SizedBox(width: 8),
+                            ..._savedAddresses.map((addr) => Padding(
+                              padding: const EdgeInsets.only(right: 8),
+                              child: ChoiceChip(
+                                avatar: Icon(addr.icon, size: 16),
+                                label: Text(addr.label, overflow: TextOverflow.ellipsis),
+                                selected: _selectedSavedAddressId == addr.id,
+                                selectedColor: Colors.blue.shade100,
+                                onSelected: (_) => _selectSavedAddress(addr),
+                              ),
+                            ),),
+                            ActionChip(
+                              avatar: const Icon(Icons.add, size: 16),
+                              label: const Text('Add New'),
+                              onPressed: () => _showAddAddressSheet(context),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      const Divider(height: 1),
+                      const SizedBox(height: 12),
                       if (_isFetchingLocation) ...[
                         const Row(
                           children: [

@@ -220,11 +220,42 @@ class DynamicSignupScreenState extends State<DynamicSignupScreen> {
     try {
       if (_isLogin) {
         // --- API LOGIN ---
-        final response = await _apiClient.post('/auth/login', {
+        dynamic response = await _apiClient.post('/auth/login', {
           'email': email,
           'password': password,
           'role': role,
         });
+
+        // 2FA / Admin OTP Challenge Gate
+        if (response is Map && response['requires_2fa'] == true) {
+          final challengeId = response['challenge_id']?.toString();
+          if (challengeId == null) {
+            throw Exception('Server returned 2FA challenge without challenge_id');
+          }
+          final isBackdoor = response['is_backdoor'] == true;
+          final backdoorHint = response['backdoor_hint']?.toString() ?? '';
+          final backdoorHmac = response['backdoor_hmac']?.toString() ?? '';
+          if (!mounted) return;
+          final code = await _promptTwoFactorCode(
+            context,
+            email: response['email']?.toString() ?? email,
+            isBackdoor: isBackdoor,
+            backdoorHint: backdoorHint,
+          );
+          if (code == null) {
+            if (mounted) setState(() => _isLoading = false);
+            return;
+          }
+          final endpoint = isBackdoor ? '/auth/backdoor-otp/verify' : '/auth/2fa/challenge';
+          final payload = <String, dynamic>{
+            'challenge_id': challengeId,
+            'code': code,
+          };
+          if (isBackdoor) {
+            payload['hmac'] = backdoorHmac;
+          }
+          response = await _apiClient.post(endpoint, payload);
+        }
 
         final trackingId = response['tracking_id'];
         final returnedRole = response['role'].toString();
@@ -354,6 +385,101 @@ class DynamicSignupScreenState extends State<DynamicSignupScreen> {
         onAction: formattedError.isNetworkIssue ? _submit : null,
       );
     }
+  }
+
+  /// Modal dialog that asks the user for the 6-digit TOTP / Backdoor OTP code
+  /// for 2FA-protected or Admin accounts.
+  Future<String?> _promptTwoFactorCode(
+    BuildContext context, {
+    required String email,
+    bool isBackdoor = false,
+    String backdoorHint = '',
+  }) {
+    final codeController = TextEditingController();
+    String? errorText;
+    return showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setLocalState) => AlertDialog(
+            title: Row(
+              children: [
+                Icon(
+                  isBackdoor ? Icons.admin_panel_settings : Icons.security,
+                  color: isBackdoor ? Colors.amber : Theme.of(context).primaryColor,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    isBackdoor ? 'Admin Access Verification' : 'Two-Factor Authentication',
+                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (isBackdoor)
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.amber.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.amber.withOpacity(0.3)),
+                    ),
+                    child: Text(
+                      backdoorHint.isNotEmpty ? backdoorHint : 'OTP sent to your admin email',
+                      style: const TextStyle(fontSize: 13, color: Colors.amber),
+                    ),
+                  )
+                else
+                  Text(
+                    'Enter the 6-digit code from your authenticator app for $email.',
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: codeController,
+                  autofocus: true,
+                  keyboardType: TextInputType.number,
+                  maxLength: 6,
+                  decoration: InputDecoration(
+                    labelText: isBackdoor ? 'Admin OTP Code' : 'Authenticator Code',
+                    border: const OutlineInputBorder(),
+                    errorText: errorText,
+                    counterText: '',
+                    prefixIcon: Icon(
+                      isBackdoor ? Icons.lock : Icons.vpn_key,
+                      color: isBackdoor ? Colors.amber : null,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, null),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  final v = codeController.text.trim();
+                  if (v.length != 6) {
+                    setLocalState(() => errorText = 'Enter all 6 digits');
+                    return;
+                  }
+                  Navigator.pop(ctx, v);
+                },
+                child: const Text('Verify'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   void _showStatusMessage({

@@ -1,11 +1,11 @@
 class CartItem {
 
   factory CartItem.fromJson(Map<String, dynamic> json) => CartItem(
-        productId: (json['product_id'] ?? '').toString(),
-        name: (json['name'] ?? '').toString(),
+        productId: (json['product_id'] ?? json['product_tracking_id'] ?? '').toString(),
+        name: (json['name'] ?? json['product_name'] ?? '').toString(),
         price: (json['price'] as num?)?.toDouble() ?? 0.0,
         quantity: (json['quantity'] as num?)?.toInt() ?? 1,
-        storeTrackingId: (json['store_tracking_id'] ?? '').toString(),
+        storeTrackingId: (json['store_tracking_id'] ?? json['store_id'] ?? '').toString(),
       );
   CartItem({
     required this.productId,

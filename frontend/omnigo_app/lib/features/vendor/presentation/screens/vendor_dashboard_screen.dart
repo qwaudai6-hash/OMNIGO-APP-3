@@ -4,11 +4,13 @@ import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'dart:io';
+import 'package:audioplayers/audioplayers.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/network/api_client.dart';
 import '../../../../core/di/service_locator.dart';
 import '../../../../core/services/session_registry.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../services/thermal_receipt_service.dart';
 import 'vendor_inventory_screen.dart';
 import 'vendor_live_map_screen.dart';
 import 'vendor_analytics_screen.dart';
@@ -28,6 +30,11 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
   int _currentIndex = 0;
   List<dynamic> _orders = [];
   bool _isLoadingOrders = false;
+
+  // Real-time audio alert for incoming pending/paid orders
+  final AudioPlayer _alertPlayer = AudioPlayer();
+  bool _isAlertPlaying = false;
+
 
   // Live metrics pulled from /api/v1/vendor/metrics (Phase 5 fix).
   double _totalRevenue = 0.0;
@@ -66,7 +73,42 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
   @override
   void dispose() {
     _orderPollTimer?.cancel();
+    _alertPlayer.stop();
+    _alertPlayer.dispose();
     super.dispose();
+  }
+
+  void _checkAndTriggerOrderAlert() {
+    final hasPendingOrPaid = _orders.any((o) {
+      final status = (o['status']?.toString() ?? o['order_status']?.toString() ?? '').toLowerCase();
+      return status == 'pending' || status == 'paid';
+    });
+    if (hasPendingOrPaid) {
+      _startOrderAlert();
+    } else {
+      _stopOrderAlert();
+    }
+  }
+
+  Future<void> _startOrderAlert() async {
+    if (_isAlertPlaying) return;
+    try {
+      _isAlertPlaying = true;
+      await _alertPlayer.setReleaseMode(ReleaseMode.loop);
+      await _alertPlayer.play(AssetSource('sounds/ringtone.mp3'));
+    } catch (e) {
+      debugPrint('[VendorAlert] Audio play error: $e');
+    }
+  }
+
+  Future<void> _stopOrderAlert() async {
+    if (!_isAlertPlaying) return;
+    try {
+      _isAlertPlaying = false;
+      await _alertPlayer.stop();
+    } catch (e) {
+      debugPrint('[VendorAlert] Audio stop error: $e');
+    }
   }
 
   Future<void> _fetchVendorRating() async {
@@ -88,15 +130,13 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
     setState(() => _isLoadingMetrics = true);
 
     try {
-      final data = await sl<ApiClient>().get('/vendor/metrics?vendor_id=${widget.trackingId}');
-      // #54: Verify response is Map before casting
-      if (data is Map<String, dynamic>) {
+      final data = await sl<ApiClient>().get('/vendor/metrics');
+      if (data != null && data is Map<String, dynamic>) {
         if (mounted) {
           setState(() {
             _totalRevenue = (data['total_revenue'] as num?)?.toDouble() ?? 0.0;
             _isLoadingMetrics = false;
           });
-          _recalculateActiveGigs();
         }
       } else {
         if (mounted) setState(() => _isLoadingMetrics = false);
@@ -133,6 +173,7 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
           _isLoadingOrders = false;
         });
         _recalculateActiveGigs();
+        _checkAndTriggerOrderAlert();
       }
     } catch (e) {
       if (mounted) {
@@ -145,6 +186,7 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
   }
 
   Future<void> _acceptOrder(String orderTrackingId) async {
+    await _stopOrderAlert();
     try {
       await sl<ApiClient>().patch('/orders/$orderTrackingId/status', {
         'status': 'accepted',
@@ -265,28 +307,19 @@ class VendorDashboardScreenState extends State<VendorDashboardScreen> {
           ],
         ),
         actions: [
-          TextButton(
+          TextButton.icon(
+            icon: const Icon(Icons.print, color: Colors.green),
             onPressed: () {
               Navigator.pop(context);
-              final messenger = ScaffoldMessenger.of(context);
-              messenger.showSnackBar(
-                SnackBar(
-                  content: Text('Generating Invoice PDF for $orderId...'),
-                  backgroundColor: AppTheme.blackAccent,
+              unawaited(
+                ThermalReceiptService.printSlip(
+                  context: context,
+                  order: order,
+                  vendorTrackingId: widget.trackingId,
                 ),
               );
-              unawaited(
-                Future.delayed(const Duration(milliseconds: 1000), () {
-                  messenger.showSnackBar(
-                    const SnackBar(
-                      content: Text('Invoice Slip successfully saved to Documents and sent to wireless thermal printer!'),
-                      backgroundColor: Colors.green,
-                    ),
-                  );
-                }),
-              );
             },
-            child: const Text('Print / Save Invoice', style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold)),
+            label: const Text('Print Thermal Slip', style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold)),
           ),
           TextButton(
             onPressed: () {

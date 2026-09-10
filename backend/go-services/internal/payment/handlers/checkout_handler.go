@@ -104,6 +104,11 @@ func (h *CheckoutHandler) CreateCheckout(c *gin.Context) {
 		return
 	}
 
+	if order.Status == "cancelled" || order.Status == "failed" {
+		c.JSON(http.StatusConflict, gin.H{"error": "order has been cancelled or failed"})
+		return
+	}
+
 	req.Amount = customerTotalRupees
 	amountPaisa := customerTotalPaisa
 

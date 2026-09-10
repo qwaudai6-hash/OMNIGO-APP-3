@@ -114,6 +114,19 @@ async function getOrderTrackingIdForGig(gigTrackingId) {
   return result.rows.length > 0 ? result.rows[0].order_tracking_id : null;
 }
 
+async function getVendorInfoForGig(gigTrackingId) {
+  const result = await pgPool.query(
+    `SELECT COALESCE(s.vendor_tracking_id, d.vendor_store_tracking_id) AS vendor_id, d.order_tracking_id
+     FROM deliveries d
+     LEFT JOIN stores s ON s.store_tracking_id = d.vendor_store_tracking_id
+     WHERE d.tracking_id = $1`,
+    [gigTrackingId]
+  );
+  return result.rows.length > 0
+    ? { vendorId: result.rows[0].vendor_id, orderId: result.rows[0].order_tracking_id }
+    : null;
+}
+
 // ── Notification Router ─────────────────────────────────────────
 // Maps Kafka events to notification recipients + messages.
 function buildNotifications(topic, payload) {
@@ -164,6 +177,15 @@ function buildNotifications(topic, payload) {
           body: 'A rider has accepted your order and is on the way to pick it up.',
           orderTrackingId: null, // resolved via gig → order lookup
           gigTrackingId: payload.tracking_id,
+          targetRole: 'customer',
+        },
+        {
+          recipientId: null, // resolved via deliveries → stores lookup
+          title: 'Rider Arriving for Pickup 🛵',
+          body: 'A rider has accepted the order and is on the way to your store for pickup.',
+          orderTrackingId: null,
+          gigTrackingId: payload.tracking_id,
+          targetRole: 'vendor',
         },
       ];
 
@@ -381,22 +403,34 @@ async function runKafkaConsumer() {
           } else if (notif.gigTrackingId) {
             // deliveries.accepted events don't carry the order tracking id
             // directly — resolve it via the deliveries table.
-            const orderTrackingId = await getOrderTrackingIdForGig(
-              notif.gigTrackingId
-            );
-            if (orderTrackingId) {
-              const customerId = await getCustomerTrackingIdForOrder(
-                orderTrackingId
-              );
-              if (customerId) {
-                tokens = await getDeviceTokens(customerId);
+            if (notif.targetRole === 'vendor') {
+              const vendorInfo = await getVendorInfoForGig(notif.gigTrackingId);
+              if (vendorInfo && vendorInfo.vendorId) {
+                tokens = await getDeviceTokens(vendorInfo.vendorId);
+                const rider = await getRiderInfoForGig(notif.gigTrackingId);
+                if (rider && rider.name) {
+                  const platePart = rider.plate ? ` (Bike: ${rider.plate})` : '';
+                  notif.body = `Rider ${rider.name}${platePart} has accepted order ${vendorInfo.orderId || ''} and is arriving at your store for pickup.`;
+                }
               }
-              // GAP-1: personalize with the rider's actual name + plate.
-              const rider = await getRiderInfoForGig(notif.gigTrackingId);
-              if (rider && rider.name) {
-                const platePart = rider.plate ? ` (Bike: ${rider.plate})` : '';
-                notif.title = 'Rider Assigned 🛵';
-                notif.body = `${rider.name}${platePart} has picked up your order route and is on the way.`;
+            } else {
+              const orderTrackingId = await getOrderTrackingIdForGig(
+                notif.gigTrackingId
+              );
+              if (orderTrackingId) {
+                const customerId = await getCustomerTrackingIdForOrder(
+                  orderTrackingId
+                );
+                if (customerId) {
+                  tokens = await getDeviceTokens(customerId);
+                }
+                // GAP-1: personalize with the rider's actual name + plate.
+                const rider = await getRiderInfoForGig(notif.gigTrackingId);
+                if (rider && rider.name) {
+                  const platePart = rider.plate ? ` (Bike: ${rider.plate})` : '';
+                  notif.title = 'Rider Assigned 🛵';
+                  notif.body = `${rider.name}${platePart} has picked up your order route and is on the way.`;
+                }
               }
             }
           }

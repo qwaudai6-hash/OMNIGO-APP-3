@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -201,12 +202,20 @@ func (s *Service) releaseOneHold(ctx context.Context, holdID uuid.UUID) error {
 
 // processHoldTx handles the common hold processing logic (checks + transfer + commit).
 func (s *Service) processHoldTx(ctx context.Context, tx pgx.Tx, holdID uuid.UUID, orderID, vendorID string, amount int64) error {
-	// Fail-closed check: re-verify escrow_released flag
+	// Fail-closed check: re-verify escrow_released flag and order payment state
+	// FINANCIAL-AUDIT FIX #6: Also read orders.status to guard against releasing
+	// escrow for orders that were never delivered.
 	var alreadyReleased bool
+	var paymentGateway, paymentStatus, disputeStatus, orderStatus string
 	err := tx.QueryRow(ctx,
-		`SELECT COALESCE(escrow_released, FALSE) FROM orders WHERE order_tracking_id = $1`,
+		`SELECT COALESCE(escrow_released, FALSE),
+		        COALESCE(payment_gateway, ''),
+		        COALESCE(payment_status, ''),
+		        COALESCE(dispute_status, 'NONE'),
+		        COALESCE(status, '')
+		 FROM orders WHERE order_tracking_id = $1`,
 		orderID,
-	).Scan(&alreadyReleased)
+	).Scan(&alreadyReleased, &paymentGateway, &paymentStatus, &disputeStatus, &orderStatus)
 	if err != nil {
 		_ = tx.Rollback(ctx)
 		fmt.Printf("[Escrow] Failed to check alreadyReleased for order %s: %v — skipping\n", orderID, err)
@@ -218,10 +227,10 @@ func (s *Service) processHoldTx(ctx context.Context, tx pgx.Tx, holdID uuid.UUID
 		return nil
 	}
 
-	// Check for open disputes
+	// 1. Check for open disputes in disputes table or on order row
 	var hasDispute bool
 	err = tx.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM disputes WHERE order_tracking_id = $1 AND status IN ('open', 'investigating'))`,
+		`SELECT EXISTS(SELECT 1 FROM disputes WHERE order_tracking_id = $1 AND status IN ('open', 'investigating', 'pending', 'under_review'))`,
 		orderID,
 	).Scan(&hasDispute)
 	if err != nil {
@@ -230,7 +239,7 @@ func (s *Service) processHoldTx(ctx context.Context, tx pgx.Tx, holdID uuid.UUID
 		_ = tx.Rollback(ctx)
 		return fmt.Errorf("failed to check disputes for order %s: %w", orderID, err)
 	}
-	if hasDispute {
+	if hasDispute || (disputeStatus != "NONE" && disputeStatus != "" && !strings.EqualFold(disputeStatus, "resolved")) {
 		_, err := tx.Exec(ctx, `UPDATE escrow_holds SET status = 'held', updated_at = NOW() WHERE id = $1`, holdID)
 		if err != nil {
 			_ = tx.Rollback(ctx)
@@ -239,7 +248,53 @@ func (s *Service) processHoldTx(ctx context.Context, tx pgx.Tx, holdID uuid.UUID
 		if err := tx.Commit(ctx); err != nil {
 			return nil
 		}
-		fmt.Printf("[Escrow] Skipping release for order %s — open dispute exists\n", orderID)
+		fmt.Printf("[Escrow] Skipping release for order %s — open dispute exists (dispute_status=%s)\n", orderID, disputeStatus)
+		return nil
+	}
+
+	// FINANCIAL-AUDIT FIX #6: Guard — only release escrow for delivered/completed orders.
+	// Prevents auto-release for cancelled, returned, or stuck-in-paid orders.
+	if !strings.EqualFold(orderStatus, "delivered") && !strings.EqualFold(orderStatus, "completed") {
+		_, err := tx.Exec(ctx, `UPDATE escrow_holds SET status = 'held', updated_at = NOW() WHERE id = $1`, holdID)
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			return nil
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil
+		}
+		fmt.Printf("[Escrow] Skipping release for order %s — order status is '%s' (must be 'delivered' or 'completed')\n", orderID, orderStatus)
+		return nil
+	}
+
+	// 2. SP-GO-14: COD Protection — verify that rider has settled the COD debt
+	if strings.EqualFold(paymentGateway, "cod") {
+		var codDebtStatus string
+		err = tx.QueryRow(ctx,
+			`SELECT COALESCE(status, '') FROM cod_debts WHERE order_tracking_id = $1 ORDER BY created_at DESC LIMIT 1`,
+			orderID,
+		).Scan(&codDebtStatus)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				_, _ = tx.Exec(ctx, `UPDATE escrow_holds SET status = 'held', updated_at = NOW() WHERE id = $1`, holdID)
+				_ = tx.Commit(ctx)
+				fmt.Printf("[Escrow] Skipping release for COD order %s — no cod_debts record found\n", orderID)
+				return nil
+			}
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("failed to check cod_debts for order %s: %w", orderID, err)
+		}
+		if !strings.EqualFold(codDebtStatus, "settled") {
+			_, _ = tx.Exec(ctx, `UPDATE escrow_holds SET status = 'held', updated_at = NOW() WHERE id = $1`, holdID)
+			_ = tx.Commit(ctx)
+			fmt.Printf("[Escrow] Skipping release for COD order %s — COD debt is not settled (status=%s)\n", orderID, codDebtStatus)
+			return nil
+		}
+	} else if paymentStatus != "" && !strings.EqualFold(paymentStatus, "paid") {
+		// Non-COD order: must have payment_status == 'paid'
+		_, _ = tx.Exec(ctx, `UPDATE escrow_holds SET status = 'held', updated_at = NOW() WHERE id = $1`, holdID)
+		_ = tx.Commit(ctx)
+		fmt.Printf("[Escrow] Skipping release for order %s — payment_status is not paid (%s)\n", orderID, paymentStatus)
 		return nil
 	}
 
