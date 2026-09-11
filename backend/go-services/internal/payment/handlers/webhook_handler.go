@@ -118,8 +118,25 @@ func (h *WebhookHandler) settleSuccess(ctx context.Context, gatewayName string, 
 			// Fail-open but log loudly: single-endpoint deployments are still
 			// protected by the payment_transactions idempotency_key.
 			log.Printf("[Webhook] Redis settle-lock unavailable (%v) — proceeding for %s %s", err, gatewayName, event.TransactionID)
+			// Redis down — fallback to DB dedup to prevent double settlement
+			idempotencyKey := fmt.Sprintf("settle:%s:%s", gatewayName, event.TransactionID)
+			var exists bool
+			_ = h.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM payment_transactions WHERE idempotency_key = $1)`, idempotencyKey).Scan(&exists)
+			if exists {
+				log.Printf("[Webhook] DB dedup: settlement already recorded for %s txn %s — suppressing", gatewayName, event.TransactionID)
+				return nil
+			}
 		} else if !acquired {
 			log.Printf("[Webhook] Duplicate settlement suppressed for %s txn %s", gatewayName, event.TransactionID)
+			return nil
+		}
+	} else {
+		// No Redis client configured — fallback to DB dedup
+		idempotencyKey := fmt.Sprintf("settle:%s:%s", gatewayName, event.TransactionID)
+		var exists bool
+		_ = h.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM payment_transactions WHERE idempotency_key = $1)`, idempotencyKey).Scan(&exists)
+		if exists {
+			log.Printf("[Webhook] DB dedup: settlement already recorded for %s txn %s — suppressing", gatewayName, event.TransactionID)
 			return nil
 		}
 	}

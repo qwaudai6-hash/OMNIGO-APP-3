@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/omnigo/backend/internal/ledger"
@@ -59,6 +60,45 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 		}
 		defer w.redis.Del(ctx, lockKey)
 	}
+	// H-4 FIX: Retry any previously failed ledger transfers before processing new payouts.
+	// The ledger call runs AFTER the DB transaction commits. If the ledger fails,
+	// the payout is marked 'ledger_failed'. On the next sweep we retry it here.
+	var failedPayoutRows pgx.Rows
+	failedPayoutRows, err := w.db.Query(ctx,
+		`SELECT id, vendor_tracking_id, amount_paisa FROM vendor_payouts
+		 WHERE status = 'ledger_failed' AND created_at > NOW() - INTERVAL '24 hours'`)
+	if err == nil {
+		defer failedPayoutRows.Close()
+		for failedPayoutRows.Next() {
+			var fpID, fpVendorID string
+			var fpAmount int64
+			if scanErr := failedPayoutRows.Scan(&fpID, &fpVendorID, &fpAmount); scanErr != nil {
+				continue
+			}
+			retryKey := fmt.Sprintf("payout:%s:%s", fpID, fpVendorID)
+			_, retryErr := w.ledger.Transfer(ctx, ledger.TransferRequest{
+				DebitAccount:   ledger.AccountVendorWithdrawable,
+				CreditAccount:  ledger.AccountVendorBankPayout,
+				Amount:         fpAmount,
+				ReferenceType:  "vendor_payout",
+				ReferenceID:    fpVendorID,
+				Description:    fmt.Sprintf("Retry vendor payout %s", fpID),
+				IdempotencyKey: retryKey,
+			})
+			if retryErr != nil {
+				fmt.Printf("[PayoutWorker] Retry ledger failed for payout %s: %v\n", fpID, retryErr)
+				continue
+			}
+			if _, uErr := w.db.Exec(ctx,
+				`UPDATE vendor_payouts SET status = 'paid', updated_at = NOW() WHERE id = $1`, fpID,
+			); uErr != nil {
+				fmt.Printf("[PayoutWorker] CRITICAL: failed to update payout %s to paid after ledger retry: %v\n", fpID, uErr)
+				continue
+			}
+			fmt.Printf("[PayoutWorker] Retry ledger succeeded for payout %s\n", fpID)
+		}
+	}
+
 	// 1. Find all vendors with released escrow holds
 	rows, err := w.db.Query(ctx,
 		`SELECT vendor_tracking_id, COALESCE(SUM(amount_paisa), 0) as total_released

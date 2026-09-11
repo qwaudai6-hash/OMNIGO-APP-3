@@ -24,6 +24,11 @@ func NewReturnRepository(writer, reader *pgxpool.Pool) *ReturnRepository {
 	}
 }
 
+// DB returns the writer connection pool (used by background workers).
+func (r *ReturnRepository) DB() *pgxpool.Pool {
+	return r.writer
+}
+
 // GetOrderOTP returns the OTP code for an order's delivery.
 func (r *ReturnRepository) GetOrderOTP(ctx context.Context, orderTrackingID string) (string, error) {
 	var otp string

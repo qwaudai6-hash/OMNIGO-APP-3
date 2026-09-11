@@ -257,6 +257,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
     _positionStream?.cancel();
     _positionStream = null;
     _heatmapTimer?.cancel();
+    _mapController?.dispose();
     super.dispose();
   }
 
@@ -1248,7 +1249,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
         // surge multiplier. Native fill polygons can be added later by
         // extending MapLibreMapWidget.
         MapLibreMapWidget(
-          initialCenter: _center ?? const LatLng(0, 0),
+          initialCenter: _center ?? const LatLng(30.3753, 69.3451), // default: Pakistan centroid
           initialZoom: 14.0,
           markers: {
             // Surge hex centroids as oversized translucent dots.

@@ -128,6 +128,66 @@ func (w *SettlementWorker) checkDatabaseHealth(ctx context.Context) {
 }
 
 func (w *SettlementWorker) processPendingSettlements(ctx context.Context) {
+	// H-15 FIX: Retry any previously failed ledger transfers before processing new settlements.
+	// The ledger call runs AFTER the DB commit. If the ledger fails, the outbox event
+	// is marked 'ledger_failed'. On the next sweep we retry it here.
+	failedRows, ferr := w.db.Query(ctx,
+		`SELECT id, aggregate_id, payload FROM outbox_events
+		 WHERE topic = 'payment_settlement' AND status = 'ledger_failed'
+		   AND updated_at > NOW() - INTERVAL '24 hours'
+		 ORDER BY id ASC LIMIT 50`)
+	if ferr == nil {
+		defer failedRows.Close()
+		for failedRows.Next() {
+			var fID int64
+			var fAggID string
+			var fPayload []byte
+			if scanErr := failedRows.Scan(&fID, &fAggID, &fPayload); scanErr != nil {
+				continue
+			}
+			var fp SettlementPayload
+			if jsonErr := json.Unmarshal(fPayload, &fp); jsonErr != nil {
+				continue
+			}
+			currency := fp.Currency
+			if currency == "" {
+				currency = "PKR"
+			}
+			var retryReqs []ledger.TransferRequest
+			for _, tr := range fp.Transfers {
+				if tr.AmountPaisa <= 0 {
+					continue
+				}
+				retryReqs = append(retryReqs, ledger.TransferRequest{
+					DebitAccount:   ledger.Account(tr.DebitAccount),
+					CreditAccount:  ledger.Account(tr.CreditAccount),
+					Amount:         tr.AmountPaisa,
+					Currency:       currency,
+					ReferenceType:  "order",
+					ReferenceID:    fp.OrderID,
+					Description:    fmt.Sprintf("Retry payment settlement for order %s", fp.OrderID),
+					IdempotencyKey: tr.Idempotency,
+				})
+			}
+			if len(retryReqs) == 0 {
+				continue
+			}
+			_, retryErr := w.ledger.MultiTransfer(ctx, retryReqs)
+			if retryErr != nil {
+				log.Printf("[SettlementWorker] Retry ledger failed for outbox event %d (order %s): %v", fID, fp.OrderID, retryErr)
+				continue
+			}
+			if _, uErr := w.db.Exec(ctx,
+				`UPDATE outbox_events SET status = 'PROCESSED', processed_at = NOW(), updated_at = NOW() WHERE id = $1`,
+				fID,
+			); uErr != nil {
+				log.Printf("[SettlementWorker] CRITICAL: failed to update outbox event %d to PROCESSED after ledger retry: %v", fID, uErr)
+				continue
+			}
+			log.Printf("[SettlementWorker] Retry ledger succeeded for outbox event %d (order %s)", fID, fp.OrderID)
+		}
+	}
+
 	// Claim outbox events atomically using FOR UPDATE SKIP LOCKED
 	// Includes events stuck in PROCESSING due to worker crashes older than 5 minutes
 	tx, err := w.db.Begin(ctx)
@@ -139,7 +199,7 @@ func (w *SettlementWorker) processPendingSettlements(ctx context.Context) {
 	rows, err := tx.Query(ctx,
 		`SELECT id, aggregate_id, payload FROM outbox_events
 		 WHERE topic = 'payment_settlement' 
-		   AND (status IN ('PENDING', 'pending') OR (status = 'PROCESSING' AND updated_at < NOW() - INTERVAL '5 minutes'))
+		   AND (status IN ('PENDING', 'pending', 'ledger_failed') OR (status = 'PROCESSING' AND updated_at < NOW() - INTERVAL '5 minutes'))
 		 ORDER BY id ASC LIMIT 50 FOR UPDATE SKIP LOCKED`,
 	)
 	if err != nil {
@@ -226,31 +286,9 @@ func (w *SettlementWorker) processSingleSettlement(ctx context.Context, eventID 
 		}
 	}
 
-	// 2. Execute Ledger MultiTransfer (Atomic all-or-nothing double-entry split)
-	var transferReqs []ledger.TransferRequest
-	for _, tr := range payload.Transfers {
-		if tr.AmountPaisa <= 0 {
-			continue
-		}
-		transferReqs = append(transferReqs, ledger.TransferRequest{
-			DebitAccount:   ledger.Account(tr.DebitAccount),
-			CreditAccount:  ledger.Account(tr.CreditAccount),
-			Amount:         tr.AmountPaisa,
-			Currency:       currency,
-			ReferenceType:  "order",
-			ReferenceID:    payload.OrderID,
-			Description:    fmt.Sprintf("Payment settlement for order %s", payload.OrderID),
-			IdempotencyKey: tr.Idempotency,
-		})
-	}
-	if len(transferReqs) > 0 {
-		_, err := w.ledger.MultiTransfer(ctx, transferReqs)
-		if err != nil {
-			return fmt.Errorf("ledger multi-transfer failed for order %s: %w", payload.OrderID, err)
-		}
-	}
-
-	// 3. Update Database State atomically (payment -> captured, order -> paid, outbox -> PROCESSED)
+	// 2. Update Database State atomically (payment -> captured, order -> paid, outbox -> PROCESSED)
+	// H-15 FIX: DB state updates happen FIRST inside a transaction so the
+	// application state is consistent before the ledger is touched.
 	tx, err := w.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin db tx: %w", err)
@@ -280,16 +318,58 @@ func (w *SettlementWorker) processSingleSettlement(ctx context.Context, eventID 
 		return fmt.Errorf("failed to update payment to captured: %w", err)
 	}
 
+	// Mark outbox as PROCESSING (not PROCESSED yet — ledger still to come)
 	_, err = tx.Exec(ctx,
-		`UPDATE outbox_events SET status = 'PROCESSED', processed_at = NOW(), updated_at = NOW() WHERE id = $1`,
+		`UPDATE outbox_events SET status = 'PROCESSING', updated_at = NOW() WHERE id = $1`,
 		eventID,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to mark outbox event processed: %w", err)
+		return fmt.Errorf("failed to mark outbox event processing: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit db settlement: %w", err)
+	}
+
+	// 3. Execute Ledger MultiTransfer AFTER DB commit (H-15 FIX).
+	// If the ledger fails, we mark the outbox event as 'ledger_failed' so
+	// the next sweep retries the ledger transfer (saga compensation).
+	var transferReqs []ledger.TransferRequest
+	for _, tr := range payload.Transfers {
+		if tr.AmountPaisa <= 0 {
+			continue
+		}
+		transferReqs = append(transferReqs, ledger.TransferRequest{
+			DebitAccount:   ledger.Account(tr.DebitAccount),
+			CreditAccount:  ledger.Account(tr.CreditAccount),
+			Amount:         tr.AmountPaisa,
+			Currency:       currency,
+			ReferenceType:  "order",
+			ReferenceID:    payload.OrderID,
+			Description:    fmt.Sprintf("Payment settlement for order %s", payload.OrderID),
+			IdempotencyKey: tr.Idempotency,
+		})
+	}
+	if len(transferReqs) > 0 {
+		_, ledgerErr := w.ledger.MultiTransfer(ctx, transferReqs)
+		if ledgerErr != nil {
+			// Saga compensation: flag the outbox event so the next sweep retries
+			if _, uErr := w.db.Exec(ctx,
+				`UPDATE outbox_events SET status = 'ledger_failed', error_message = $1, updated_at = NOW() WHERE id = $2`,
+				ledgerErr.Error(), eventID,
+			); uErr != nil {
+				log.Printf("[SettlementWorker] CRITICAL: failed to flag outbox event %d as ledger_failed: %v", eventID, uErr)
+			}
+			return fmt.Errorf("ledger multi-transfer failed for order %s (outbox flagged for retry): %w", payload.OrderID, ledgerErr)
+		}
+	}
+
+	// Ledger succeeded — mark outbox as PROCESSED
+	if _, err := w.db.Exec(ctx,
+		`UPDATE outbox_events SET status = 'PROCESSED', processed_at = NOW(), updated_at = NOW() WHERE id = $1`,
+		eventID,
+	); err != nil {
+		log.Printf("[SettlementWorker] CRITICAL: failed to mark outbox event %d as PROCESSED after ledger success: %v", eventID, err)
 	}
 
 	log.Printf("[SettlementWorker] Successfully completed settlement for Order %s (Txn %s, Amount: %d paisa %s)",

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"time"
 
@@ -82,7 +83,7 @@ func (h *RefundHandler) executeRefund(ctx context.Context, req RefundRequest) (g
 	if refundAmountRupees <= 0 || refundAmountRupees > order.TotalAmount {
 		refundAmountRupees = order.TotalAmount
 	}
-	refundAmountPaisa := int64(refundAmountRupees * 100)
+	refundAmountPaisa := int64(math.Round(refundAmountRupees * 100))
 	isPartialRefund := req.Amount > 0 && req.Amount < order.TotalAmount
 
 	// Idempotency: full refund uses order-level key, partial refunds use amount-specific key
@@ -110,7 +111,7 @@ func (h *RefundHandler) executeRefund(ctx context.Context, req RefundRequest) (g
 		gatewayTxnID = paymentTxn.GatewayTxnID
 		
 		if paymentTxn.Amount > 0 {
-			paymentPaisa := int64(paymentTxn.Amount * 100)
+			paymentPaisa := int64(math.Round(paymentTxn.Amount * 100))
 			if refundAmountPaisa > paymentPaisa {
 				refundAmountPaisa = paymentPaisa
 			}

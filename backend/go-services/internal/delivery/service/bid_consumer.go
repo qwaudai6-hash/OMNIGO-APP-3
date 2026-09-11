@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -14,6 +15,7 @@ import (
 type BidEventConsumer struct {
 	rdb         redis.UniversalClient
 	subscribers map[string]chan map[string]interface{} // bidID → channel
+	mu          sync.RWMutex
 }
 
 func NewBidEventConsumer(rdb redis.UniversalClient) *BidEventConsumer {
@@ -26,16 +28,20 @@ func NewBidEventConsumer(rdb redis.UniversalClient) *BidEventConsumer {
 // Subscribe registers a channel to receive events for a specific bid.
 func (c *BidEventConsumer) Subscribe(bidID string) chan map[string]interface{} {
 	ch := make(chan map[string]interface{}, 10)
+	c.mu.Lock()
 	c.subscribers[bidID] = ch
+	c.mu.Unlock()
 	return ch
 }
 
 // Unsubscribe removes a bid subscription.
 func (c *BidEventConsumer) Unsubscribe(bidID string) {
+	c.mu.Lock()
 	if ch, ok := c.subscribers[bidID]; ok {
 		close(ch)
 		delete(c.subscribers, bidID)
 	}
+	c.mu.Unlock()
 }
 
 // StartRiderConsumer begins consuming from the rider events stream.
@@ -188,7 +194,10 @@ func (c *BidEventConsumer) processCustomerMessage(ctx context.Context, msg redis
 }
 
 func (c *BidEventConsumer) dispatchToSubscribers(bidID string, event map[string]interface{}) {
-	if ch, ok := c.subscribers[bidID]; ok {
+	c.mu.RLock()
+	ch, ok := c.subscribers[bidID]
+	c.mu.RUnlock()
+	if ok {
 		select {
 		case ch <- event:
 		default:

@@ -280,6 +280,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     _scrollController.dispose();
     _mapSearchController.dispose();
     _searchController.dispose();
+    _mapController?.dispose();
     super.dispose();
   }
 

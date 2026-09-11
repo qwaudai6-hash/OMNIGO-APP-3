@@ -276,13 +276,21 @@ func (s *Service) processHoldTx(ctx context.Context, tx pgx.Tx, holdID uuid.UUID
 		).Scan(&codDebtStatus)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				if _, revertErr := tx.Exec(ctx, `UPDATE escrow_holds SET status = 'held', updated_at = NOW() WHERE id = $1`, holdID); revertErr != nil {
-					_ = tx.Rollback(ctx)
-					return fmt.Errorf("failed to revert hold for COD order %s: %w", orderID, revertErr)
+				// Check if hold is stale (> 72h) — force release
+				var holdCreatedAt time.Time
+				holdErr := tx.QueryRow(ctx, `SELECT created_at FROM escrow_holds WHERE id = $1`, holdID).Scan(&holdCreatedAt)
+				if holdErr == nil && time.Since(holdCreatedAt) > 72*time.Hour {
+					fmt.Printf("[Escrow] WARNING: COD hold %s for order %s is stale (%.0fh) — force releasing\n", holdID, orderID, time.Since(holdCreatedAt).Hours())
+					// Fall through to release logic below
+				} else {
+					if _, revertErr := tx.Exec(ctx, `UPDATE escrow_holds SET status = 'held', updated_at = NOW() WHERE id = $1`, holdID); revertErr != nil {
+						_ = tx.Rollback(ctx)
+						return fmt.Errorf("failed to revert hold for COD order %s: %w", orderID, revertErr)
+					}
+					_ = tx.Commit(ctx)
+					fmt.Printf("[Escrow] Skipping release for COD order %s — no cod_debts record found\n", orderID)
+					return nil
 				}
-				_ = tx.Commit(ctx)
-				fmt.Printf("[Escrow] Skipping release for COD order %s — no cod_debts record found\n", orderID)
-				return nil
 			}
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("failed to check cod_debts for order %s: %w", orderID, err)

@@ -5,6 +5,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../../../core/network/api_client.dart';
 import '../../../../core/network/api_endpoints.dart';
+import '../../../../core/di/service_locator.dart';
 
 /// CustomerWalletScreen is the customer-side mobile wallet. It lets
 /// the customer load funds via PayFast (bank card / JazzCash /
@@ -40,7 +41,7 @@ class _CustomerWalletScreenState extends State<CustomerWalletScreen> {
       _error = null;
     });
     try {
-      final api = ApiClient();
+      final api = sl<ApiClient>();
       final data = await api.get(ApiEndpoints.customerWallet(widget.trackingId));
       if (!mounted) return;
       setState(() => _wallet = data as Map<String, dynamic>);
@@ -57,7 +58,7 @@ class _CustomerWalletScreenState extends State<CustomerWalletScreen> {
     if (amount == null) return;
     setState(() => _topUpInFlight = true);
     try {
-      final api = ApiClient();
+      final api = sl<ApiClient>();
       final nonce = '${gateway}_${DateTime.now().millisecondsSinceEpoch}';
       final resp = await api.post(
         ApiEndpoints.customerWalletLoad(),

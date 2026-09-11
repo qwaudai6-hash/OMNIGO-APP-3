@@ -331,6 +331,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     try {
       final bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) {
+        if (!mounted) return;
         setState(() {
           _locationError = 'Location services are disabled. Please enable GPS.';
           _isFetchingLocation = false;
@@ -342,6 +343,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
         if (permission == LocationPermission.denied) {
+          if (!mounted) return;
           setState(() {
             _locationError = 'Location permission denied. Please enable in Settings.';
             _isFetchingLocation = false;
@@ -351,6 +353,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       }
 
       if (permission == LocationPermission.deniedForever) {
+        if (!mounted) return;
         setState(() {
           _locationError = 'Location permission permanently denied. Enable in Settings.';
           _isFetchingLocation = false;
@@ -1234,17 +1237,19 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                                 child: ClipRRect(
                                   borderRadius: BorderRadius.circular(8),
                                   child: MapLibreMapWidget(
-                                    initialCenter: _deliveryLocation != null
-                                        ? _deliveryLocation!
-                                        : LatLng(_storeLat!, _storeLng!),
+                                    initialCenter: _deliveryLocation ??
+                                        ((_storeLat != null && _storeLng != null)
+                                            ? LatLng(_storeLat!, _storeLng!)
+                                            : const LatLng(0, 0)),
                                     initialZoom: 14,
                                     myLocationEnabled: false,
                                     myLocationTrackingMode: MyLocationTrackingMode.none,
                                     markers: {
-                                      'store': MarkerData(
-                                        position: LatLng(_storeLat!, _storeLng!),
-                                        iconImage: 'location_dot',
-                                      ),
+                                      if (_storeLat != null && _storeLng != null)
+                                        'store': MarkerData(
+                                          position: LatLng(_storeLat!, _storeLng!),
+                                          iconImage: 'location_dot',
+                                        ),
                                       if (_deliveryLocation != null)
                                         'delivery': MarkerData(
                                           position: _deliveryLocation!,
@@ -1253,7 +1258,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                                     },
                                     polylines: _deliveryLocation != null
                                         ? [
-                                            [LatLng(_storeLat!, _storeLng!), _deliveryLocation!]
+                                            if (_storeLat != null && _storeLng != null)
+                                              [LatLng(_storeLat!, _storeLng!), _deliveryLocation!]
                                           ]
                                         : [],
                                   ),

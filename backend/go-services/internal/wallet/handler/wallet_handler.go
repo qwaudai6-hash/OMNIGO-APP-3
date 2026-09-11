@@ -556,6 +556,12 @@ func (h *WalletHandler) RegisterRoutes(router *gin.Engine) {
 			auth.GET("/customer/:tracking_id", h.GetCustomerWallet)
 			auth.POST("/customer/load", h.LoadCustomerWallet)
 		}
+
+		// Admin-only wallet operations
+		adminWallet := wallet.Group("", middleware.JWTAuth(), middleware.RoleRequired("admin"))
+		{
+			adminWallet.POST("/rider/:tracking_id/deposit", h.DepositCOD)
+		}
 	}
 }
 

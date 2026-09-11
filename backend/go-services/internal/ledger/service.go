@@ -105,18 +105,32 @@ func (s *Service) Transfer(ctx context.Context, req TransferRequest) (uuid.UUID,
 	}
 	defer tx.Rollback(ctx)
 
-	// Check idempotency — if this key already exists, return the existing transaction
+	// H-5 FIX: Atomic idempotency check using INSERT ON CONFLICT.
+	// The previous SELECT-then-INSERT had a TOCTOU race window where two
+	// concurrent requests with the same key could both pass the check.
+	// INSERT ON CONFLICT DO NOTHING is atomic — exactly one wins.
 	if req.IdempotencyKey != "" {
-		var existingTxID uuid.UUID
-		err := tx.QueryRow(ctx,
-			`SELECT transaction_id FROM ledger_entries WHERE idempotency_key = $1 OR idempotency_key = $2 LIMIT 1`,
-			req.IdempotencyKey, req.IdempotencyKey+":debit",
-		).Scan(&existingTxID)
-		if err == nil {
-			// Idempotent hit — already processed
+		tag, idemErr := tx.Exec(ctx,
+			`INSERT INTO ledger_idempotency (idempotency_key, created_at)
+			 VALUES ($1, NOW()) ON CONFLICT (idempotency_key) DO NOTHING`,
+			req.IdempotencyKey,
+		)
+		if idemErr != nil {
+			return uuid.Nil, fmt.Errorf("idempotency insert failed: %w", idemErr)
+		}
+		if tag.RowsAffected() == 0 {
+			// Conflict — this key was already reserved. Look up the existing tx.
+			var existingTxID uuid.UUID
+			selErr := tx.QueryRow(ctx,
+				`SELECT transaction_id FROM ledger_entries WHERE idempotency_key = $1 OR idempotency_key = $2 LIMIT 1`,
+				req.IdempotencyKey, req.IdempotencyKey+":debit",
+			).Scan(&existingTxID)
+			if selErr != nil {
+				return uuid.Nil, fmt.Errorf("idempotency key %s conflicts but no ledger entry found: %w", req.IdempotencyKey, selErr)
+			}
 			return existingTxID, nil
 		}
-		// Not found — proceed with new transfer
+		// INSERT succeeded (first attempt) — proceed with transfer
 	}
 
 	debitEntry := LedgerEntry{
@@ -199,19 +213,32 @@ func (s *Service) MultiTransfer(ctx context.Context, reqs []TransferRequest) (uu
 	}
 	defer tx.Rollback(ctx)
 
-	// IDEMPOTENCY CHECK: If any idempotency key already exists, return the
-	// existing transaction. This prevents duplicate entries on webhook retries.
+	// IDEMPOTENCY CHECK: Use atomic INSERT ON CONFLICT to prevent TOCTOU race.
+	// Reserve all keys first; if any conflict, return the existing transaction.
 	for _, req := range reqs {
 		if req.IdempotencyKey != "" {
-			var existingTxID uuid.UUID
-			err := tx.QueryRow(ctx,
-				`SELECT transaction_id FROM ledger_entries WHERE idempotency_key = $1 LIMIT 1`,
-				req.IdempotencyKey+":debit",
-			).Scan(&existingTxID)
-			if err == nil {
-				// Already processed — return existing transaction
+			tag, idemErr := tx.Exec(ctx,
+				`INSERT INTO ledger_idempotency (idempotency_key, created_at)
+				 VALUES ($1, NOW()) ON CONFLICT (idempotency_key) DO NOTHING`,
+				req.IdempotencyKey,
+			)
+			if idemErr != nil {
 				tx.Rollback(ctx)
-				return existingTxID, nil
+				return uuid.Nil, fmt.Errorf("idempotency insert failed for key %s: %w", req.IdempotencyKey, idemErr)
+			}
+			if tag.RowsAffected() == 0 {
+				// Conflict — already processed. Look up existing transaction.
+				var existingTxID uuid.UUID
+				selErr := tx.QueryRow(ctx,
+					`SELECT transaction_id FROM ledger_entries WHERE idempotency_key = $1 LIMIT 1`,
+					req.IdempotencyKey+":debit",
+				).Scan(&existingTxID)
+				if selErr == nil {
+					tx.Rollback(ctx)
+					return existingTxID, nil
+				}
+				tx.Rollback(ctx)
+				return uuid.Nil, fmt.Errorf("idempotency key %s conflicts but no ledger entry found: %w", req.IdempotencyKey, selErr)
 			}
 		}
 	}

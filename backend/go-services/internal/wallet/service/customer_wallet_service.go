@@ -437,7 +437,7 @@ func (s *CustomerWalletService) RefundForFailedPayment(ctx context.Context, cust
 
 	// Record refund transaction
 	if s.ledger != nil {
-		_, _ = s.ledger.Transfer(ctx, ledger.TransferRequest{
+		_, ledgerErr := s.ledger.Transfer(ctx, ledger.TransferRequest{
 			DebitAccount:   ledger.AccountGatewayClearing,
 			CreditAccount:  ledger.AccountCustomerWallet,
 			Amount:         amountPaisa,
@@ -447,6 +447,9 @@ func (s *CustomerWalletService) RefundForFailedPayment(ctx context.Context, cust
 			Description:    fmt.Sprintf("Refund for failed payment on order %s", orderTrackingID),
 			IdempotencyKey: idempotencyKey,
 		})
+		if ledgerErr != nil {
+			log.Printf("[Wallet] CRITICAL: Ledger transfer failed for refund on order %s: %v — wallet credited but ledger desynced", orderTrackingID, ledgerErr)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {

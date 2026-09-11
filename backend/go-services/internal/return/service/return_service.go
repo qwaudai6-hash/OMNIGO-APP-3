@@ -564,3 +564,52 @@ func (s *ReturnService) SetReturnDeadline(ctx context.Context, orderTrackingID s
 	deadline := deliveredAt.Add(time.Duration(returnWindowHours) * time.Hour)
 	return s.repo.SetReturnDeadline(ctx, orderTrackingID, deadline)
 }
+
+// AutoResolveStaleDisputes resolves disputes older than 48 hours.
+// Called by a background worker or cron job.
+func (s *ReturnService) AutoResolveStaleDisputes(ctx context.Context) (int, error) {
+	db := s.repo.DB()
+	rows, err := db.Query(ctx,
+		`SELECT id, order_tracking_id, reason FROM returns 
+		 WHERE status = 'disputed' AND updated_at < NOW() - INTERVAL '48 hours'`)
+	if err != nil {
+		return 0, fmt.Errorf("failed to query stale disputes: %w", err)
+	}
+	defer rows.Close()
+
+	resolved := 0
+	for rows.Next() {
+		var id int
+		var orderID, reason string
+		if err := rows.Scan(&id, &orderID, &reason); err != nil {
+			continue
+		}
+
+		// Auto-approve if "not received" or "damaged" (customer benefit of doubt)
+		newStatus := "rejected"
+		if strings.Contains(strings.ToLower(reason), "not received") ||
+			strings.Contains(strings.ToLower(reason), "damaged") ||
+			strings.Contains(strings.ToLower(reason), "wrong item") {
+			newStatus = "approved"
+		}
+
+		_, err = db.Exec(ctx,
+			`UPDATE returns SET status = $1, updated_at = NOW(), admin_notes = admin_notes || E'\nAuto-resolved after 48h dispute timeout'
+			 WHERE id = $2`, newStatus, id)
+		if err != nil {
+			fmt.Printf("[Return] Failed to auto-resolve dispute %d: %v\n", id, err)
+			continue
+		}
+
+		// Update order status
+		orderStatus := "return_rejected"
+		if newStatus == "approved" {
+			orderStatus = "returned"
+		}
+		_, _ = db.Exec(ctx, `UPDATE orders SET status = $1, updated_at = NOW() WHERE order_tracking_id = $2`, orderStatus, orderID)
+
+		fmt.Printf("[Return] Auto-resolved dispute %d for order %s: %s\n", id, orderID, newStatus)
+		resolved++
+	}
+	return resolved, nil
+}

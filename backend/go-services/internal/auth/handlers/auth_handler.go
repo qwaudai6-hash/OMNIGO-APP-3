@@ -394,7 +394,7 @@ func (h *AuthHandler) RegisterRoutes(router *gin.Engine, rdb redis.UniversalClie
 		limited := auth.Group("", middleware.RateLimit(rdb, 10, 5*time.Minute))
 		limited.POST("/register", h.Register)
 		limited.POST("/login", h.Login)
-		auth.POST("/refresh", h.Refresh)
+		limited.POST("/refresh", h.Refresh)
 
 		// Protected — any authenticated user
 		protected := auth.Group("", middleware.JWTAuth())

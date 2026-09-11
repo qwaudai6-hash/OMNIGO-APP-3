@@ -946,3 +946,19 @@ func (r *OrderRepository) GetUserInfo(ctx context.Context, userTrackingID string
 	}
 	return fullName, address, nil
 }
+
+// IsStoreActive returns true if the store is active (or if no record exists).
+func (r *OrderRepository) IsStoreActive(ctx context.Context, storeTrackingID string) (bool, error) {
+	var active bool
+	err := r.reader.QueryRow(ctx,
+		`SELECT COALESCE(is_active, TRUE) FROM stores WHERE tracking_id = $1`,
+		storeTrackingID,
+	).Scan(&active)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return true, nil // no store record — allow order
+		}
+		return false, err
+	}
+	return active, nil
+}

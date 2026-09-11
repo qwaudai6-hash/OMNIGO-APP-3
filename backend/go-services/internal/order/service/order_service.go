@@ -171,6 +171,14 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *models.CreateOrderR
 	// H4: Fetch customer name and address for rider delivery verification
 	customerName, customerAddress, _ := s.repo.GetUserInfo(ctx, order.UserTrackID)
 
+	// Check if store is active
+	storeActive, err := s.repo.IsStoreActive(ctx, req.VendorStoreTrackID)
+	if err != nil {
+		log.Printf("[OrderService] Warning: failed to check store active status: %v", err)
+	} else if !storeActive {
+		return nil, fmt.Errorf("STORE_INACTIVE: Store %s is currently not accepting orders", req.VendorStoreTrackID)
+	}
+
 	isCOD := order.PaymentGateway == "" || strings.EqualFold(order.PaymentGateway, "cod")
 	event := models.OrderEvent{
 		OrderID:               order.TrackingID,
