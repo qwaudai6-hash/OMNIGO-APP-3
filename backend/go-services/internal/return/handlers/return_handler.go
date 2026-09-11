@@ -244,6 +244,7 @@ func (h *ReturnHandler) VerifyReturn(c *gin.Context) {
 
 // DisputeReturn handles POST /returns/:id/vendor-dispute
 // Vendor disputes the returned product (alternative to verify).
+// Photo evidence is REQUIRED for disputes.
 func (h *ReturnHandler) DisputeReturn(c *gin.Context) {
 	id := c.Param("id")
 	if id == "" {
@@ -269,12 +270,21 @@ func (h *ReturnHandler) DisputeReturn(c *gin.Context) {
 		return
 	}
 
+	// Photo evidence is REQUIRED for disputes
+	if req.PhotoURL == "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "Photo proof is required for disputes. Please upload evidence of the product condition."})
+		return
+	}
+
 	if err := h.svc.VerifyByVendor(c.Request.Context(), id, false, req.PhotoURL, req.Reason); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"status": "return_disputed"})
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "return_disputed",
+		"message": "Dispute submitted. Escrow has been frozen. Admin will review within 48 hours.",
+	})
 }
 
 // CancelReturn handles POST /returns/:id/cancel

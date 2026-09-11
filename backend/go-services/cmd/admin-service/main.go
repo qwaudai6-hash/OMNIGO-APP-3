@@ -1553,6 +1553,234 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"message": "return rejected", "return_id": returnID})
 	})
 
+	// ── Admin Return Dispute Resolution ────────────────────────
+	adminRoutes.POST("/returns/:id/resolve-dispute", func(c *gin.Context) {
+		returnID := c.Param("id")
+		var req struct {
+			Decision string `json:"decision" binding:"required"` // "customer_wins" or "vendor_wins"
+			Notes    string `json:"notes"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		if req.Decision != "customer_wins" && req.Decision != "vendor_wins" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "decision must be 'customer_wins' or 'vendor_wins'"})
+			return
+		}
+
+		// Get return request details
+		var orderID, vendorID, customerID string
+		var amount int64
+		err := dbPool.QueryRow(ctx,
+			`SELECT r.order_tracking_id, r.vendor_tracking_id, r.customer_tracking_id, e.amount
+			 FROM return_requests r
+			 JOIN escrow_holds e ON e.order_tracking_id = r.order_tracking_id
+			 WHERE r.id = $1`, returnID).Scan(&orderID, &vendorID, &customerID, &amount)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "return not found or escrow not frozen"})
+			return
+		}
+
+		// Get dispute ID
+		var disputeID string
+		err = dbPool.QueryRow(ctx,
+			`SELECT id FROM disputes WHERE order_tracking_id = $1 AND status = 'open'`,
+			orderID).Scan(&disputeID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "no open dispute found for this order"})
+			return
+		}
+
+		adminID := c.GetString("tracking_id")
+
+		if req.Decision == "customer_wins" {
+			// Refund to customer via escrow
+			// Note: In production, this would call escrowSvc.RefundForReturn()
+			// For now, we do it directly in the transaction
+			tx, txErr := dbPool.Begin(ctx)
+			if txErr != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to begin transaction"})
+				return
+			}
+			defer tx.Rollback(ctx)
+
+			// Update customer wallet
+			_, err = tx.Exec(ctx,
+				`INSERT INTO customer_wallet (customer_tracking_id, balance_paisa, lifetime_spent_paisa, updated_at)
+				 VALUES ($1, $2, 0, NOW())
+				 ON CONFLICT (customer_tracking_id)
+				 DO UPDATE SET balance_paisa = customer_wallet.balance_paisa + $2, updated_at = NOW()`,
+				customerID, amount)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to credit customer wallet"})
+				return
+			}
+
+			// Mark escrow as refunded
+			_, err = tx.Exec(ctx,
+				`UPDATE escrow_holds SET status = 'refunded', released_at = NOW() 
+				 WHERE order_tracking_id = $1 AND status = 'disputed'`,
+				orderID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update escrow"})
+				return
+			}
+
+			// Update order payment status
+			_, err = tx.Exec(ctx,
+				`UPDATE orders SET payment_status = 'refunded', dispute_status = 'resolved', updated_at = NOW() 
+				 WHERE order_tracking_id = $1`,
+				orderID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update order"})
+				return
+			}
+
+			// Update dispute resolution
+			_, err = tx.Exec(ctx,
+				`UPDATE disputes SET status = 'resolved', resolution = 'admin_customer_wins',
+				 resolved_at = NOW(), resolved_by = $1, updated_at = NOW() WHERE id = $2`,
+				adminID, disputeID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update dispute"})
+				return
+			}
+
+			// Update return status
+			_, err = tx.Exec(ctx,
+				`UPDATE return_requests SET status = 'return_completed', dispute_resolved_at = NOW(), updated_at = NOW() 
+				 WHERE id = $1`,
+				returnID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update return"})
+				return
+			}
+
+			if err := tx.Commit(ctx); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit transaction"})
+				return
+			}
+
+			// Audit log
+			_, _ = dbPool.Exec(ctx,
+				`INSERT INTO admin_audit_log (admin_tracking_id, action, target_id, target_type, reason, created_at)
+				 VALUES ($1, 'resolve_return_dispute', $2, 'return', $3, NOW()) ON CONFLICT DO NOTHING`,
+				adminID, returnID, "Customer wins: "+req.Notes)
+
+			c.JSON(http.StatusOK, gin.H{
+				"message":  "Dispute resolved: customer wins. Refund processed.",
+				"decision": req.Decision,
+				"refund":   amount,
+			})
+		} else {
+			// Vendor wins - unfreeze escrow
+			tx, txErr := dbPool.Begin(ctx)
+			if txErr != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to begin transaction"})
+				return
+			}
+			defer tx.Rollback(ctx)
+
+			// Unfreeze escrow (set back to held)
+			_, err = tx.Exec(ctx,
+				`UPDATE escrow_holds SET status = 'held', dispute_id = NULL 
+				 WHERE order_tracking_id = $1 AND status = 'disputed'`,
+				orderID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to unfreeze escrow"})
+				return
+			}
+
+			// Update dispute resolution
+			_, err = tx.Exec(ctx,
+				`UPDATE disputes SET status = 'resolved', resolution = 'admin_vendor_wins',
+				 resolved_at = NOW(), resolved_by = $1, updated_at = NOW() WHERE id = $2`,
+				adminID, disputeID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update dispute"})
+				return
+			}
+
+			// Update return status
+			_, err = tx.Exec(ctx,
+				`UPDATE return_requests SET status = 'return_completed', dispute_resolved_at = NOW(), updated_at = NOW() 
+				 WHERE id = $1`,
+				returnID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update return"})
+				return
+			}
+
+			// Update order dispute status
+			_, err = tx.Exec(ctx,
+				`UPDATE orders SET dispute_status = 'resolved', updated_at = NOW() 
+				 WHERE order_tracking_id = $1`,
+				orderID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update order"})
+				return
+			}
+
+			if err := tx.Commit(ctx); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit transaction"})
+				return
+			}
+
+			// Audit log
+			_, _ = dbPool.Exec(ctx,
+				`INSERT INTO admin_audit_log (admin_tracking_id, action, target_id, target_type, reason, created_at)
+				 VALUES ($1, 'resolve_return_dispute', $2, 'return', $3, NOW()) ON CONFLICT DO NOTHING`,
+				adminID, returnID, "Vendor wins: "+req.Notes)
+
+			c.JSON(http.StatusOK, gin.H{
+				"message":  "Dispute resolved: vendor wins. Escrow released to vendor.",
+				"decision": req.Decision,
+			})
+		}
+	})
+
+	// ── Admin Vendor Store Restore ─────────────────────────────
+	adminRoutes.POST("/vendors/:vendor_id/restore-store", func(c *gin.Context) {
+		vendorID := c.Param("vendor_id")
+		adminID := c.GetString("tracking_id")
+
+		// Reactivate store
+		_, err := dbPool.Exec(ctx,
+			`UPDATE stores SET is_active = true WHERE vendor_tracking_id = $1`,
+			vendorID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to restore store"})
+			return
+		}
+
+		// Reactivate products
+		_, err = dbPool.Exec(ctx,
+			`UPDATE products SET is_active = true WHERE vendor_tracking_id = $1`,
+			vendorID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to restore products"})
+			return
+		}
+
+		// Clear Redis suspension key (if rdb available)
+		if rdb != nil {
+			rdb.Del(ctx, fmt.Sprintf("vendor:suspended:%s", vendorID))
+		}
+
+		// Audit log
+		_, _ = dbPool.Exec(ctx,
+			`INSERT INTO admin_audit_log (admin_tracking_id, action, target_id, target_type, reason, created_at)
+			 VALUES ($1, 'restore_vendor_store', $2, 'vendor', 'Admin restored vendor store', NOW()) ON CONFLICT DO NOTHING`,
+			adminID, vendorID)
+
+		c.JSON(http.StatusOK, gin.H{
+			"message":   "Vendor store restored successfully",
+			"vendor_id": vendorID,
+		})
+	})
+
 	// ── Health check (public) ────────────────────────────────────
 	// Public geocode proxy (Nominatim): frontend reverse-geocodes
 	// through this so User-Agent / rate limits stay server-side.

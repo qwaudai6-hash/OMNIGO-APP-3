@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/omnigo/backend/internal/return/models"
 	"github.com/omnigo/backend/internal/shared/tracking"
@@ -536,4 +537,78 @@ func (r *ReturnRepository) GetReturnStats(ctx context.Context) (map[string]inter
 	}
 
 	return stats, nil
+}
+
+// CreateReturnDispute creates a dispute record in the disputes table for a return.
+func (r *ReturnRepository) CreateReturnDispute(ctx context.Context, disputeID uuid.UUID, orderTrackingID, vendorTrackingID, reason string) error {
+	_, err := r.writer.Exec(ctx,
+		`INSERT INTO disputes (id, order_tracking_id, filed_by, reason, status, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, 'open', NOW(), NOW())
+		 ON CONFLICT (id) DO NOTHING`,
+		disputeID, orderTrackingID, vendorTrackingID, reason,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create dispute: %w", err)
+	}
+	return nil
+}
+
+// UpdateReturnDisputeDetails updates the return request with dispute information.
+func (r *ReturnRepository) UpdateReturnDisputeDetails(ctx context.Context, returnID, disputeReason, disputeID string) error {
+	_, err := r.writer.Exec(ctx,
+		`UPDATE return_requests 
+		 SET dispute_reason = $1, escrow_hold_id = $2, updated_at = NOW()
+		 WHERE id = $3`,
+		disputeReason, disputeID, returnID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update return dispute details: %w", err)
+	}
+	return nil
+}
+
+// DeactivateStore temporarily deactivates a vendor's store and products.
+func (r *ReturnRepository) DeactivateStore(ctx context.Context, vendorTrackingID string, duration time.Duration) error {
+	// Deactivate store
+	_, err := r.writer.Exec(ctx,
+		`UPDATE stores SET is_active = false WHERE vendor_tracking_id = $1`,
+		vendorTrackingID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to deactivate store: %w", err)
+	}
+
+	// Deactivate all products
+	_, err = r.writer.Exec(ctx,
+		`UPDATE products SET is_active = false WHERE vendor_tracking_id = $1`,
+		vendorTrackingID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to deactivate products: %w", err)
+	}
+
+	return nil
+}
+
+// ReactivateStore reactivates a vendor's store and products.
+func (r *ReturnRepository) ReactivateStore(ctx context.Context, vendorTrackingID string) error {
+	// Reactivate store
+	_, err := r.writer.Exec(ctx,
+		`UPDATE stores SET is_active = true WHERE vendor_tracking_id = $1`,
+		vendorTrackingID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to reactivate store: %w", err)
+	}
+
+	// Reactivate all products
+	_, err = r.writer.Exec(ctx,
+		`UPDATE products SET is_active = true WHERE vendor_tracking_id = $1`,
+		vendorTrackingID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to reactivate products: %w", err)
+	}
+
+	return nil
 }

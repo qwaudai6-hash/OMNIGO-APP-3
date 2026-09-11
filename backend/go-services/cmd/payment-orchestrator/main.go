@@ -125,7 +125,7 @@ func main() {
 	if rdb != nil {
 		returnFraudDetector = returnFraud.NewReturnFraudDetector(rdb)
 	}
-	returnService := returnSvc.NewReturnService(returnRepository, escrowSvc, kafkaClient, returnFraudDetector)
+	returnService := returnSvc.NewReturnService(returnRepository, escrowSvc, kafkaClient, returnFraudDetector, rdb)
 	returnHandler := returnHandlers.NewReturnHandler(returnService)
 
 	// Stripe split handler — full lifecycle (checkout + webhook + refund + ledger split).

@@ -7,10 +7,12 @@ import (
 	"log"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/omnigo/backend/internal/return/fraud"
 	"github.com/omnigo/backend/internal/return/models"
 	"github.com/omnigo/backend/internal/return/repository"
 	"github.com/omnigo/backend/internal/shared/messaging"
+	"github.com/redis/go-redis/v9"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -19,6 +21,7 @@ const (
 	pickupDeadlineHours       = 12
 	vendorVerifyDeadlineHours = 24
 	returnHoldHours           = 72
+	maxDisputesPer90Days      = 3
 )
 
 // EscrowManager handles escrow operations for returns.
@@ -26,6 +29,8 @@ type EscrowManager interface {
 	CancelForOrder(ctx context.Context, orderTrackingID string) error
 	CreateReturnHold(ctx context.Context, orderID, vendorID string, amount int64, holdUntil time.Time) error
 	RefundForReturn(ctx context.Context, orderTrackingID string, amount int64) error
+	FreezeForDispute(ctx context.Context, orderTrackingID string, disputeID uuid.UUID) error
+	UnfreezeOnRejection(ctx context.Context, disputeID uuid.UUID) error
 }
 
 type ReturnService struct {
@@ -33,6 +38,7 @@ type ReturnService struct {
 	escrow EscrowManager
 	kafka  *messaging.KafkaClient
 	fraud  *fraud.ReturnFraudDetector
+	rdb    redis.UniversalClient
 }
 
 func NewReturnService(
@@ -40,12 +46,14 @@ func NewReturnService(
 	escrow EscrowManager,
 	kafka *messaging.KafkaClient,
 	fraudDetector *fraud.ReturnFraudDetector,
+	rdb redis.UniversalClient,
 ) *ReturnService {
 	return &ReturnService{
 		repo:   repo,
 		escrow: escrow,
 		kafka:  kafka,
 		fraud:  fraudDetector,
+		rdb:    rdb,
 	}
 }
 
@@ -71,9 +79,69 @@ func (s *ReturnService) emitEvent(ctx context.Context, topic, key string, payloa
 	})
 }
 
+// checkVendorDisputeCount returns the number of disputes by a vendor in the last 90 days.
+func (s *ReturnService) checkVendorDisputeCount(ctx context.Context, vendorID string) (int, error) {
+	if s.rdb == nil {
+		return 0, nil
+	}
+	key := fmt.Sprintf("vendor:disputes:count:%s", vendorID)
+	min := float64(time.Now().Add(-90 * 24 * time.Hour).UnixMilli())
+	max := float64(time.Now().UnixMilli())
+	count, err := s.rdb.ZCount(ctx, key, fmt.Sprintf("%f", min), fmt.Sprintf("%f", max)).Result()
+	return int(count), err
+}
+
+// recordVendorDispute records a vendor dispute in the Redis sorted set.
+func (s *ReturnService) recordVendorDispute(ctx context.Context, vendorID string) {
+	if s.rdb == nil {
+		return
+	}
+	key := fmt.Sprintf("vendor:disputes:count:%s", vendorID)
+	s.rdb.ZAdd(ctx, key, redis.Z{
+		Score:  float64(time.Now().UnixMilli()),
+		Member: time.Now().Format(time.RFC3339Nano),
+	})
+	s.rdb.Expire(ctx, key, 90*24*time.Hour)
+}
+
+// handleVendorPenalty checks if vendor should be suspended for repeated disputes.
+func (s *ReturnService) handleVendorPenalty(ctx context.Context, vendorID string) {
+	count, err := s.checkVendorDisputeCount(ctx, vendorID)
+	if err != nil {
+		log.Printf("[RETURN] Warning: failed to check vendor dispute count: %v", err)
+		return
+	}
+
+	if count >= maxDisputesPer90Days {
+		// Deactivate store for 24 hours
+		if err := s.repo.DeactivateStore(ctx, vendorID, 24*time.Hour); err != nil {
+			log.Printf("[RETURN] Warning: failed to deactivate store for vendor %s: %v", vendorID, err)
+			return
+		}
+
+		// Notify vendor
+		s.emitEvent(ctx, "vendor.store_suspended", vendorID, map[string]interface{}{
+			"vendor_id":       vendorID,
+			"reason":          "3 disputes in 90 days",
+			"duration_hours":  24,
+			"message":         "Your store has been suspended for 24 hours due to repeated false disputes.",
+			"timestamp":       time.Now().UnixMilli(),
+		})
+
+		// Notify admin
+		s.emitEvent(ctx, "admin.vendor_suspended", vendorID, map[string]interface{}{
+			"vendor_id":      vendorID,
+			"reason":         "auto_suspension_3_disputes",
+			"dispute_count":  count,
+			"message":        fmt.Sprintf("Vendor %s auto-suspended: %d disputes in 90 days", vendorID, count),
+			"timestamp":      time.Now().UnixMilli(),
+		})
+
+		log.Printf("[RETURN] Vendor %s suspended for 24h: %d disputes in 90 days", vendorID, count)
+	}
+}
+
 // RequestReturn handles a customer's return request.
-// It validates the order, checks the return window, creates the return request,
-// and re-holds the escrow for verification.
 func (s *ReturnService) RequestReturn(
 	ctx context.Context,
 	orderTrackingID string,
@@ -173,7 +241,7 @@ func (s *ReturnService) RequestReturn(
 		return nil, fmt.Errorf("failed to create return request: %w", err)
 	}
 
-	// Record return in fraud tracking windows (after successful creation)
+	// Record return in fraud tracking windows
 	if s.fraud != nil {
 		if err := s.fraud.RecordReturn(ctx, customerID); err != nil {
 			log.Printf("[RETURN-%s] Warning: failed to record return in fraud tracker: %v", orderTrackingID, err)
@@ -190,7 +258,6 @@ func (s *ReturnService) RequestReturn(
 			}
 		}
 
-		// Create return-specific hold with extended hold_until
 		returnHoldUntil := time.Now().Add(time.Duration(returnHoldHours) * time.Hour)
 		if err := s.escrow.CreateReturnHold(ctx, orderTrackingID, vendorID, totalAmount, returnHoldUntil); err != nil {
 			log.Printf("[RETURN-%s] Warning: failed to create return escrow hold: %v", orderTrackingID, err)
@@ -286,7 +353,8 @@ func (s *ReturnService) RecordDeliveryToVendor(ctx context.Context, id, photoURL
 }
 
 // VerifyByVendor processes the vendor's verification of the returned product.
-// When verified, triggers refund to customer and cancels COD debts.
+// When verified=true: triggers refund to customer.
+// When verified=false: creates dispute, freezes escrow, notifies admin+customer.
 func (s *ReturnService) VerifyByVendor(
 	ctx context.Context,
 	id string,
@@ -304,15 +372,14 @@ func (s *ReturnService) VerifyByVendor(
 		return fmt.Errorf("cannot verify in '%s' status", current.Status)
 	}
 
-	if err := s.repo.VerifyByVendor(ctx, id, verified, photoURL, notes); err != nil {
-		return err
-	}
-
 	if verified {
-		// Trigger refund to customer
+		// APPROVE: Trigger refund to customer
+		if err := s.repo.VerifyByVendor(ctx, id, verified, photoURL, notes); err != nil {
+			return err
+		}
+
 		if s.escrow != nil {
 			orderID := current.OrderTrackingID
-			// Get order total for refund amount
 			orderData, err := s.repo.GetOrderForReturn(ctx, orderID)
 			if err != nil {
 				log.Printf("[RETURN-%s] Warning: failed to get order for refund: %v", orderID, err)
@@ -323,7 +390,6 @@ func (s *ReturnService) VerifyByVendor(
 						totalAmount = amt
 					}
 				}
-				// Refund from escrow to customer wallet + cancel COD debts
 				if err := s.escrow.RefundForReturn(ctx, orderID, totalAmount); err != nil {
 					log.Printf("[RETURN-%s] Warning: failed to process return refund: %v", orderID, err)
 				}
@@ -337,9 +403,63 @@ func (s *ReturnService) VerifyByVendor(
 			"timestamp":         time.Now().UnixMilli(),
 		})
 	} else {
+		// DISPUTE: Create dispute record, freeze escrow, notify admin+customer
+		if err := s.repo.VerifyByVendor(ctx, id, verified, photoURL, notes); err != nil {
+			return err
+		}
+
+		// 1. Create dispute record in disputes table
+		disputeID := uuid.New()
+		if err := s.repo.CreateReturnDispute(ctx, disputeID, current.OrderTrackingID, current.VendorTrackingID, notes); err != nil {
+			log.Printf("[RETURN-%s] Warning: failed to create dispute record: %v", current.OrderTrackingID, err)
+		}
+
+		// 2. Freeze escrow
+		if s.escrow != nil {
+			if err := s.escrow.FreezeForDispute(ctx, current.OrderTrackingID, disputeID); err != nil {
+				log.Printf("[RETURN-%s] Warning: failed to freeze escrow: %v", current.OrderTrackingID, err)
+			}
+		}
+
+		// 3. Update return request with dispute details
+		if err := s.repo.UpdateReturnDisputeDetails(ctx, id, notes, disputeID.String()); err != nil {
+			log.Printf("[RETURN-%s] Warning: failed to update return dispute details: %v", current.OrderTrackingID, err)
+		}
+
+		// 4. Record vendor dispute in Redis (count tracking)
+		s.recordVendorDispute(ctx, current.VendorTrackingID)
+
+		// 5. Check vendor penalty (if >= 3 disputes → 24h store ban)
+		s.handleVendorPenalty(ctx, current.VendorTrackingID)
+
+		// 6. Notify customer via WebSocket
+		s.emitEvent(ctx, "returns.customer_notification", current.CustomerTrackingID, map[string]interface{}{
+			"action":           "RETURN_DISPUTED",
+			"order_id":         current.OrderTrackingID,
+			"customer_id":      current.CustomerTrackingID,
+			"vendor_id":        current.VendorTrackingID,
+			"message":          "Your return has been disputed by the vendor. Admin will review within 48 hours.",
+			"dispute_id":       disputeID.String(),
+			"timestamp":        time.Now().UnixMilli(),
+		})
+
+		// 7. Notify admin via Kafka
+		s.emitEvent(ctx, "admin.return_disputes", current.OrderTrackingID, map[string]interface{}{
+			"action":           "NEW_RETURN_DISPUTE",
+			"return_id":        id,
+			"order_id":         current.OrderTrackingID,
+			"vendor_id":        current.VendorTrackingID,
+			"customer_id":      current.CustomerTrackingID,
+			"dispute_id":       disputeID.String(),
+			"reason":           notes,
+			"photo_url":        photoURL,
+			"timestamp":        time.Now().UnixMilli(),
+		})
+
 		s.emitEvent(ctx, "return.disputed", current.OrderTrackingID, map[string]interface{}{
 			"return_request_id": id,
 			"order_tracking_id": current.OrderTrackingID,
+			"dispute_id":        disputeID.String(),
 			"status":            "disputed",
 			"reason":            notes,
 			"timestamp":         time.Now().UnixMilli(),
@@ -354,6 +474,11 @@ func (s *ReturnService) CompleteReturn(ctx context.Context, id string) error {
 	current, err := s.repo.GetReturnRequestByID(ctx, id)
 	if err != nil {
 		return err
+	}
+
+	// Block completion if disputed - must go through admin resolution
+	if current.Status == models.ReturnStatusDisputed {
+		return fmt.Errorf("DISPUTE_PENDING: return is under dispute, admin must resolve first")
 	}
 
 	if !models.IsValidReturnTransition(current.Status, models.ReturnStatusCompleted) {
