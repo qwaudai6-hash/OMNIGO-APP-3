@@ -519,7 +519,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         'currency': 'PKR',
         'device_session_nonce': _checkoutSessionNonce,
         'items': items,
-        'total_amount': cart.totalAmount,
+        'total_amount': cart.totalAmount + _deliveryFee,
         // H4: Uber-style — customer pays product + delivery fee
         'delivery_fee_paisa': (_deliveryFee * 100).round(),
         // H3: routing audit trail
@@ -974,15 +974,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     } catch (e) {
       _regenerateSessionNonce();
       if (_createdOrderTrackingId != null) {
-        final errStr = e.toString().toLowerCase();
-        final isNetworkError = errStr.contains('socketexception') ||
-            errStr.contains('timeout') ||
-            errStr.contains('connection') ||
-            errStr.contains('network') ||
-            errStr.contains('no internet');
-        if (isNetworkError) {
-          await _cancelOrderOnFailure(_createdOrderTrackingId!, 'Network error during payment');
-        }
+        await _cancelOrderOnFailure(_createdOrderTrackingId!, 'Payment failed: $e');
       }
       if (mounted) {
         final userMsg = _getUserFriendlyError(e, 'Something went wrong. Please try again.');
@@ -1317,7 +1309,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           const Text('Total', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-                          Text('PKR ${cart.totalAmount.toStringAsFixed(0)}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Colors.redAccent)),
+                          Text('PKR ${(cart.totalAmount + _deliveryFee).toStringAsFixed(0)}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Colors.redAccent)),
                         ],
                       ),
                       const SizedBox(height: 4),
@@ -1465,6 +1457,12 @@ Future<bool> _openWalletWebView(BuildContext context, String redirectUrl) async 
 
   if (!context.mounted) return false;
 
+  final timeoutTimer = Timer(const Duration(seconds: 90), () {
+    if (Navigator.of(context, rootNavigator: true).canPop()) {
+      Navigator.of(context, rootNavigator: true).pop(false);
+    }
+  });
+
   final result = await showDialog<bool>(
     context: context,
     barrierDismissible: false,
@@ -1505,5 +1503,6 @@ Future<bool> _openWalletWebView(BuildContext context, String redirectUrl) async 
     },
   );
 
+  timeoutTimer.cancel();
   return result ?? false;
 }

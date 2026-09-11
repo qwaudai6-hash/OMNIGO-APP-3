@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"time"
@@ -101,7 +102,7 @@ func (s *RiderWalletService) GetWallet(ctx context.Context, riderTrackingID stri
 	}
 
 	// Block if cash >= threshold
-	cashThresholdPaisa := int64(envFloat("RIDER_CASH_BLOCK_THRESHOLD", 5000.0) * 100)
+	cashThresholdPaisa := int64(math.Round(envFloat("RIDER_CASH_BLOCK_THRESHOLD", 5000.0) * 100))
 	resp.IsCashBlocked = resp.CashInHandPaisa >= cashThresholdPaisa
 
 	creditQuery := `
@@ -324,7 +325,7 @@ func (s *RiderWalletService) RequestWithdrawal(ctx context.Context, req RiderWit
 	}
 
 	// Enforce minimum withdrawal (PKR 500 = 50,000 paisa)
-	minWithdrawalPaisa := int64(envFloat("RIDER_MIN_WITHDRAWAL_PKR", 500.0) * 100)
+	minWithdrawalPaisa := int64(math.Round(envFloat("RIDER_MIN_WITHDRAWAL_PKR", 500.0) * 100))
 	if req.AmountPaisa < minWithdrawalPaisa {
 		return nil, fmt.Errorf("minimum withdrawal amount is PKR %.2f", float64(minWithdrawalPaisa)/100.0)
 	}
@@ -353,7 +354,7 @@ func (s *RiderWalletService) RequestWithdrawal(ctx context.Context, req RiderWit
 		return nil, fmt.Errorf("withdrawal blocked: rider has an active cash block")
 	}
 
-	cashThresholdPaisa := int64(envFloat("RIDER_CASH_BLOCK_THRESHOLD", 5000.0) * 100)
+	cashThresholdPaisa := int64(math.Round(envFloat("RIDER_CASH_BLOCK_THRESHOLD", 5000.0) * 100))
 	if cashInHandPaisa >= cashThresholdPaisa {
 		return nil, fmt.Errorf("withdrawal blocked: cash-in-hand float (PKR %.2f) exceeds threshold, deposit float first", float64(cashInHandPaisa)/100.0)
 	}

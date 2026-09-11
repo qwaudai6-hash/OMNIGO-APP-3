@@ -543,6 +543,8 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
   }
 
   void _initWebSocketListener() {
+    _wsSubscription?.cancel();
+    _wsGigTopicSub?.cancel();
     _wsSubscription = _wsClient.stream.listen((message) {
       try {
         final data = jsonDecode(message as String) as Map<String, dynamic>;

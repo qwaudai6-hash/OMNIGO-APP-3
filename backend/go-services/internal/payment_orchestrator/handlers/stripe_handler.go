@@ -3,6 +3,7 @@ package handlers
 import (
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 
@@ -113,7 +114,7 @@ func (h *StripeSplitHandler) ProcessRefund(c *gin.Context) {
 		return
 	}
 
-	amountPaisa := int64(req.Amount * 100)
+	amountPaisa := int64(math.Round(float64(req.Amount) * 100))
 	if err := h.service.ProcessRefund(c.Request.Context(), req.OrderID, amountPaisa, req.Reason); err != nil {
 		errMsg := err.Error()
 		switch {

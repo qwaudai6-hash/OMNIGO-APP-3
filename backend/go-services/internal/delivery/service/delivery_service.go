@@ -434,8 +434,8 @@ func (s *DeliveryService) UpdateGigStatus(ctx context.Context, trackingID string
 	if req.Status == models.StatusCompleted && s.walletCredit != nil && assignedRider != "" {
 		// Retry ledger transfer up to 3 times before giving up.
 		var creditErr error
-		riderEarningPaisa := int64(gig.RiderEarning * 100)
-		adminCommissionPaisa := int64(gig.AdminCommission * 100)
+		riderEarningPaisa := int64(math.Round(float64(gig.RiderEarning) * 100))
+		adminCommissionPaisa := int64(math.Round(float64(gig.AdminCommission) * 100))
 		// H4 FIX: Pass isCOD via context so CreditDelivery can skip ledger transfer for COD
 		// (COD's central_escrow is funded later by CODHandler.Settlement())
 		creditCtx := context.WithValue(ctx, "is_cod_order", gig.IsCOD)
@@ -478,29 +478,25 @@ func (s *DeliveryService) UpdateGigStatus(ctx context.Context, trackingID string
 		}
 
 		if gig.IsCOD {
-			orderTotalPaisa := int64(gig.OrderTotal * 100)
-			// Record rider cash collection liability.
-			if err := s.walletCredit.AddCODCollection(ctx, assignedRider, orderTotalPaisa); err != nil {
-				log.Printf("Warning: failed to add COD collection to wallet for rider %s: %v", assignedRider, err)
+			orderTotalPaisa := int64(math.Round(float64(gig.OrderTotal) * 100))
+			tx, txErr := s.repo.DB().Begin(ctx)
+			if txErr != nil {
+				log.Printf("CRITICAL: Failed to start COD transaction for gig %s: %v", gig.TrackingID, txErr)
+			} else {
+				defer tx.Rollback(ctx)
+				if _, err := tx.Exec(ctx, `UPDATE rider_wallet SET cash_in_hand_paisa = cash_in_hand_paisa + $2 WHERE rider_tracking_id = $1`, assignedRider, orderTotalPaisa); err != nil {
+					log.Printf("CRITICAL: COD collection failed for rider %s: %v", assignedRider, err)
+					tx.Rollback(ctx)
+				} else if _, err := tx.Exec(ctx, `INSERT INTO cod_debts (order_tracking_id, rider_tracking_id, amount_paisa, status) VALUES ($1, $2, $3, 'pending')`, gig.OrderTrackingID, assignedRider, orderTotalPaisa); err != nil {
+					log.Printf("CRITICAL: COD debt recording failed for order %s: %v", gig.OrderTrackingID, err)
+					tx.Rollback(ctx)
+				} else if err := s.walletCredit.CreateCODDebtLedger(ctx, gig.OrderTrackingID, orderTotalPaisa); err != nil {
+					log.Printf("CRITICAL: COD debt ledger failed for order %s: %v", gig.OrderTrackingID, err)
+					tx.Rollback(ctx)
+				} else {
+					tx.Commit(ctx)
+				}
 			}
-
-			// Ensure active debt record is created so the rider sees it and can settle via card payment
-			if err := s.repo.RecordCODDebt(ctx, gig.OrderTrackingID, assignedRider, orderTotalPaisa); err != nil {
-				log.Printf("Warning: failed to record COD debt for rider %s: %v", assignedRider, err)
-			}
-
-			// H4 BOOKKEEPING FIX: Create the rider_cod_debt ledger entry here.
-			// This is the single source of truth — if Confirm endpoint was never called,
-			// the rider_cod_debt account will still be credited so SettleWebhook's debit
-			// doesn't leave the account negative. Idempotent via orderTrackingID key.
-			if err := s.walletCredit.CreateCODDebtLedger(ctx, gig.OrderTrackingID, orderTotalPaisa); err != nil {
-				log.Printf("Warning: failed to create COD debt ledger for order %s: %v", gig.OrderTrackingID, err)
-			}
-
-			// NOTE: Settlement ledger entries and escrow hold are created by cod_handler.SettleWebhook
-			// when the rider pays via card. We do NOT create them here
-			// because at this point the rider is still holding the cash — the platform hasn't
-			// received it yet. Creating settlement entries now would cause double-counting.
 		}
 	}
 

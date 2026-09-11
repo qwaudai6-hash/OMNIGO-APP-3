@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"math/big"
 	"strconv"
 	"strings"
@@ -818,7 +819,7 @@ func (s *AdminSurveillanceService) ResolveDispute(ctx context.Context, orderTrac
 		if err2 != nil {
 			return fmt.Errorf("order not found: %w", err2)
 		}
-		escrowAmountPaisa = int64(orderTotalRupees * 100)
+		escrowAmountPaisa = int64(math.Round(float64(orderTotalRupees) * 100))
 		escrowStatus = "paid_out"
 	}
 

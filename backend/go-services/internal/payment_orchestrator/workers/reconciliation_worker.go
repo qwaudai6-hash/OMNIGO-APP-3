@@ -175,7 +175,7 @@ func (w *ReconciliationWorker) RunReconciliation(ctx context.Context) (*Reconcil
 	minThresholdPaisa := int64(100) // 1.00 PKR = 100 paisa
 	relativeRate := 0.0001
 	if w.cfg != nil {
-		minThresholdPaisa = int64(w.cfg.MinThresholdPKR * 100)
+		minThresholdPaisa = int64(math.Round(w.cfg.MinThresholdPKR * 100))
 		relativeRate = w.cfg.RelativeRate
 	}
 	thresholdPaisa := int64(math.Max(float64(minThresholdPaisa), float64(totalVolumePaisa)*relativeRate))

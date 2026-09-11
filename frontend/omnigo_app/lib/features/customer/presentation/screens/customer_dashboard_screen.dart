@@ -680,7 +680,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     });
 
     try {
-      final response = await ApiClient().post('/ride/estimate', {
+      final response = await sl<ApiClient>().post('/ride/estimate', {
         'pickup_lat': _ridePickupLatLng!.latitude,
         'pickup_lng': _ridePickupLatLng!.longitude,
         'dropoff_lat': _rideDropoffLatLng!.latitude,
@@ -742,7 +742,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     ),);
 
     try {
-      await ApiClient().post('/rides/', {
+      await sl<ApiClient>().post('/rides/', {
         'customer_tracking_id': widget.trackingId,
         'vehicle_type': vehicleType,
         'pickup_lat': _ridePickupLatLng!.latitude,
@@ -833,7 +833,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
 
     try {
       final response =
-          await ApiClient().get('/orders/customer/${widget.trackingId}');
+          await sl<ApiClient>().get('/orders/customer/${widget.trackingId}');
       if (mounted) {
         // #53: Verify response is List before casting
         final List<dynamic> orders = response is List<dynamic> ? response : <dynamic>[];
@@ -891,7 +891,7 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
 
   Future<void> _fetchDeliveryRoute(String orderId) async {
     try {
-      final response = await ApiClient().get(
+      final response = await sl<ApiClient>().get(
         ApiEndpoints.deliveryGigRouteCustomer(orderId),
       );
       if (response is! Map<String, dynamic>) return;

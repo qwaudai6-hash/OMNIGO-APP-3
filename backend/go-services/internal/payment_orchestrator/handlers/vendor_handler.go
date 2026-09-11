@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"time"
 
@@ -327,7 +328,7 @@ func (h *VendorHandler) RequestWithdraw(c *gin.Context) {
 	).Scan(&clawbackPaisa)
 
 	// Convert request amount (rupees) to paisa for comparison
-	amountPaisa := int64(req.Amount * 100)
+	amountPaisa := int64(math.Round(float64(req.Amount) * 100))
 	availableBalance := balancePaisa - clawbackPaisa
 	if availableBalance < 0 {
 		availableBalance = 0

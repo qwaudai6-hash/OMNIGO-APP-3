@@ -907,7 +907,7 @@ func (h *WalletHandler) LoadCustomerWalletCallback(c *gin.Context) {
 		return
 	}
 
-	amountPaisa := int64(amountPKR * 100)
+	amountPaisa := int64(math.Round(float64(amountPKR) * 100))
 	err := h.customerWallet.CreditFunds(c.Request.Context(), customerTrackingID, txnID, amountPaisa)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to credit customer wallet: " + err.Error()})

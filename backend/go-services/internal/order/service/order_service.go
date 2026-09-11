@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 	"time"
 
@@ -127,7 +128,7 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *models.CreateOrderR
 	// The frontend sends TotalAmount which we trust for now.
 	// The background worker will reconcile prices via product service.
 	// H4: Uber-style — customer pays product total + delivery fee.
-	productTotalPaisa := int64(req.TotalAmount * 100)
+	productTotalPaisa := int64(math.Round(float64(req.TotalAmount) * 100))
 	order := &models.Order{
 		UserTrackID:           req.UserTrackID,
 		VendorStoreTrackID:    req.VendorStoreTrackID, // frontend must provide this
@@ -186,7 +187,7 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *models.CreateOrderR
 		VendorStoreTrackID:    order.VendorStoreTrackID,
 		Items:                 order.Items,
 		ItemsSummary:          itemsSummary,
-		TotalAmountPaisa:      int64(order.TotalAmount * 100),
+		TotalAmountPaisa:      int64(math.Round(float64(order.TotalAmount) * 100)),
 		TotalAmountRupees:     order.TotalAmount,
 		IsCOD:                 isCOD,
 		CustomerPhone:         order.CustomerPhone,
@@ -219,7 +220,7 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *models.CreateOrderR
 
 	// 4. Record COD pending transaction for cash-on-delivery orders.
 	if isCOD && s.codService != nil {
-		totalAmountPaisa := int64(order.TotalAmount * 100)
+		totalAmountPaisa := int64(math.Round(float64(order.TotalAmount) * 100))
 		if err := s.codService.OnOrderCreated(ctx, order.TrackingID, totalAmountPaisa, order.Currency); err != nil {
 			fmt.Printf("[OrderService] Warning: failed to record COD pending transaction for order %s: %v\n", order.TrackingID, err)
 		}
@@ -453,9 +454,9 @@ func (s *OrderService) updateOrderStatusPaidAtomic(ctx context.Context, tracking
 	}
 
 	// Create escrow hold within the same transaction
-	holdAmountPaisa := int64(order.VendorEscrow * 100)
+	holdAmountPaisa := int64(math.Round(float64(order.VendorEscrow) * 100))
 	if holdAmountPaisa <= 0 {
-		holdAmountPaisa = int64((order.TotalAmount - order.AdminCommission - order.DeliveryEscrow) * 100)
+		holdAmountPaisa = int64(math.Round(float64(order.TotalAmount-order.AdminCommission-order.DeliveryEscrow) * 100))
 		if holdAmountPaisa < 0 {
 			holdAmountPaisa = 0
 		}

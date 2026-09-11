@@ -141,13 +141,13 @@ func (s *StripeService) ProcessCheckout(ctx context.Context, merchantUserID, cli
 	idempotencyKey := stripeClient.GenerateIdempotencyKey("checkout", req.OrderID)
 
 	// 5. Create PaymentIntent via Stripe
-	amountCents := int64(req.Amount * 100) // Stripe expects cents
+	amountCents := int64(math.Round(float64(req.Amount) * 100)) // Stripe expects cents
 	metadata := map[string]string{
 		"order_id":     req.OrderID,
 		"customer_id":  req.CustomerID,
 		"store_id":     req.StoreID,
 		"gateway":      "stripe",
-		"amount_paisa": fmt.Sprintf("%d", int64(req.Amount*100)),
+		"amount_paisa": fmt.Sprintf("%d", int64(math.Round(float64(req.Amount)*100))),
 	}
 
 	pi, err := s.stripe.CreatePaymentIntent(ctx, amountCents, req.Currency, metadata, idempotencyKey)
@@ -160,7 +160,7 @@ func (s *StripeService) ProcessCheckout(ctx context.Context, merchantUserID, cli
 	metaBytes, _ := json.Marshal(map[string]any{
 		"payment_intent_id": pi.ID,
 		"customer_ip":       clientIP,
-		"amount_paisa":      int64(req.Amount * 100),
+		"amount_paisa":      int64(math.Round(float64(req.Amount) * 100)),
 	})
 	_, err = s.db.Exec(ctx,
 		`INSERT INTO payment_transactions

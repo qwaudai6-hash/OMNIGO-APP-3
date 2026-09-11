@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -143,7 +144,7 @@ func (h *WalletHandler) PayFastCharge(c *gin.Context) {
 		CustomerTrackingID: callerID,
 		Gateway:            "payfast",
 		AmountPKR:          order.TotalAmount,
-		AmountCents:        int64(order.TotalAmount * 100),
+		AmountCents:        int64(math.Round(float64(order.TotalAmount) * 100)),
 		OrderID:            order.TrackingID,
 	}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record pending payment: " + err.Error()})

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strings"
@@ -143,8 +144,8 @@ func (h *IBFTHandler) settleSuccess(ctx context.Context, event *paymentservice.W
 		return fmt.Errorf("order %s not found: %w", event.OrderID, err)
 	}
 
-	eventAmountPaisa := int64(event.Amount * 100)
-	orderAmountPaisa := int64(order.TotalAmount * 100)
+	eventAmountPaisa := int64(math.Round(float64(event.Amount) * 100))
+	orderAmountPaisa := int64(math.Round(float64(order.TotalAmount) * 100))
 	if eventAmountPaisa != orderAmountPaisa {
 		return fmt.Errorf("amount mismatch for order %s: ibft %d paisa vs order %d paisa", event.OrderID, eventAmountPaisa, orderAmountPaisa)
 	}

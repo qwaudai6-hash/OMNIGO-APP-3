@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"strconv"
 	"time"
@@ -20,6 +21,11 @@ type DeliveryRepository struct {
 	writer *pgxpool.Pool
 	reader *pgxpool.Pool
 	redis  redis.UniversalClient
+}
+
+// DB returns the write pool for transactional operations.
+func (r *DeliveryRepository) DB() *pgxpool.Pool {
+	return r.writer
 }
 
 var validGigTransitions = map[string][]string{
@@ -343,7 +349,7 @@ func (r *DeliveryRepository) AcceptGigWithEligibility(ctx context.Context, track
 		cashThresholdPaisa := int64(500000) // default 5000 PKR
 		if envThreshold := os.Getenv("RIDER_CASH_BLOCK_THRESHOLD"); envThreshold != "" {
 			if parsed, err := strconv.ParseFloat(envThreshold, 64); err == nil && parsed > 0 {
-				cashThresholdPaisa = int64(parsed * 100)
+				cashThresholdPaisa = int64(math.Round(parsed * 100))
 			}
 		}
 		if cashInHandPaisa >= cashThresholdPaisa {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strings"
@@ -259,8 +260,8 @@ func (h *MobileWalletHandler) settleSuccess(ctx context.Context, gateway string,
 		return fmt.Errorf("order %s not found: %w", event.OrderID, err)
 	}
 	// Convert to paisa for exact comparison
-	eventAmountPaisa := int64(event.Amount * 100)
-	orderAmountPaisa := int64(order.TotalAmount * 100)
+	eventAmountPaisa := int64(math.Round(float64(event.Amount) * 100))
+	orderAmountPaisa := int64(math.Round(float64(order.TotalAmount) * 100))
 	if eventAmountPaisa != orderAmountPaisa {
 		return fmt.Errorf("amount mismatch for order %s: gateway %d paisa vs order %d paisa", event.OrderID, eventAmountPaisa, orderAmountPaisa)
 	}

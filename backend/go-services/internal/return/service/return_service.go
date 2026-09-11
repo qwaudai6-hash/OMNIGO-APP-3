@@ -422,7 +422,14 @@ func (s *ReturnService) VerifyByVendor(
 					}
 				}
 				if err := s.escrow.RefundForReturn(ctx, orderID, totalAmount); err != nil {
-					log.Printf("[RETURN-%s] Warning: failed to process return refund: %v", orderID, err)
+					// Force-revert verification status (state machine won't allow backward transition,
+					// but financial integrity takes priority — customer didn't get their money)
+					log.Printf("[RETURN-%s] CRITICAL: Refund failed after vendor verification, reverting status: %v", orderID, err)
+					_, _ = s.repo.DB().Exec(ctx,
+						`UPDATE returns SET status = 'return_delivered', updated_at = NOW(),
+						 admin_notes = admin_notes || E'\nCRITICAL: Refund failed after verification, status force-reverted'
+						 WHERE id = $1 AND status = 'return_verified'`, id)
+					return fmt.Errorf("return refund failed: %w", err)
 				}
 			}
 		}
@@ -599,6 +606,15 @@ func (s *ReturnService) AutoResolveStaleDisputes(ctx context.Context) (int, erro
 		if err != nil {
 			fmt.Printf("[Return] Failed to auto-resolve dispute %d: %v\n", id, err)
 			continue
+		}
+
+		// Trigger refund if auto-approved
+		if newStatus == "approved" {
+			var totalAmount int64
+			_ = db.QueryRow(ctx, `SELECT COALESCE(total_amount_paisa, 0) FROM orders WHERE order_tracking_id = $1`, orderID).Scan(&totalAmount)
+			if refundErr := s.escrow.RefundForReturn(ctx, orderID, totalAmount); refundErr != nil {
+				fmt.Printf("[Return] CRITICAL: Refund failed for auto-resolved dispute %d: %v\n", id, refundErr)
+			}
 		}
 
 		// Update order status

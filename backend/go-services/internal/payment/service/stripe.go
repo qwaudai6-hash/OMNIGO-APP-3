@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 
@@ -44,7 +45,7 @@ func (s *StripeService) CreateCheckoutSession(ctx context.Context, req CheckoutR
 		return CheckoutResponse{}, errors.New("stripe is not configured")
 	}
 
-	amountCents := int64(req.Amount * 100)
+	amountCents := int64(math.Round(float64(req.Amount) * 100))
 
 	params := &stripe.PaymentIntentParams{
 		Amount:   stripe.Int64(amountCents),
@@ -85,7 +86,7 @@ func (s *StripeService) Capture(ctx context.Context, paymentIntentID string, amo
 		return errors.New("stripe is not configured")
 	}
 	params := &stripe.PaymentIntentCaptureParams{
-		AmountToCapture: stripe.Int64(int64(amount * 100)),
+		AmountToCapture: stripe.Int64(int64(math.Round(float64(amount) * 100))),
 	}
 	_, err := paymentintent.Capture(paymentIntentID, params)
 	return err
@@ -100,7 +101,7 @@ func (s *StripeService) Refund(ctx context.Context, paymentIntentID string, amou
 		PaymentIntent: stripe.String(paymentIntentID),
 	}
 	if amount > 0 {
-		params.Amount = stripe.Int64(int64(amount * 100))
+		params.Amount = stripe.Int64(int64(math.Round(float64(amount) * 100)))
 	}
 	_, err := refund.New(params)
 	return err
