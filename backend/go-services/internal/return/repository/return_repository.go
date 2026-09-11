@@ -344,10 +344,11 @@ func (r *ReturnRepository) GetOrderForReturn(ctx context.Context, orderTrackingI
 			COALESCE(o.total_amount_paisa, 0) AS total_amount_paisa,
 			o.payment_gateway, o.payment_status, o.status,
 			COALESCE(u.name, u.first_name || ' ' || u.last_name, 'Customer') AS customer_name,
-			COALESCE(o.delivery_address, '') AS customer_address,
-			COALESCE(o.customer_phone, '') AS customer_phone
+			'' AS customer_address,
+			COALESCE(d.customer_phone, '') AS customer_phone
 		FROM orders o
 		LEFT JOIN users u ON u.tracking_id = o.customer_tracking_id
+		LEFT JOIN deliveries d ON d.order_tracking_id = o.order_tracking_id
 		WHERE o.order_tracking_id = $1
 	`
 	row := r.reader.QueryRow(ctx, query, orderTrackingID)

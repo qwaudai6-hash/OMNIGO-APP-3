@@ -108,7 +108,7 @@ func (w *DisputeTimeoutWorker) resolveDispute(
 	defer tx.Rollback(ctx)
 
 	// 1. Refund to customer wallet via escrow
-	if err := w.escrow.RefundForReturn(ctx, orderID, amount); err != nil {
+	if err := w.escrow.RefundDispute(ctx, disputeID); err != nil {
 		return fmt.Errorf("failed to refund: %w", err)
 	}
 

@@ -1536,7 +1536,7 @@ func main() {
 		_ = c.ShouldBindJSON(&req)
 
 		tag, err := dbPool.Exec(ctx,
-			`UPDATE return_requests SET status = 'return_disputed', dispute_reason = $1, updated_at = NOW()
+			`UPDATE return_requests SET status = 'return_disputed', dispute_reason = $2, updated_at = NOW()
 			 WHERE id = $1 AND status IN ('return_delivered', 'return_requested')`,
 			returnID, req.Reason)
 		if err != nil {
