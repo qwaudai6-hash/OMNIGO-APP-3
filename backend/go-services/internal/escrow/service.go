@@ -688,16 +688,23 @@ func (s *Service) refundCODReturn(ctx context.Context, orderTrackingID string, a
 		refundAmount = holdAmount
 	}
 
-	// 2. Get rider_tracking_id from cod_debts
+	// 3. Get rider_tracking_id from cod_debts
 	var riderID string
 	_ = s.db.QueryRow(ctx,
 		`SELECT rider_tracking_id FROM cod_debts WHERE order_tracking_id = $1 AND status != 'cancelled' LIMIT 1`,
 		orderTrackingID,
 	).Scan(&riderID)
 
+	// 4. DB Transaction
+	tx, txErr := s.db.Begin(ctx)
+	if txErr != nil {
+		return fmt.Errorf("failed to begin transaction: %w", txErr)
+	}
+	defer tx.Rollback(ctx)
+
 	// 3. Ledger transfer: rider_cod_debt -> cash_receivable (reverse the debt)
 	idempotencyKey := fmt.Sprintf("cod:return:%s", orderTrackingID)
-	_, _ = s.ledger.Transfer(ctx, ledger.TransferRequest{
+	_, err = s.ledger.Transfer(ctx, ledger.TransferRequest{
 		DebitAccount:   ledger.AccountRiderCODDebt,
 		CreditAccount:  ledger.AccountCashReceivable,
 		Amount:         refundAmount,
@@ -707,13 +714,9 @@ func (s *Service) refundCODReturn(ctx context.Context, orderTrackingID string, a
 		Description:    fmt.Sprintf("COD return reversal for order %s", orderTrackingID),
 		IdempotencyKey: idempotencyKey,
 	})
-
-	// 4. DB Transaction
-	tx, txErr := s.db.Begin(ctx)
-	if txErr != nil {
-		return fmt.Errorf("failed to begin transaction: %w", txErr)
+	if err != nil {
+		return fmt.Errorf("COD return ledger transfer failed: %w", err)
 	}
-	defer tx.Rollback(ctx)
 
 	// a. Credit customer wallet
 	_, err = tx.Exec(ctx,
@@ -739,13 +742,16 @@ func (s *Service) refundCODReturn(ctx context.Context, orderTrackingID string, a
 
 	// c. Decrement rider's cash_in_hand
 	if riderID != "" {
-		_, err = tx.Exec(ctx,
+		tag, err := tx.Exec(ctx,
 			`UPDATE rider_wallet SET cash_in_hand_paisa = GREATEST(0, cash_in_hand_paisa - $1), updated_at = NOW()
 			 WHERE rider_tracking_id = $2`,
 			refundAmount, riderID,
 		)
 		if err != nil {
-			fmt.Printf("[COD-RETURN] Warning: failed to decrement rider cash_in_hand: %v\n", err)
+			return fmt.Errorf("failed to decrement rider cash_in_hand: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			fmt.Printf("[COD-RETURN] ERROR: rider_wallet not found for rider %s on order %s - customer still refunded but cash_in_hand not corrected\n", riderID, orderTrackingID)
 		}
 	}
 
