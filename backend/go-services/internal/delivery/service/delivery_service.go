@@ -100,7 +100,7 @@ func (s *DeliveryService) StartKafkaConsumer(ctx context.Context) {
 		}
 	}()
 
-	s.kafka.Client.AddConsumeTopics("orders.created", "orders.cancelled")
+	s.kafka.Client.AddConsumeTopics("orders.created", "orders.cancelled", "orders.return_requested")
 
 	for {
 		fetches := s.kafka.Client.PollFetches(ctx)
@@ -142,6 +142,23 @@ func (s *DeliveryService) StartKafkaConsumer(ctx context.Context) {
 						}
 					}
 				}
+				continue
+			}
+
+			if record.Topic == "orders.return_requested" {
+				var returnEvent models.ReturnEvent
+				if err := json.Unmarshal(record.Value, &returnEvent); err != nil {
+					log.Printf("[Delivery] Failed to unmarshal return event: %v", err)
+					continue
+				}
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("[RECOVER] HandleReturnRequest panicked for order %s: %v", returnEvent.OrderTrackingID, r)
+						}
+					}()
+					s.HandleReturnRequest(ctx, returnEvent)
+				}()
 				continue
 			}
 

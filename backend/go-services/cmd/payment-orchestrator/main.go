@@ -329,6 +329,11 @@ func main() {
 	// from outbox_events (replaces broken Kafka-only path where nobody consumed orders.refunded)
 	go workers.NewRefundProcessorWorker(db.Writer, 5*time.Second).Start(workerCtx)
 
+	// Return flow workers
+	go workers.NewPickupDeadlineWorker(db.Writer, escrowSvc, kafkaClient).Start(workerCtx)
+	go workers.NewVendorReactivationWorker(db.Writer).Start(workerCtx)
+	go workers.NewDisputeTimeoutWorker(db.Writer, escrowSvc, kafkaClient, rdb).Start(workerCtx)
+
 	// TigerBeetle Outbox Worker — relays pending transfers to TB
 	if tbService != nil {
 		go ledger.NewTBOutboxWorker(db.Writer, tbService).Start(workerCtx)

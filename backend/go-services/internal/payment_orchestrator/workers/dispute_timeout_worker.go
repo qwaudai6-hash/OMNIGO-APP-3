@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/omnigo/backend/internal/escrow"
 	"github.com/omnigo/backend/internal/shared/messaging"
+	"github.com/redis/go-redis/v9"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -19,14 +20,14 @@ type DisputeTimeoutWorker struct {
 	db      *pgxpool.Pool
 	escrow  *escrow.Service
 	kafka   *messaging.KafkaClient
-	redis   interface{ Del(ctx context.Context, keys ...string) }
+	redis   redis.UniversalClient
 }
 
 func NewDisputeTimeoutWorker(
 	db *pgxpool.Pool,
 	escrowSvc *escrow.Service,
 	kafkaClient *messaging.KafkaClient,
-	rdb interface{ Del(ctx context.Context, keys ...string) },
+	rdb redis.UniversalClient,
 ) *DisputeTimeoutWorker {
 	return &DisputeTimeoutWorker{
 		db:     db,
