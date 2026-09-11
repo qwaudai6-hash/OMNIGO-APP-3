@@ -557,11 +557,9 @@ func (h *WalletHandler) RegisterRoutes(router *gin.Engine) {
 			auth.POST("/customer/load", h.LoadCustomerWallet)
 		}
 
-		// Admin-only wallet operations
-		adminWallet := wallet.Group("", middleware.JWTAuth(), middleware.RoleRequired("admin"))
-		{
-			adminWallet.POST("/rider/:tracking_id/deposit", h.DepositCOD)
-		}
+		// Note: /rider/:tracking_id/deposit is registered once above in the auth
+		// group. The handler checks role == "admin" internally. Do NOT register
+		// it again here — Gin panics on duplicate route+method pairs.
 	}
 }
 

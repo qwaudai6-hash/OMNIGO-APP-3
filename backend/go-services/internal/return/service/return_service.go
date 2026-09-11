@@ -584,7 +584,7 @@ func (s *ReturnService) AutoResolveStaleDisputes(ctx context.Context) (int, erro
 
 	resolved := 0
 	for rows.Next() {
-		var id int
+		var id string
 		var orderID, reason string
 		if err := rows.Scan(&id, &orderID, &reason); err != nil {
 			continue
@@ -602,7 +602,7 @@ func (s *ReturnService) AutoResolveStaleDisputes(ctx context.Context) (int, erro
 			`UPDATE return_requests SET status = $1, updated_at = NOW()
 			 WHERE id = $2`, newStatus, id)
 		if err != nil {
-			fmt.Printf("[Return] Failed to auto-resolve dispute %d: %v\n", id, err)
+			fmt.Printf("[Return] Failed to auto-resolve dispute %s: %v\n", id, err)
 			continue
 		}
 
@@ -611,7 +611,7 @@ func (s *ReturnService) AutoResolveStaleDisputes(ctx context.Context) (int, erro
 			var totalAmount int64
 			_ = db.QueryRow(ctx, `SELECT COALESCE(total_amount_paisa, 0) FROM orders WHERE order_tracking_id = $1`, orderID).Scan(&totalAmount)
 			if refundErr := s.escrow.RefundForReturn(ctx, orderID, totalAmount); refundErr != nil {
-				fmt.Printf("[Return] CRITICAL: Refund failed for auto-resolved dispute %d: %v\n", id, refundErr)
+				fmt.Printf("[Return] CRITICAL: Refund failed for auto-resolved dispute %s: %v\n", id, refundErr)
 			}
 		}
 
