@@ -57,8 +57,8 @@ type VerifyReturnRequest struct {
 
 // DisputeReturnRequest is the payload for POST /returns/:id/vendor-dispute.
 type DisputeReturnRequest struct {
-	Reason  string `json:"reason" binding:"required"`
-	PhotoURL string `json:"photo_url"`
+	Reason   string `json:"reason" binding:"required"`
+	PhotoURL string `json:"photo_url" binding:"required"`
 }
 
 // ReturnStatus constants
@@ -78,7 +78,7 @@ const (
 var ValidReturnTransitions = map[string][]string{
 	ReturnStatusRequested:       {ReturnStatusRiderAssigned, ReturnStatusCancelled},
 	ReturnStatusRiderAssigned:   {ReturnStatusPickupCompleted, ReturnStatusCancelled},
-	ReturnStatusPickupCompleted: {ReturnStatusInTransit},
+	ReturnStatusPickupCompleted: {ReturnStatusInTransit, ReturnStatusDelivered}, // direct delivery allowed
 	ReturnStatusInTransit:       {ReturnStatusDelivered},
 	ReturnStatusDelivered:       {ReturnStatusVerified, ReturnStatusDisputed},
 	ReturnStatusVerified:        {ReturnStatusCompleted},

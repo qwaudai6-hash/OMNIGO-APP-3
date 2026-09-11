@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,6 +22,21 @@ func NewReturnRepository(writer, reader *pgxpool.Pool) *ReturnRepository {
 		writer: writer,
 		reader: reader,
 	}
+}
+
+// GetOrderOTP returns the OTP code for an order's delivery.
+func (r *ReturnRepository) GetOrderOTP(ctx context.Context, orderTrackingID string) (string, error) {
+	var otp string
+	err := r.reader.QueryRow(ctx, `
+		SELECT COALESCE(d.otp_code, o.otp_code, '')
+		FROM orders o
+		LEFT JOIN deliveries d ON d.order_tracking_id = o.order_tracking_id
+		WHERE o.order_tracking_id = $1
+	`, orderTrackingID).Scan(&otp)
+	if err != nil {
+		return "", err
+	}
+	return otp, nil
 }
 
 // CreateReturnRequest inserts a new return request into the database.
@@ -124,11 +140,14 @@ func (r *ReturnRepository) GetReturnRequestByOrderID(ctx context.Context, orderT
 }
 
 // UpdateReturnStatus updates the status of a return request.
-func (r *ReturnRepository) UpdateReturnStatus(ctx context.Context, id, status string) error {
-	query := `UPDATE return_requests SET status = $1, updated_at = NOW() WHERE id = $2`
-	_, err := r.writer.Exec(ctx, query, status, id)
+func (r *ReturnRepository) UpdateReturnStatus(ctx context.Context, id, status string, expectedStatus string) error {
+	query := `UPDATE return_requests SET status = $1, updated_at = NOW() WHERE id = $2 AND status = $3`
+	res, err := r.writer.Exec(ctx, query, status, id, expectedStatus)
 	if err != nil {
 		return fmt.Errorf("failed to update return status: %w", err)
+	}
+	if res.RowsAffected() == 0 {
+		return fmt.Errorf("concurrent modification: return status changed, please retry")
 	}
 	return nil
 }
@@ -320,39 +339,49 @@ func (r *ReturnRepository) IsReturnWindowOpen(ctx context.Context, orderTracking
 // GetOrderForReturn fetches order details needed for return processing.
 func (r *ReturnRepository) GetOrderForReturn(ctx context.Context, orderTrackingID string) (map[string]interface{}, error) {
 	query := `
-		SELECT order_tracking_id, customer_tracking_id, vendor_tracking_id,
-			store_tracking_id, customer_lat, customer_lng, total_amount,
-			payment_gateway, payment_status, status
-		FROM orders
-		WHERE order_tracking_id = $1
+		SELECT o.order_tracking_id, o.customer_tracking_id, o.vendor_tracking_id,
+			o.store_tracking_id, o.customer_lat, o.customer_lng, 
+			COALESCE(o.total_amount_paisa, 0) AS total_amount_paisa,
+			o.payment_gateway, o.payment_status, o.status,
+			COALESCE(u.name, u.first_name || ' ' || u.last_name, 'Customer') AS customer_name,
+			COALESCE(o.delivery_address, '') AS customer_address,
+			COALESCE(o.customer_phone, '') AS customer_phone
+		FROM orders o
+		LEFT JOIN users u ON u.tracking_id = o.customer_tracking_id
+		WHERE o.order_tracking_id = $1
 	`
 	row := r.reader.QueryRow(ctx, query, orderTrackingID)
 
 	var orderTracking, customerID, vendorID, storeID string
 	var customerLat, customerLng float64
-	var totalAmount int64
+	var totalAmountPaisa int64
 	var paymentGateway, paymentStatus, status string
+	var customerName, customerAddress, customerPhone string
 
 	err := row.Scan(
 		&orderTracking, &customerID, &vendorID, &storeID,
-		&customerLat, &customerLng, &totalAmount,
+		&customerLat, &customerLng, &totalAmountPaisa,
 		&paymentGateway, &paymentStatus, &status,
+		&customerName, &customerAddress, &customerPhone,
 	)
 	if err != nil {
 		return nil, err
 	}
 
 	result := map[string]interface{}{
-		"order_tracking_id":  orderTracking,
+		"order_tracking_id":   orderTracking,
 		"customer_tracking_id": customerID,
-		"vendor_tracking_id": vendorID,
-		"store_tracking_id":  storeID,
-		"customer_lat":       customerLat,
-		"customer_lng":       customerLng,
-		"total_amount":       totalAmount,
-		"payment_gateway":    paymentGateway,
-		"payment_status":     paymentStatus,
-		"status":             status,
+		"vendor_tracking_id":  vendorID,
+		"store_tracking_id":   storeID,
+		"customer_lat":        customerLat,
+		"customer_lng":        customerLng,
+		"total_amount_paisa":  totalAmountPaisa,
+		"payment_gateway":     paymentGateway,
+		"payment_status":      paymentStatus,
+		"status":              status,
+		"customer_name":       customerName,
+		"customer_address":    customerAddress,
+		"customer_phone":      customerPhone,
 	}
 
 	return result, nil
@@ -457,6 +486,7 @@ func (r *ReturnRepository) ListReturns(ctx context.Context, status string, limit
 			&verifiedAt, &completedAt, &returnFee, &payStatus,
 			&createdAt, &updatedAt)
 		if err != nil {
+			log.Printf("[ReturnRepo] Warning: failed to scan return row: %v", err)
 			continue
 		}
 

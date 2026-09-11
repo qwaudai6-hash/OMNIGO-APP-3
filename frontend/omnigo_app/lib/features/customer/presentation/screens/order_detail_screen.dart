@@ -296,7 +296,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
           final item = items[idx];
           return {
             'product_tracking_id': item['product_tracking_id'] ?? item['product_id'] ?? '',
-            'name': item['name'] ?? item['product_name'] ?? '',
+            'product_name': item['name'] ?? item['product_name'] ?? '',
             'quantity': item['quantity'] ?? 1,
             'unit_price_paisa': item['unit_price_paisa'] ?? item['price_paisa'] ?? 0,
           };
@@ -305,7 +305,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
         final body = {
           'order_tracking_id': orderId,
           'reason': reasonController.text.trim().isNotEmpty ? reasonController.text.trim() : 'Customer requested',
-          'items': returnItems,
+          'return_items': returnItems,
         };
         await sl<ApiClient>().post(ApiEndpoints.customerReturnRequest(orderId), body);
         if (mounted) {

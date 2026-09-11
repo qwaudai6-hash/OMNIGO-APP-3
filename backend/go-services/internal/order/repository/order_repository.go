@@ -606,11 +606,13 @@ func (r *OrderRepository) UpdateOrderStatus(ctx context.Context, trackingID stri
 	// so the escrow release cron can pick it up. Previously MarkOrderDelivered
 	// wrote directly then called UpdateOrderStatus, causing the Kafka event to
 	// be silently dropped (early return on same-status check).
+	// RETURN FIX: Also set return_deadline = NOW() + 36 hours when delivered.
 	query := `
 		UPDATE orders
 		SET status = $1,
 		    updated_at = NOW(),
-		    delivered_at = CASE WHEN $1 = 'delivered' THEN NOW() ELSE delivered_at END
+		    delivered_at = CASE WHEN $1 = 'delivered' THEN NOW() ELSE delivered_at END,
+		    return_deadline = CASE WHEN $1 = 'delivered' THEN NOW() + INTERVAL '36 hours' ELSE return_deadline END
 		WHERE order_tracking_id = $2
 		  AND status <> $1
 		  AND NOT (status IN ('cancelled', 'failed', 'refunded', 'returned') AND $1 <> 'refunded')
@@ -643,11 +645,13 @@ var ErrNoStatusChange = errors.New("order status unchanged (terminal state or du
 // MarkOrderDelivered sets status to 'delivered' AND stamps delivered_at
 // in a single transaction. BUG-05 FIX: Enforces state machine — only
 // allows transition from shipped/in_transit/delivered.
+// RETURN FIX: Also sets return_deadline = NOW() + 36 hours.
 func (r *OrderRepository) MarkOrderDelivered(ctx context.Context, trackingID string) error {
 	query := `
 		UPDATE orders
 		SET status = 'delivered',
 		    delivered_at = NOW(),
+		    return_deadline = NOW() + INTERVAL '36 hours',
 		    updated_at = NOW()
 		WHERE order_tracking_id = $1
 		  AND status IN ('shipped', 'in_transit', 'delivered')

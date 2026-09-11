@@ -64,9 +64,18 @@ func (h *ReturnHandler) GetReturnRequest(c *gin.Context) {
 		return
 	}
 
+	callerID := middleware.GetTrackingID(c)
+	role := middleware.GetRole(c)
+
 	returnReq, err := h.svc.GetReturnRequest(c.Request.Context(), id)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Ownership check: only the customer, assigned rider, vendor, or admin can view
+	if role != "admin" && returnReq.CustomerTrackingID != callerID && returnReq.RiderTrackingID != callerID && returnReq.VendorTrackingID != callerID {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "FORBIDDEN: you do not have access to this return"})
 		return
 	}
 
@@ -81,9 +90,18 @@ func (h *ReturnHandler) GetReturnByOrder(c *gin.Context) {
 		return
 	}
 
+	callerID := middleware.GetTrackingID(c)
+	role := middleware.GetRole(c)
+
 	returnReq, err := h.svc.GetReturnByOrderID(c.Request.Context(), orderID)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Ownership check
+	if role != "admin" && returnReq.CustomerTrackingID != callerID && returnReq.RiderTrackingID != callerID && returnReq.VendorTrackingID != callerID {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "FORBIDDEN: you do not have access to this return"})
 		return
 	}
 
@@ -157,7 +175,7 @@ func (h *ReturnHandler) CompletePickup(c *gin.Context) {
 		return
 	}
 
-	if err := h.svc.RecordPickup(c.Request.Context(), id, req.PhotoURL); err != nil {
+	if err := h.svc.RecordPickup(c.Request.Context(), id, req.PhotoURL, req.OTPCode); err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -301,6 +319,19 @@ func (h *ReturnHandler) CancelReturn(c *gin.Context) {
 	if callerID == "" || role == "" {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "AUTH_TOKEN_INVALID"})
 		return
+	}
+
+	// Ownership check: only the customer who owns the return or an admin can cancel
+	if role != "admin" {
+		current, err := h.svc.GetReturnRequest(c.Request.Context(), id)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "RETURN_NOT_FOUND"})
+			return
+		}
+		if current.CustomerTrackingID != callerID {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "FORBIDDEN: you can only cancel your own return"})
+			return
+		}
 	}
 
 	if err := h.svc.CancelReturn(c.Request.Context(), id); err != nil {

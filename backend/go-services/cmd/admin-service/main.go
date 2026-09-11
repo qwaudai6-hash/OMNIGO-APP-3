@@ -22,6 +22,7 @@ import (
 
 	"github.com/omnigo/backend/internal/admin"
 	"github.com/omnigo/backend/internal/analytics"
+	"github.com/omnigo/backend/internal/escrow"
 	"github.com/omnigo/backend/internal/ledger"
 	"github.com/omnigo/backend/internal/shared/cache"
 	"github.com/omnigo/backend/internal/shared/config"
@@ -196,6 +197,9 @@ func main() {
 		log.Printf("[SECURITY-AUDIT] [TraceID: %s] Admin Access: %s %s", traceID, c.Request.Method, c.Request.URL.Path)
 		c.Next()
 	})
+
+	// Init escrow service (needs rdb for Redis-backed hold index)
+	escrowSvc := escrow.NewService(dbPool, ledgerSvc, rdb)
 
 	// ── Admin API (JWT + role=admin required + rate limit) ──────
 	adminRoutes := r.Group("/api/v1/admin")
@@ -1594,73 +1598,43 @@ func main() {
 		}
 
 		adminID := c.GetString("tracking_id")
+		disputeUUID := uuid.MustParse(disputeID)
 
 		if req.Decision == "customer_wins" {
-			// Refund to customer via escrow
-			// Note: In production, this would call escrowSvc.RefundForReturn()
-			// For now, we do it directly in the transaction
-			tx, txErr := dbPool.Begin(ctx)
-			if txErr != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to begin transaction"})
-				return
-			}
-			defer tx.Rollback(ctx)
-
-			// Update customer wallet
-			_, err = tx.Exec(ctx,
-				`INSERT INTO customer_wallet (customer_tracking_id, balance_paisa, lifetime_spent_paisa, updated_at)
-				 VALUES ($1, $2, 0, NOW())
-				 ON CONFLICT (customer_tracking_id)
-				 DO UPDATE SET balance_paisa = customer_wallet.balance_paisa + $2, updated_at = NOW()`,
-				customerID, amount)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to credit customer wallet"})
+			// Use escrow service for proper ledger transfer (BUG-09 FIX)
+			if err := escrowSvc.RefundDispute(ctx, disputeUUID); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to process refund: " + err.Error()})
 				return
 			}
 
-			// Mark escrow as refunded
-			_, err = tx.Exec(ctx,
-				`UPDATE escrow_holds SET status = 'refunded', released_at = NOW() 
-				 WHERE order_tracking_id = $1 AND status = 'disputed'`,
-				orderID)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update escrow"})
-				return
-			}
+			// Cancel COD debt if any
+			_, _ = dbPool.Exec(ctx,
+				`UPDATE cod_debts SET status = 'cancelled', settled_at = NOW()
+				 WHERE order_tracking_id = $1 AND status != 'cancelled'`, orderID)
 
 			// Update order payment status
-			_, err = tx.Exec(ctx,
-				`UPDATE orders SET payment_status = 'refunded', dispute_status = 'resolved', updated_at = NOW() 
-				 WHERE order_tracking_id = $1`,
-				orderID)
+			_, err = dbPool.Exec(ctx,
+				`UPDATE orders SET payment_status = 'refunded', dispute_status = 'resolved', updated_at = NOW()
+				 WHERE order_tracking_id = $1`, orderID)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update order"})
-				return
+				log.Printf("[Admin] Warning: failed to update order %s: %v", orderID, err)
 			}
 
 			// Update dispute resolution
-			_, err = tx.Exec(ctx,
+			_, err = dbPool.Exec(ctx,
 				`UPDATE disputes SET status = 'resolved', resolution = 'admin_customer_wins',
 				 resolved_at = NOW(), resolved_by = $1, updated_at = NOW() WHERE id = $2`,
 				adminID, disputeID)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update dispute"})
-				return
+				log.Printf("[Admin] Warning: failed to update dispute %s: %v", disputeID, err)
 			}
 
 			// Update return status
-			_, err = tx.Exec(ctx,
-				`UPDATE return_requests SET status = 'return_completed', dispute_resolved_at = NOW(), updated_at = NOW() 
-				 WHERE id = $1`,
-				returnID)
+			_, err = dbPool.Exec(ctx,
+				`UPDATE return_requests SET status = 'return_completed', dispute_resolved_at = NOW(), updated_at = NOW()
+				 WHERE id = $1`, returnID)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update return"})
-				return
-			}
-
-			if err := tx.Commit(ctx); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit transaction"})
-				return
+				log.Printf("[Admin] Warning: failed to update return %s: %v", returnID, err)
 			}
 
 			// Audit log
@@ -1675,57 +1649,35 @@ func main() {
 				"refund":   amount,
 			})
 		} else {
-			// Vendor wins - unfreeze escrow
-			tx, txErr := dbPool.Begin(ctx)
-			if txErr != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to begin transaction"})
-				return
-			}
-			defer tx.Rollback(ctx)
-
-			// Unfreeze escrow (set back to held)
-			_, err = tx.Exec(ctx,
-				`UPDATE escrow_holds SET status = 'held', dispute_id = NULL 
-				 WHERE order_tracking_id = $1 AND status = 'disputed'`,
-				orderID)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to unfreeze escrow"})
+			// Vendor wins - unfreeze escrow and re-add to Redis index (BUG-10 FIX)
+			if err := escrowSvc.UnfreezeOnRejection(ctx, disputeUUID); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to unfreeze escrow: " + err.Error()})
 				return
 			}
 
 			// Update dispute resolution
-			_, err = tx.Exec(ctx,
+			_, err = dbPool.Exec(ctx,
 				`UPDATE disputes SET status = 'resolved', resolution = 'admin_vendor_wins',
 				 resolved_at = NOW(), resolved_by = $1, updated_at = NOW() WHERE id = $2`,
 				adminID, disputeID)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update dispute"})
-				return
+				log.Printf("[Admin] Warning: failed to update dispute %s: %v", disputeID, err)
 			}
 
 			// Update return status
-			_, err = tx.Exec(ctx,
-				`UPDATE return_requests SET status = 'return_completed', dispute_resolved_at = NOW(), updated_at = NOW() 
-				 WHERE id = $1`,
-				returnID)
+			_, err = dbPool.Exec(ctx,
+				`UPDATE return_requests SET status = 'return_completed', dispute_resolved_at = NOW(), updated_at = NOW()
+				 WHERE id = $1`, returnID)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update return"})
-				return
+				log.Printf("[Admin] Warning: failed to update return %s: %v", returnID, err)
 			}
 
 			// Update order dispute status
-			_, err = tx.Exec(ctx,
-				`UPDATE orders SET dispute_status = 'resolved', updated_at = NOW() 
-				 WHERE order_tracking_id = $1`,
-				orderID)
+			_, err = dbPool.Exec(ctx,
+				`UPDATE orders SET dispute_status = 'resolved', updated_at = NOW()
+				 WHERE order_tracking_id = $1`, orderID)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update order"})
-				return
-			}
-
-			if err := tx.Commit(ctx); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit transaction"})
-				return
+				log.Printf("[Admin] Warning: failed to update order %s: %v", orderID, err)
 			}
 
 			// Audit log

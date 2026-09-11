@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -119,6 +120,12 @@ func (s *ReturnService) handleVendorPenalty(ctx context.Context, vendorID string
 			return
 		}
 
+		// Set Redis TTL for auto-reactivation after 24 hours
+		if s.rdb != nil {
+			suspensionKey := fmt.Sprintf("vendor:suspended:%s", vendorID)
+			s.rdb.Set(ctx, suspensionKey, "dispute_penalty", 24*time.Hour)
+		}
+
 		// Notify vendor
 		s.emitEvent(ctx, "vendor.store_suspended", vendorID, map[string]interface{}{
 			"vendor_id":       vendorID,
@@ -228,6 +235,7 @@ func (s *ReturnService) RequestReturn(
 		CustomerTrackingID:    customerID,
 		VendorTrackingID:      orderData["vendor_tracking_id"].(string),
 		StoreTrackingID:       orderData["store_tracking_id"].(string),
+		PaymentMethod:         fmt.Sprintf("%v", orderData["payment_gateway"]),
 		Reason:                reason,
 		ReturnItems:           returnItemsJSON,
 		Status:                models.ReturnStatusRequested,
@@ -264,6 +272,20 @@ func (s *ReturnService) RequestReturn(
 		}
 	}
 
+	// Build items summary for rider
+	itemsSummary := fmt.Sprintf("%d item(s) - Reason: %s", len(returnItems), reason)
+	if len(returnItems) > 0 {
+		var names []string
+		for _, item := range returnItems {
+			if item.ProductName != "" {
+				names = append(names, item.ProductName)
+			}
+		}
+		if len(names) > 0 {
+			itemsSummary = fmt.Sprintf("%d item(s): %s", len(returnItems), strings.Join(names, ", "))
+		}
+	}
+
 	// 10. Emit Kafka event for delivery-service to create return gig
 	event := map[string]interface{}{
 		"return_request_id":    req.ID,
@@ -278,7 +300,7 @@ func (s *ReturnService) RequestReturn(
 		"customer_lat":         orderData["customer_lat"],
 		"customer_lng":         orderData["customer_lng"],
 		"return_fee_paisa":     returnFeePaisa,
-		"items_summary":        "",
+		"items_summary":        itemsSummary,
 		"timestamp":            time.Now().UnixMilli(),
 	}
 	s.emitEvent(ctx, "orders.return_requested", orderTrackingID, event)
@@ -296,7 +318,7 @@ func (s *ReturnService) GetReturnByOrderID(ctx context.Context, orderTrackingID 
 	return s.repo.GetReturnRequestByOrderID(ctx, orderTrackingID)
 }
 
-// UpdateStatus updates the return request status with transition validation.
+// UpdateStatus updates the return request status with transition validation and optimistic locking.
 func (s *ReturnService) UpdateStatus(ctx context.Context, id, newStatus string) error {
 	current, err := s.repo.GetReturnRequestByID(ctx, id)
 	if err != nil {
@@ -307,7 +329,7 @@ func (s *ReturnService) UpdateStatus(ctx context.Context, id, newStatus string) 
 		return fmt.Errorf("invalid transition from '%s' to '%s'", current.Status, newStatus)
 	}
 
-	return s.repo.UpdateReturnStatus(ctx, id, newStatus)
+	return s.repo.UpdateReturnStatus(ctx, id, newStatus, current.Status)
 }
 
 // AssignRider assigns a rider to a return pickup.
@@ -324,8 +346,8 @@ func (s *ReturnService) AssignRider(ctx context.Context, id, riderTrackingID, gi
 	return s.repo.AssignRider(ctx, id, riderTrackingID, gigTrackingID)
 }
 
-// RecordPickup records the rider's pickup with photo proof.
-func (s *ReturnService) RecordPickup(ctx context.Context, id, photoURL string) error {
+// RecordPickup records the rider's pickup with photo proof and OTP validation.
+func (s *ReturnService) RecordPickup(ctx context.Context, id, photoURL, otpCode string) error {
 	current, err := s.repo.GetReturnRequestByID(ctx, id)
 	if err != nil {
 		return err
@@ -333,6 +355,15 @@ func (s *ReturnService) RecordPickup(ctx context.Context, id, photoURL string) e
 
 	if !models.IsValidReturnTransition(current.Status, models.ReturnStatusPickupCompleted) {
 		return fmt.Errorf("cannot record pickup in '%s' status", current.Status)
+	}
+
+	// OTP validation: fetch order's delivery OTP and verify
+	orderOTP, otpErr := s.repo.GetOrderOTP(ctx, current.OrderTrackingID)
+	if otpErr != nil {
+		log.Printf("[RETURN-%s] Warning: could not fetch OTP for validation: %v", current.OrderTrackingID, otpErr)
+		// Continue without OTP validation if lookup fails (best-effort)
+	} else if orderOTP != "" && otpCode != orderOTP {
+		return fmt.Errorf("OTP_INVALID: provided OTP does not match order OTP")
 	}
 
 	return s.repo.RecordPickupPhoto(ctx, id, photoURL)
@@ -373,7 +404,7 @@ func (s *ReturnService) VerifyByVendor(
 	}
 
 	if verified {
-		// APPROVE: Trigger refund to customer
+		// APPROVE: Trigger refund to customer and auto-complete
 		if err := s.repo.VerifyByVendor(ctx, id, verified, photoURL, notes); err != nil {
 			return err
 		}
@@ -396,10 +427,21 @@ func (s *ReturnService) VerifyByVendor(
 			}
 		}
 
+		// Auto-complete the return after successful refund
+		if err := s.repo.UpdateReturnStatus(ctx, id, models.ReturnStatusCompleted, models.ReturnStatusVerified); err != nil {
+			log.Printf("[RETURN-%s] Warning: failed to auto-complete return: %v", current.OrderTrackingID, err)
+		}
+
 		s.emitEvent(ctx, "return.verified", current.OrderTrackingID, map[string]interface{}{
 			"return_request_id": id,
 			"order_tracking_id": current.OrderTrackingID,
 			"status":            "verified",
+			"timestamp":         time.Now().UnixMilli(),
+		})
+		s.emitEvent(ctx, "return.completed", current.OrderTrackingID, map[string]interface{}{
+			"return_request_id": id,
+			"order_tracking_id": current.OrderTrackingID,
+			"status":            "completed",
 			"timestamp":         time.Now().UnixMilli(),
 		})
 	} else {
@@ -505,6 +547,13 @@ func (s *ReturnService) CancelReturn(ctx context.Context, id string) error {
 
 	if !models.IsValidReturnTransition(current.Status, models.ReturnStatusCancelled) {
 		return fmt.Errorf("cannot cancel in '%s' status", current.Status)
+	}
+
+	// Release escrow hold if one was created for this return
+	if s.escrow != nil {
+		if err := s.escrow.CancelForOrder(ctx, current.OrderTrackingID); err != nil {
+			log.Printf("[Return] Warning: failed to release escrow on cancel for order %s: %v", current.OrderTrackingID, err)
+		}
 	}
 
 	return s.repo.CancelReturn(ctx, id)
