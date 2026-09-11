@@ -319,10 +319,21 @@ func (h *VendorHandler) RequestWithdraw(c *gin.Context) {
 		return
 	}
 
+	// CLAWBACK FIX: Deduct pending clawback from available balance
+	var clawbackPaisa int64
+	_ = tx.QueryRow(ctx,
+		`SELECT COALESCE(vendor_clawback_paisa, 0) FROM vendor_wallet WHERE vendor_tracking_id = $1`,
+		req.VendorTrackingID,
+	).Scan(&clawbackPaisa)
+
 	// Convert request amount (rupees) to paisa for comparison
 	amountPaisa := int64(req.Amount * 100)
-	if balancePaisa < amountPaisa {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "insufficient withdrawable balance"})
+	availableBalance := balancePaisa - clawbackPaisa
+	if availableBalance < 0 {
+		availableBalance = 0
+	}
+	if availableBalance < amountPaisa {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("insufficient withdrawable balance (available: %d, requested: %d, pending clawback: %d)", availableBalance, amountPaisa, clawbackPaisa)})
 		return
 	}
 

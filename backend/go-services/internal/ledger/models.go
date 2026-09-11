@@ -25,6 +25,7 @@ const (
 	AccountStripeHolding       Account = "stripe_holding_account"
 	AccountPayFastHolding      Account = "payfast_holding_account"
 	AccountVendorBankPayout    Account = "vendor_bank_payout_account"
+	AccountVendorClawback      Account = "vendor_clawback_account"
 )
 
 // ValidAccounts is the set of all recognized ledger accounts.
@@ -44,6 +45,7 @@ var ValidAccounts = map[Account]bool{
 	AccountStripeHolding:       true,
 	AccountPayFastHolding:      true,
 	AccountVendorBankPayout:    true,
+	AccountVendorClawback:      true,
 }
 
 // LedgerEntry represents a single double-entry ledger row.

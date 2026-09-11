@@ -554,20 +554,40 @@ func (s *Service) CreateReturnHold(ctx context.Context, orderID, vendorID string
 // RefundForReturn executes a double-entry ledger refund to the customer for a verified return.
 // Similar to RefundDispute but for return-verified orders.
 // For COD orders where rider hasn't settled (no escrow hold), uses refundCODReturn fallback.
+// For orders where escrow was already released to vendor, uses ClawbackFromVendor (Shopify model).
 func (s *Service) RefundForReturn(ctx context.Context, orderTrackingID string, amount int64) error {
-	// Check if this is a COD order
+	// Check if this is a COD order and if escrow was released
 	var paymentGateway string
-	_ = s.db.QueryRow(ctx, `SELECT payment_gateway FROM orders WHERE order_tracking_id = $1`, orderTrackingID).Scan(&paymentGateway)
+	var escrowReleased bool
+	var vendorID string
+	err := s.db.QueryRow(ctx,
+		`SELECT payment_gateway, COALESCE(escrow_released, FALSE), vendor_tracking_id
+		 FROM orders WHERE order_tracking_id = $1`, orderTrackingID,
+	).Scan(&paymentGateway, &escrowReleased, &vendorID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch order details: %w", err)
+	}
 	isCOD := strings.EqualFold(paymentGateway, "cod")
 
 	// Fetch hold details
 	var hold EscrowHold
-	err := s.db.QueryRow(ctx,
+	err = s.db.QueryRow(ctx,
 		`SELECT id, order_tracking_id, vendor_tracking_id, amount, status, hold_until, created_at
 		 FROM escrow_holds WHERE order_tracking_id = $1 AND status IN ('held', 'disputed')`,
 		orderTrackingID,
 	).Scan(&hold.ID, &hold.OrderTrackingID, &hold.VendorTrackingID, &hold.Amount, &hold.Status, &hold.HoldUntil, &hold.CreatedAt)
 	if err != nil {
+		if escrowReleased {
+			// Escrow was released to vendor — clawback from vendor wallet (Shopify model)
+			refundAmount := amount
+			if refundAmount == 0 {
+				// Get amount from order
+				var orderAmount int64
+				_ = s.db.QueryRow(ctx, `SELECT COALESCE(total_amount_paisa, 0) FROM orders WHERE order_tracking_id = $1`, orderTrackingID).Scan(&orderAmount)
+				refundAmount = orderAmount
+			}
+			return s.ClawbackFromVendor(ctx, orderTrackingID, vendorID, refundAmount)
+		}
 		if isCOD {
 			// COD fallback: no escrow hold exists (rider hasn't settled)
 			return s.refundCODReturn(ctx, orderTrackingID, amount)
@@ -768,6 +788,49 @@ func (s *Service) refundCODReturn(ctx context.Context, orderTrackingID string, a
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
+
+	return nil
+}
+
+// ClawbackFromVendor debits vendor_clawback_paisa when a return is verified
+// after escrow has already been released to the vendor. The clawback amount
+// is deducted from the vendor's next payout (Shopify model).
+func (s *Service) ClawbackFromVendor(ctx context.Context, orderTrackingID string, vendorID string, amount int64) error {
+	if amount <= 0 {
+		return fmt.Errorf("clawback amount must be positive, got %d", amount)
+	}
+
+	// 1. Ledger transfer: vendor_clawback → customer_wallet
+	idempotencyKey := fmt.Sprintf("clawback:%s", orderTrackingID)
+	_, err := s.ledger.Transfer(ctx, ledger.TransferRequest{
+		DebitAccount:   ledger.AccountVendorClawback,
+		CreditAccount:  ledger.AccountCustomerWallet,
+		Amount:         amount,
+		Currency:       "PKR",
+		ReferenceType:  "vendor_clawback",
+		ReferenceID:    orderTrackingID,
+		Description:    fmt.Sprintf("Vendor clawback for return order %s", orderTrackingID),
+		IdempotencyKey: idempotencyKey,
+	})
+	if err != nil {
+		return fmt.Errorf("vendor clawback ledger transfer failed: %w", err)
+	}
+
+	// 2. Debit vendor_clawback_paisa (deducted from next payout)
+	tag, err := s.db.Exec(ctx,
+		`UPDATE vendor_wallet SET vendor_clawback_paisa = vendor_clawback_paisa + $1, updated_at = NOW()
+		 WHERE vendor_tracking_id = $2`,
+		amount, vendorID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update vendor clawback: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("vendor_wallet not found for vendor %s", vendorID)
+	}
+
+	fmt.Printf("[CLAWBACK] Vendor %s: clawback %d paisa for order %s (deducted from next payout)\n",
+		vendorID, amount, orderTrackingID)
 
 	return nil
 }

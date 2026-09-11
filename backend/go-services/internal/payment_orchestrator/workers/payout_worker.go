@@ -156,14 +156,30 @@ func (w *PayoutWorker) processPayouts(ctx context.Context) {
 		if err != nil {
 			walletBalance = 0 // no wallet row = nothing withdrawable
 		}
+
+		// CLAWBACK FIX: Deduct pending clawback from available balance
+		// (Shopify model — vendor pays back from future earnings)
+		var clawbackPaisa int64
+		err = tx.QueryRow(ctx,
+			`SELECT COALESCE(vendor_clawback_paisa, 0) FROM vendor_wallet WHERE vendor_tracking_id = $1`,
+			vendorID,
+		).Scan(&clawbackPaisa)
+		if err != nil {
+			clawbackPaisa = 0
+		}
+		availableBalance := walletBalance - clawbackPaisa
+		if availableBalance < 0 {
+			availableBalance = 0
+		}
+
 		sweepAmount := totalReleasedInTx
-		if sweepAmount > walletBalance {
-			sweepAmount = walletBalance
+		if sweepAmount > availableBalance {
+			sweepAmount = availableBalance
 			if sweepAmount < 0 {
 				sweepAmount = 0
 			}
-			fmt.Printf("[PayoutWorker] Vendor %s: released %d paisa but wallet only has %d paisa (manual withdrawal already debited) — sweeping %d paisa\n",
-				vendorID, totalReleasedInTx, walletBalance, sweepAmount)
+			fmt.Printf("[PayoutWorker] Vendor %s: released %d paisa but available %d (wallet %d - clawback %d) — sweeping %d paisa\n",
+				vendorID, totalReleasedInTx, availableBalance, walletBalance, clawbackPaisa, sweepAmount)
 		}
 
 		// Identify the specific holds that fit within sweepAmount, oldest
