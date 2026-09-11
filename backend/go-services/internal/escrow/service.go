@@ -553,7 +553,13 @@ func (s *Service) CreateReturnHold(ctx context.Context, orderID, vendorID string
 
 // RefundForReturn executes a double-entry ledger refund to the customer for a verified return.
 // Similar to RefundDispute but for return-verified orders.
+// For COD orders where rider hasn't settled (no escrow hold), uses refundCODReturn fallback.
 func (s *Service) RefundForReturn(ctx context.Context, orderTrackingID string, amount int64) error {
+	// Check if this is a COD order
+	var paymentGateway string
+	_ = s.db.QueryRow(ctx, `SELECT payment_gateway FROM orders WHERE order_tracking_id = $1`, orderTrackingID).Scan(&paymentGateway)
+	isCOD := strings.EqualFold(paymentGateway, "cod")
+
 	// Fetch hold details
 	var hold EscrowHold
 	err := s.db.QueryRow(ctx,
@@ -562,6 +568,10 @@ func (s *Service) RefundForReturn(ctx context.Context, orderTrackingID string, a
 		orderTrackingID,
 	).Scan(&hold.ID, &hold.OrderTrackingID, &hold.VendorTrackingID, &hold.Amount, &hold.Status, &hold.HoldUntil, &hold.CreatedAt)
 	if err != nil {
+		if isCOD {
+			// COD fallback: no escrow hold exists (rider hasn't settled)
+			return s.refundCODReturn(ctx, orderTrackingID, amount)
+		}
 		return fmt.Errorf("escrow hold not found for order %s: %w", orderTrackingID, err)
 	}
 
@@ -652,6 +662,106 @@ func (s *Service) RefundForReturn(ctx context.Context, orderTrackingID string, a
 
 	// Remove from Redis index
 	_ = s.index.Remove(ctx, hold.ID.String())
+
+	return nil
+}
+
+
+// refundCODReturn handles COD orders where no escrow hold exists (rider hasn't settled).
+// Credits customer wallet directly, cancels COD debt, decrements rider's cash_in_hand.
+func (s *Service) refundCODReturn(ctx context.Context, orderTrackingID string, amount int64) error {
+	// 1. Get order details
+	var customerID, vendorID string
+	var paymentGateway string
+	var holdAmount int64
+	err := s.db.QueryRow(ctx,
+		`SELECT customer_tracking_id, vendor_tracking_id, payment_gateway, COALESCE(total_amount_paisa, 0)
+		 FROM orders WHERE order_tracking_id = $1`, orderTrackingID,
+	).Scan(&customerID, &vendorID, &paymentGateway, &holdAmount)
+	if err != nil {
+		return fmt.Errorf("failed to fetch order: %w", err)
+	}
+
+	// Use order total if amount is 0
+	refundAmount := amount
+	if refundAmount == 0 {
+		refundAmount = holdAmount
+	}
+
+	// 2. Get rider_tracking_id from cod_debts
+	var riderID string
+	_ = s.db.QueryRow(ctx,
+		`SELECT rider_tracking_id FROM cod_debts WHERE order_tracking_id = $1 AND status != 'cancelled' LIMIT 1`,
+		orderTrackingID,
+	).Scan(&riderID)
+
+	// 3. Ledger transfer: rider_cod_debt -> cash_receivable (reverse the debt)
+	idempotencyKey := fmt.Sprintf("cod:return:%s", orderTrackingID)
+	_, _ = s.ledger.Transfer(ctx, ledger.TransferRequest{
+		DebitAccount:   ledger.AccountRiderCODDebt,
+		CreditAccount:  ledger.AccountCashReceivable,
+		Amount:         refundAmount,
+		Currency:       "PKR",
+		ReferenceType:  "cod_return_reversal",
+		ReferenceID:    orderTrackingID,
+		Description:    fmt.Sprintf("COD return reversal for order %s", orderTrackingID),
+		IdempotencyKey: idempotencyKey,
+	})
+
+	// 4. DB Transaction
+	tx, txErr := s.db.Begin(ctx)
+	if txErr != nil {
+		return fmt.Errorf("failed to begin transaction: %w", txErr)
+	}
+	defer tx.Rollback(ctx)
+
+	// a. Credit customer wallet
+	_, err = tx.Exec(ctx,
+		`INSERT INTO customer_wallet (customer_tracking_id, balance_paisa, lifetime_spent_paisa, updated_at)
+		 VALUES ($1, $2, 0, NOW())
+		 ON CONFLICT (customer_tracking_id)
+		 DO UPDATE SET balance_paisa = customer_wallet.balance_paisa + $2, updated_at = NOW()`,
+		customerID, refundAmount,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to credit customer wallet: %w", err)
+	}
+
+	// b. Cancel COD debts
+	_, err = tx.Exec(ctx,
+		`UPDATE cod_debts SET status = 'cancelled', settled_at = NOW()
+		 WHERE order_tracking_id = $1 AND status != 'cancelled'`,
+		orderTrackingID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to cancel COD debts: %w", err)
+	}
+
+	// c. Decrement rider's cash_in_hand
+	if riderID != "" {
+		_, err = tx.Exec(ctx,
+			`UPDATE rider_wallet SET cash_in_hand_paisa = GREATEST(0, cash_in_hand_paisa - $1), updated_at = NOW()
+			 WHERE rider_tracking_id = $2`,
+			refundAmount, riderID,
+		)
+		if err != nil {
+			fmt.Printf("[COD-RETURN] Warning: failed to decrement rider cash_in_hand: %v\n", err)
+		}
+	}
+
+	// d. Update order payment status
+	_, err = tx.Exec(ctx,
+		`UPDATE orders SET payment_status = 'refunded', updated_at = NOW() WHERE order_tracking_id = $1`,
+		orderTrackingID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update order payment_status: %w", err)
+	}
+
+	// 5. Commit
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
 
 	return nil
 }
