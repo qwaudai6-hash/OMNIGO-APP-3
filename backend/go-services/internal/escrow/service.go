@@ -276,7 +276,10 @@ func (s *Service) processHoldTx(ctx context.Context, tx pgx.Tx, holdID uuid.UUID
 		).Scan(&codDebtStatus)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				_, _ = tx.Exec(ctx, `UPDATE escrow_holds SET status = 'held', updated_at = NOW() WHERE id = $1`, holdID)
+				if _, revertErr := tx.Exec(ctx, `UPDATE escrow_holds SET status = 'held', updated_at = NOW() WHERE id = $1`, holdID); revertErr != nil {
+					_ = tx.Rollback(ctx)
+					return fmt.Errorf("failed to revert hold for COD order %s: %w", orderID, revertErr)
+				}
 				_ = tx.Commit(ctx)
 				fmt.Printf("[Escrow] Skipping release for COD order %s — no cod_debts record found\n", orderID)
 				return nil
@@ -285,14 +288,20 @@ func (s *Service) processHoldTx(ctx context.Context, tx pgx.Tx, holdID uuid.UUID
 			return fmt.Errorf("failed to check cod_debts for order %s: %w", orderID, err)
 		}
 		if !strings.EqualFold(codDebtStatus, "settled") {
-			_, _ = tx.Exec(ctx, `UPDATE escrow_holds SET status = 'held', updated_at = NOW() WHERE id = $1`, holdID)
+			if _, revertErr := tx.Exec(ctx, `UPDATE escrow_holds SET status = 'held', updated_at = NOW() WHERE id = $1`, holdID); revertErr != nil {
+				_ = tx.Rollback(ctx)
+				return fmt.Errorf("failed to revert hold for unsettled COD order %s: %w", orderID, revertErr)
+			}
 			_ = tx.Commit(ctx)
 			fmt.Printf("[Escrow] Skipping release for COD order %s — COD debt is not settled (status=%s)\n", orderID, codDebtStatus)
 			return nil
 		}
 	} else if paymentStatus != "" && !strings.EqualFold(paymentStatus, "paid") {
 		// Non-COD order: must have payment_status == 'paid'
-		_, _ = tx.Exec(ctx, `UPDATE escrow_holds SET status = 'held', updated_at = NOW() WHERE id = $1`, holdID)
+		if _, revertErr := tx.Exec(ctx, `UPDATE escrow_holds SET status = 'held', updated_at = NOW() WHERE id = $1`, holdID); revertErr != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("failed to revert hold for unpaid order %s: %w", orderID, revertErr)
+		}
 		_ = tx.Commit(ctx)
 		fmt.Printf("[Escrow] Skipping release for order %s — payment_status is not paid (%s)\n", orderID, paymentStatus)
 		return nil
@@ -557,12 +566,13 @@ func (s *Service) CreateReturnHold(ctx context.Context, orderID, vendorID string
 // For orders where escrow was already released to vendor, uses ClawbackFromVendor (Shopify model).
 func (s *Service) RefundForReturn(ctx context.Context, orderTrackingID string, amount int64) error {
 	// Check if this is a COD order and if escrow was released
+	// FIX [H-1]: Use FOR UPDATE to prevent race condition on concurrent returns
 	var paymentGateway string
 	var escrowReleased bool
 	var vendorID string
 	err := s.db.QueryRow(ctx,
 		`SELECT payment_gateway, COALESCE(escrow_released, FALSE), vendor_tracking_id
-		 FROM orders WHERE order_tracking_id = $1`, orderTrackingID,
+		 FROM orders WHERE order_tracking_id = $1 FOR UPDATE`, orderTrackingID,
 	).Scan(&paymentGateway, &escrowReleased, &vendorID)
 	if err != nil {
 		return fmt.Errorf("failed to fetch order details: %w", err)
@@ -710,10 +720,12 @@ func (s *Service) refundCODReturn(ctx context.Context, orderTrackingID string, a
 
 	// 3. Get rider_tracking_id from cod_debts
 	var riderID string
-	_ = s.db.QueryRow(ctx,
+	if riderErr := s.db.QueryRow(ctx,
 		`SELECT rider_tracking_id FROM cod_debts WHERE order_tracking_id = $1 AND status != 'cancelled' LIMIT 1`,
 		orderTrackingID,
-	).Scan(&riderID)
+	).Scan(&riderID); riderErr != nil {
+		fmt.Printf("[COD-RETURN] Warning: could not find rider_tracking_id for order %s: %v\n", orderTrackingID, riderErr)
+	}
 
 	// 4. DB Transaction
 	tx, txErr := s.db.Begin(ctx)

@@ -448,9 +448,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         );
         routingStatus = 'FALLBACK_HAVERSINE';
       } else {
-        // Default Karachi center coordinates
-        fee = _calculateHaversineFee(24.8607, 67.0011, _deliveryLocation!.latitude, _deliveryLocation!.longitude);
-        routingStatus = 'FALLBACK_HAVERSINE';
+        // Store location unknown — cannot calculate fallback fee
+        fee = 0.0;
+        routingStatus = 'NO_STORE_LOCATION';
       }
     }
 
@@ -465,10 +465,14 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   }
 
   Future<void> _submitOrder(CartProvider cart) async {
+    if (_isLoading) return;
+    setState(() => _isLoading = true);
+
     if (_deliveryLocation == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please wait for location to be fetched'), backgroundColor: Colors.orange),
       );
+      setState(() => _isLoading = false);
       return;
     }
 
@@ -481,10 +485,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           behavior: SnackBarBehavior.floating,
         ),
       );
+      setState(() => _isLoading = false);
       return;
     }
 
-    setState(() => _isLoading = true);
     _createdOrderTrackingId = null;
     try {
       final prefs = await SharedPreferences.getInstance();

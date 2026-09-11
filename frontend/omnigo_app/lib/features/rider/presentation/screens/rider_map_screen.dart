@@ -520,7 +520,7 @@ class RiderMapScreenState extends State<RiderMapScreen> with WidgetsBindingObser
     if (gigId == null) return;
     try {
       final response = await _apiClient.get(ApiEndpoints.deliveryGigRoute(gigId));
-      final data = jsonDecode(response as String) as Map<String, dynamic>;
+      final data = response is String ? jsonDecode(response) as Map<String, dynamic> : response as Map<String, dynamic>;
       final coordsList = data['coordinates'] as List<dynamic>?;
       final distance = data['distance_meters'] as num?;
       final duration = data['duration_seconds'] as num?;

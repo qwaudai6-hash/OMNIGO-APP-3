@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/network/api_client.dart';
+import '../../../../core/di/service_locator.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/services/cart_provider.dart';
 import '../../data/models/cart_item.dart';
@@ -75,7 +76,7 @@ class _MyOrdersScreenState extends State<MyOrdersScreen> with SingleTickerProvid
     });
 
     try {
-      final response = await ApiClient().get('/orders/customer/${widget.customerTrackingId}');
+      final response = await sl<ApiClient>().get('/orders/customer/${widget.customerTrackingId}');
       final List<dynamic> orders = response is List ? response : [];
       setState(() {
         if (reset) {

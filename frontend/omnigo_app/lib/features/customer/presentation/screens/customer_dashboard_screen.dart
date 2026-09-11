@@ -274,12 +274,8 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     _wsSub?.cancel();
     _wsOrderTopicSub?.cancel();
     _wsStateSub?.cancel();
-    // #29: Guard disconnect for singleton — only disconnect if this screen created the client
-    if (_wsClient != null) {
-      try {
-        _wsClient!.disconnect();
-      } catch (_) {}
-    }
+    // #29: Do NOT disconnect singleton WS client — it's shared across the app.
+    // Only cancel subscriptions; the singleton lifecycle is managed elsewhere.
     _riderMarkers.dispose();
     _scrollController.dispose();
     _mapSearchController.dispose();

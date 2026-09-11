@@ -351,6 +351,17 @@ func (r *DeliveryRepository) AcceptGigWithEligibility(ctx context.Context, track
 		}
 	}
 
+	// Block rider from accepting a new gig if they already have an active delivery.
+	var hasActiveDelivery bool
+	activeQuery := `SELECT EXISTS(SELECT 1 FROM deliveries WHERE rider_tracking_id = $1 AND status IN ('assigned', 'in_transit', 'picked_up'))`
+	err = tx.QueryRow(ctx, activeQuery, riderID).Scan(&hasActiveDelivery)
+	if err != nil {
+		return fmt.Errorf("failed to check active deliveries: %v", err)
+	}
+	if hasActiveDelivery {
+		return fmt.Errorf("conflict: rider already has an active delivery")
+	}
+
 	updateQuery := `
 		UPDATE deliveries
 		SET status = 'accepted', rider_tracking_id = $1, updated_at = NOW()

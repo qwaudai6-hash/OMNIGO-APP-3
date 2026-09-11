@@ -895,21 +895,47 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 
             // ── Return / Cancel Action ──────────────────────────────
             if (['pending', 'paid', 'accepted', 'shipped', 'in_transit', 'picked_up', 'completed', 'delivered'].contains(status)) ...[
-              SizedBox(
-                width: double.infinity,
-                child: OutlinedButton.icon(
-                  onPressed: _isSubmitting ? null : _requestRefundOrCancel,
-                  icon: const Icon(Icons.request_page_outlined, color: Colors.orange),
-                  label: Text(
-                    status == 'completed' || status == 'delivered' ? 'Request Return' : 'Cancel Order',
-                    style: const TextStyle(color: Colors.orange, fontWeight: FontWeight.bold),
-                  ),
-                  style: OutlinedButton.styleFrom(
-                    side: const BorderSide(color: Colors.orange),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                  ),
-                ),
+              Builder(
+                builder: (context) {
+                  final isReturnable = status == 'completed' || status == 'delivered';
+                  if (isReturnable) {
+                    final returnDeadline = _currentOrder['return_deadline'];
+                    if (returnDeadline != null) {
+                      final deadline = DateTime.tryParse(returnDeadline.toString());
+                      if (deadline != null && DateTime.now().isAfter(deadline)) {
+                        return OutlinedButton.icon(
+                          onPressed: null,
+                          icon: const Icon(Icons.request_page_outlined, color: Colors.grey),
+                          label: const Text(
+                            'Return window expired',
+                            style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold),
+                          ),
+                          style: OutlinedButton.styleFrom(
+                            side: const BorderSide(color: Colors.grey),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                          ),
+                        );
+                      }
+                    }
+                  }
+                  return SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: _isSubmitting ? null : _requestRefundOrCancel,
+                      icon: const Icon(Icons.request_page_outlined, color: Colors.orange),
+                      label: Text(
+                        isReturnable ? 'Request Return' : 'Cancel Order',
+                        style: const TextStyle(color: Colors.orange, fontWeight: FontWeight.bold),
+                      ),
+                      style: OutlinedButton.styleFrom(
+                        side: const BorderSide(color: Colors.orange),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                      ),
+                    ),
+                  );
+                },
               ),
               const SizedBox(height: 24),
             ],
