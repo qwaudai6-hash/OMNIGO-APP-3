@@ -524,12 +524,8 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 	// (Cards, JazzCash, EasyPaisa, Bank Transfer) without leaving the app.
 	if strings.Contains(s.payfast.BaseURL(), "apps.net.pk") {
 		publicBase := strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/")
-		returnURL := os.Getenv("WALLET_RETURN_URL")
-		if returnURL == "" && publicBase != "" {
-			returnURL = publicBase + "/api/v1/payments/payfast/ipn"
-		}
-		if returnURL == "" {
-			returnURL = s.checkoutURL
+		if publicBase == "" {
+			publicBase = strings.TrimRight(os.Getenv("PAYFAST_BASE_URL"), "/")
 		}
 
 		// 1. Acquire valid token from TokenManager cache (or fresh from PayFast)
@@ -540,7 +536,10 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 		}
 		accessToken, tokenErr := s.payfast.GetAuthToken(ctx, clientIP, tokenCtx)
 		if tokenErr != nil {
-			log.Printf("[PayFastService] Warning: token fetch error: %v — continuing with attempt", tokenErr)
+			return nil, fmt.Errorf("hosted checkout requires a valid access token: %w", tokenErr)
+		}
+		if accessToken == "" {
+			return nil, fmt.Errorf("hosted checkout: PayFast returned an empty access token")
 		}
 
 		formEndpoint := strings.TrimRight(s.payfast.BaseURL(), "/")
@@ -554,7 +553,27 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 
 		merchantName := s.payfast.MerchantName()
 		orderDate := time.Now().Format("2006-01-02 15:04:05")
-		signature := fmt.Sprintf("SIG-%s-%d", req.OrderID, time.Now().UnixNano())
+		amountStr := fmt.Sprintf("%.2f", float64(expectedAmountPaisa)/100.0)
+
+		// Real MD5 signature per PayFast official docs:
+		// SIGNATURE = MD5(merchant_id + ":" + merchant_name + ":" + amount + ":" + order_id)
+		signature := payfast.CalculateHostedCheckoutSignature(
+			s.payfast.MerchantID(), merchantName, amountStr, req.OrderID,
+		)
+
+		// CHECKOUT_URL: PayFast server-side POSTs IPN here. Must be a full URL.
+		// The MD5 signature is included so our IPN handler can verify authenticity.
+		ipnBase := publicBase + "/api/v1/payments/payfast/ipn"
+		checkoutURL := fmt.Sprintf("%s?signature=%s&order_id=%s", ipnBase, signature, url.QueryEscape(req.OrderID))
+
+		// SUCCESS_URL: customer browser redirect after successful payment.
+		// WebView navigation delegate detects 'ipn' + 'err_code=000' and pops the dialog.
+		successURL := fmt.Sprintf("%s?basket_id=%s&err_code=000", ipnBase, url.QueryEscape(req.OrderID))
+
+		// FAILURE_URL: customer browser redirect after failed payment.
+		// WebView navigation delegate detects 'ipn' but sees 'err_code=001' (failure),
+		// so the dialog stays open for the user to manually close.
+		failureURL := fmt.Sprintf("%s?basket_id=%s&err_code=001", ipnBase, url.QueryEscape(req.OrderID))
 
 		// 2. Build secure auto-submitting POST form HTML
 		formHTML := fmt.Sprintf(`<!DOCTYPE html>
@@ -581,20 +600,20 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
     <input type="hidden" name="MERCHANT_ID" value="%s" />
     <input type="hidden" name="MERCHANT_NAME" value="%s" />
     <input type="hidden" name="TOKEN" value="%s" />
-    <input type="hidden" name="BASKET_ID" value="%s" />
-    <input type="hidden" name="TXNAMT" value="%.2f" />
+    <input type="hidden" name="PROCCODE" value="00" />
+    <input type="hidden" name="TXNAMT" value="%s" />
     <input type="hidden" name="CURRENCY_CODE" value="PKR" />
     <input type="hidden" name="ORDER_DATE" value="%s" />
     <input type="hidden" name="SUCCESS_URL" value="%s" />
     <input type="hidden" name="FAILURE_URL" value="%s" />
-    <input type="hidden" name="CHECKOUT_URL" value="%s" />
-    <input type="hidden" name="CUSTOMER_EMAIL_ADDRESS" value="%s" />
-    <input type="hidden" name="CUSTOMER_MOBILE_NO" value="%s" />
+    <input type="hidden" name="BASKET_ID" value="%s" />
     <input type="hidden" name="SIGNATURE" value="%s" />
     <input type="hidden" name="VERSION" value="MERCHANTCART-0.1" />
     <input type="hidden" name="TXNDESC" value="OmniGo Order %s" />
-    <input type="hidden" name="PROCCODE" value="00" />
     <input type="hidden" name="TRAN_TYPE" value="ECOMM_PURCHASE" />
+    <input type="hidden" name="CUSTOMER_EMAIL_ADDRESS" value="%s" />
+    <input type="hidden" name="CUSTOMER_MOBILE_NO" value="%s" />
+    <input type="hidden" name="CHECKOUT_URL" value="%s" />
   </form>
   <script>
     window.onload = function() {
@@ -607,16 +626,16 @@ func (s *PayFastService) ProcessPayment(ctx context.Context, merchantUserID, cli
 			s.payfast.MerchantID(),
 			merchantName,
 			accessToken,
-			req.OrderID,
-			float64(expectedAmountPaisa)/100.0,
+			amountStr,
 			orderDate,
-			returnURL,
-			returnURL,
-			returnURL,
-			"", // Customer email address
-			authoritativeMobile,
+			successURL,
+			failureURL,
+			req.OrderID,
 			signature,
 			req.OrderID,
+			"", // Customer email address — optional; PayFast uses it for OTP delivery if set
+			authoritativeMobile,
+			checkoutURL,
 		)
 
 		// 3. Mark transaction as 3ds_required so IPN/3DS callbacks find it in an active state

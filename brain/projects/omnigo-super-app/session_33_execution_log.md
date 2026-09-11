@@ -153,3 +153,33 @@ Both `.env.example` and `backend/go-services/.env.railway.example` updated.
 - **float64 → integer-paisa money refactor** across ledger/escrow/orders — high-risk cross-cutting migration, needs its own dedicated session.
 - Monolith `strings.Contains` error mapping in other handlers (Stripe/COD) could adopt the same sentinel pattern used by PayFast.
 - `_coBought` unused fields in `product_details_screen.dart` (pre-existing analyzer warnings, unrelated).
+- **Customer email passthrough**: `CUSTOMER_EMAIL_ADDRESS` is hardcoded empty in hosted checkout form; pass from frontend request for OTP delivery.
+
+---
+
+## 🔧 Session 43 Addendum — Hosted Checkout (apps.net.pk) Fixes
+
+**Date:** Sep 11, 2026
+
+### PayFast Official Docs Comparison
+Compared implementation against: gopayfast.com/docs, Scribd integration guide, GitHub repos (zfhassaan/payfast, qbitechs/paygate_pk, RaRashed/payfast-php), and reference PHP samples.
+
+### Fixes Applied
+
+| # | Severity | Issue | Fix |
+|---|----------|-------|-----|
+| 1 | 🟠 HIGH | `SIGNATURE` was `SIG-{order_id}-{unixnano}` (fake) | Now uses real MD5: `MD5(merchant_id:merchant_name:amount:order_id)` per official PHP/Rails/PHP packages. New function `CalculateHostedCheckoutSignature()` in `signature.go:119`. |
+| 2 | 🟠 HIGH | `CHECKOUT_URL = SUCCESS_URL` (same URL for IPN and customer redirect) | `CHECKOUT_URL` now points to IPN endpoint with `?signature=<md5>&order_id=<order_id>` (server-side POST). `SUCCESS_URL` and `FAILURE_URL` are separate customer redirect URLs with `?err_code=000/001`. |
+| 3 | 🟠 HIGH | `FAILURE_URL = SUCCESS_URL` (failed payments redirect to success page) | `FAILURE_URL` now uses `?err_code=001` — WebView navigation delegate detects the error code and keeps the dialog open. |
+| 4 | 🟠 HIGH | Empty `TOKEN` when `GetAuthToken` fails (PayFast rejects the form) | Now returns error immediately: `fmt.Errorf("hosted checkout requires a valid access token: %w", tokenErr)` and checks for empty token. |
+| 5 | 🟡 MEDIUM | `TokenContext` was passed but ignored | Already fixed in prior session — `fetchToken` properly uses `tc.BasketID`, `tc.TxnAmt`, `tc.CurrencyCode` for apps.net.pk token endpoint. |
+
+### Files Modified
+- `signature.go` — added `CalculateHostedCheckoutSignature()` (MD5, not HMAC-SHA256)
+- `payfast_service.go` — fixed SIGNATURE, CHECKOUT_URL, SUCCESS_URL, FAILURE_URL, TOKEN error handling
+- `payfast_test.go` — added `TestHostedCheckoutSignature` (deterministic, 32-char hex, not HMAC)
+
+### Remaining Low-Priority Items
+- Empty `CUSTOMER_EMAIL_ADDRESS` in hosted checkout form (pass from frontend for OTP delivery)
+- Hardcoded `MERCHANT_NAME` fallback "OMNIGO" (use PAYFAST_MERCHANT_NAME env)
+- Expiry year validation in card sheet (min 2025 check)

@@ -2,9 +2,11 @@ package payfast
 
 import (
 	"crypto/hmac"
+	"crypto/md5"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"fmt"
 	"strings"
 )
 
@@ -112,4 +114,20 @@ func CalculateTemporaryTokenHash(req TemporaryTokenRequest, securedKey string) s
 func CalculateTokenizedTransactionHash(req TokenizedTransactionRequest, securedKey string) string {
 	payload := req.InstrumentToken + req.MerchantUserId + req.CustomerMobileNo + req.TxnAmt + req.Otp
 	return generateHMACSHA256(payload, securedKey)
+}
+
+// CalculateHostedCheckoutSignature computes the SIGNATURE field for PayFast hosted checkout.
+// Per official PayFast PHP integration docs, GitHub packages, and the Merchant Integration Guide:
+//
+//	SIGNATURE = MD5(merchant_id + ":" + merchant_name + ":" + amount + ":" + order_id)
+//
+// This is a PLAIN MD5 hash (not HMAC-SHA256, which is used for API request secured_hash).
+// The signature is included both as a form field and in the CHECKOUT_URL query string.
+//
+// Verified against: zfhassaan/payfast (Laravel), qbitechs/paygate_pk (Rails),
+// RaRashed/payfast-php, and the PayFast integration guide PDF.
+func CalculateHostedCheckoutSignature(merchantID, merchantName, amount, orderID string) string {
+	payload := merchantID + ":" + merchantName + ":" + amount + ":" + orderID
+	hash := md5.Sum([]byte(payload))
+	return fmt.Sprintf("%x", hash)
 }

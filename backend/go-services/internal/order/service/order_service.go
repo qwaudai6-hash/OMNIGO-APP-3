@@ -129,10 +129,21 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *models.CreateOrderR
 	// The background worker will reconcile prices via product service.
 	// H4: Uber-style — customer pays product total + delivery fee.
 	productTotalPaisa := int64(math.Round(float64(req.TotalAmount) * 100))
+	// Resolve VendorTrackID from the store's vendor_tracking_id.
+	// The old code set this to the store tracking ID as a "placeholder",
+	// but the repo validates it against the users table and panics.
+	var vendorTrackID string
+	if req.VendorStoreTrackID != "" {
+		_ = s.repo.DB().QueryRow(ctx,
+			`SELECT vendor_tracking_id FROM stores WHERE store_tracking_id = $1`,
+			req.VendorStoreTrackID,
+		).Scan(&vendorTrackID)
+	}
+
 	order := &models.Order{
 		UserTrackID:           req.UserTrackID,
 		VendorStoreTrackID:    req.VendorStoreTrackID, // frontend must provide this
-		VendorTrackID:         req.VendorStoreTrackID, // placeholder; worker will resolve
+		VendorTrackID:         vendorTrackID,           // resolved from stores table
 		Currency:              req.Currency,
 		PaymentGateway:        paymentGW,
 		Status:                "pending",

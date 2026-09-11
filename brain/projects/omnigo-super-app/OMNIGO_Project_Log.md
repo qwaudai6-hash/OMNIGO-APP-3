@@ -576,6 +576,16 @@ Every user gets a prefix-based Tracking ID (UTID) assigned automatically at sign
 - float64 → integer-paisa money refactor (dedicated session required)
 - Sentinel-error pattern rollout to Stripe/COD handlers
 
+### Session 43 Addendum — Hosted Checkout (apps.net.pk) Fixes (Sep 11, 2026)
+
+Compared implementation against PayFast official docs (gopayfast.com/docs, Scribd integration guide, GitHub repos: zfhassaan/payfast, qbitechs/paygate_pk, RaRashed/payfast-php). Fixed 5 issues:
+
+- **SIGNATURE**: was `SIG-{order_id}-{unixnano}` (fake) → now real MD5: `MD5(merchant_id:merchant_name:amount:order_id)` per official PHP/Rails packages. New `CalculateHostedCheckoutSignature()` in `signature.go:119`.
+- **CHECKOUT_URL**: was same as SUCCESS_URL → now IPN endpoint with `?signature=<md5>&order_id=<order_id>` for server-side PayFast POST.
+- **FAILURE_URL**: was same as SUCCESS_URL → now `?err_code=001` so WebView keeps dialog open on failure.
+- **Empty TOKEN**: was ignored, form submitted with empty token → now returns error immediately.
+- **Token fetch**: already correctly uses TokenContext (verified no change needed).
+
 ---
 
 ## Sessions 44–73: Rider Order Flow, Customer Map Tracking, UX Fixes (July–September 2026)
