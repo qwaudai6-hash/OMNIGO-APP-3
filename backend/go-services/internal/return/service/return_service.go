@@ -421,16 +421,14 @@ func (s *ReturnService) VerifyByVendor(
 						totalAmount = amt
 					}
 				}
-				if err := s.escrow.RefundForReturn(ctx, orderID, totalAmount); err != nil {
-					// Force-revert verification status (state machine won't allow backward transition,
-					// but financial integrity takes priority — customer didn't get their money)
-					log.Printf("[RETURN-%s] CRITICAL: Refund failed after vendor verification, reverting status: %v", orderID, err)
-					_, _ = s.repo.DB().Exec(ctx,
-						`UPDATE returns SET status = 'return_delivered', updated_at = NOW(),
-						 admin_notes = admin_notes || E'\nCRITICAL: Refund failed after verification, status force-reverted'
-						 WHERE id = $1 AND status = 'return_verified'`, id)
-					return fmt.Errorf("return refund failed: %w", err)
-				}
+			if err := s.escrow.RefundForReturn(ctx, orderID, totalAmount); err != nil {
+				// Force-revert verification status (financial integrity takes priority)
+				log.Printf("[RETURN-%s] CRITICAL: Refund failed after vendor verification, reverting status: %v", orderID, err)
+				_, _ = s.repo.DB().Exec(ctx,
+					`UPDATE return_requests SET status = 'return_delivered', updated_at = NOW()
+					 WHERE id = $1 AND status = 'return_verified'`, id)
+				return fmt.Errorf("return refund failed: %w", err)
+			}
 			}
 		}
 
@@ -577,8 +575,8 @@ func (s *ReturnService) SetReturnDeadline(ctx context.Context, orderTrackingID s
 func (s *ReturnService) AutoResolveStaleDisputes(ctx context.Context) (int, error) {
 	db := s.repo.DB()
 	rows, err := db.Query(ctx,
-		`SELECT id, order_tracking_id, reason FROM returns 
-		 WHERE status = 'disputed' AND updated_at < NOW() - INTERVAL '48 hours'`)
+		`SELECT id, order_tracking_id, reason FROM return_requests 
+		 WHERE status = 'return_disputed' AND updated_at < NOW() - INTERVAL '48 hours'`)
 	if err != nil {
 		return 0, fmt.Errorf("failed to query stale disputes: %w", err)
 	}
@@ -592,24 +590,24 @@ func (s *ReturnService) AutoResolveStaleDisputes(ctx context.Context) (int, erro
 			continue
 		}
 
-		// Auto-approve if "not received" or "damaged" (customer benefit of doubt)
-		newStatus := "rejected"
+		// Auto-complete if customer-favorable reason (benefit of doubt)
+		newStatus := models.ReturnStatusCancelled
 		if strings.Contains(strings.ToLower(reason), "not received") ||
 			strings.Contains(strings.ToLower(reason), "damaged") ||
 			strings.Contains(strings.ToLower(reason), "wrong item") {
-			newStatus = "approved"
+			newStatus = models.ReturnStatusCompleted
 		}
 
 		_, err = db.Exec(ctx,
-			`UPDATE returns SET status = $1, updated_at = NOW(), admin_notes = admin_notes || E'\nAuto-resolved after 48h dispute timeout'
+			`UPDATE return_requests SET status = $1, updated_at = NOW()
 			 WHERE id = $2`, newStatus, id)
 		if err != nil {
 			fmt.Printf("[Return] Failed to auto-resolve dispute %d: %v\n", id, err)
 			continue
 		}
 
-		// Trigger refund if auto-approved
-		if newStatus == "approved" {
+		// Trigger refund if auto-approved (completed in customer favor)
+		if newStatus == models.ReturnStatusCompleted && s.escrow != nil {
 			var totalAmount int64
 			_ = db.QueryRow(ctx, `SELECT COALESCE(total_amount_paisa, 0) FROM orders WHERE order_tracking_id = $1`, orderID).Scan(&totalAmount)
 			if refundErr := s.escrow.RefundForReturn(ctx, orderID, totalAmount); refundErr != nil {
@@ -619,7 +617,7 @@ func (s *ReturnService) AutoResolveStaleDisputes(ctx context.Context) (int, erro
 
 		// Update order status
 		orderStatus := "return_rejected"
-		if newStatus == "approved" {
+		if newStatus == models.ReturnStatusCompleted {
 			orderStatus = "returned"
 		}
 		_, _ = db.Exec(ctx, `UPDATE orders SET status = $1, updated_at = NOW() WHERE order_tracking_id = $2`, orderStatus, orderID)

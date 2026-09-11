@@ -951,7 +951,7 @@ func (r *OrderRepository) GetUserInfo(ctx context.Context, userTrackingID string
 func (r *OrderRepository) IsStoreActive(ctx context.Context, storeTrackingID string) (bool, error) {
 	var active bool
 	err := r.reader.QueryRow(ctx,
-		`SELECT COALESCE(is_active, TRUE) FROM stores WHERE tracking_id = $1`,
+		`SELECT COALESCE(is_active, TRUE) FROM stores WHERE store_tracking_id = $1`,
 		storeTrackingID,
 	).Scan(&active)
 	if err != nil {
