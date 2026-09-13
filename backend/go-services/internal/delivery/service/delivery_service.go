@@ -847,37 +847,35 @@ func (s *DeliveryService) EstimateRide(ctx context.Context, req *models.RideEsti
 // H3: Also returns routing_status for DB audit trail.
 // Returns: (totalFare, adminCommission, riderEarning, routingStatus, error)
 func (s *DeliveryService) EstimateDeliveryFee(ctx context.Context, storeTrackID string, dropoffLat, dropoffLng float64) (float64, float64, float64, string, error) {
-	// Get store coordinates
+	// Get real store coordinates from database — no hardcoded fallback
 	lat, lng, err := s.repo.GetStoreCoordinates(ctx, storeTrackID)
 	if err != nil || (lat == 0 && lng == 0) {
-		// H4 FIX: Use haversine fallback with night multiplier for consistency.
-		// Calculate rough estimate from order dropoff to platform default (Karachi center).
-		defaultLat, defaultLng := 24.8607, 67.0011 // Karachi default
-		fallbackKm := haversineKm(defaultLat, defaultLng, dropoffLat, dropoffLng)
-		baseFare := envFloat("DELIVERY_BASE_FARE", 50.0)
-		perKmRate := envFloat("DELIVERY_PER_KM_RATE", 15.0)
-		nightMultiplier := 1.0
-		hour := time.Now().Hour()
-		if hour >= 23 || hour <= 6 {
-			nightMultiplier = envFloat("DELIVERY_NIGHT_MULTIPLIER", 1.5)
-		}
-		totalFare := (baseFare + (perKmRate * fallbackKm)) * nightMultiplier
-		adminComm := totalFare * (envFloat("DELIVERY_COMMISSION_PERCENT", 5.0) / 100.0)
-		log.Printf("[Delivery] H4 FALLBACK: store %s coords unavailable, using haversine fallback %.1fkm × %.1f night → PKR %.2f", storeTrackID, fallbackKm, nightMultiplier, totalFare)
-		return totalFare, adminComm, totalFare - adminComm, "FALLBACK_HAVERSINE", nil
+		// SAFETY: Never fall back to a wrong city — fail with clear error
+		return 0, 0, 0, "STORE_LOCATION_MISSING", fmt.Errorf("store %s has no GPS coordinates — cannot calculate delivery fee", storeTrackID)
 	}
 
 	km, _, _, _ := s.estimateDistanceAndETA(ctx, lng, lat, dropoffLng, dropoffLat)
 
-	baseFare := envFloat("DELIVERY_BASE_FARE", 50.0)
-	perKmRate := envFloat("DELIVERY_PER_KM_RATE", 15.0)
+	baseFare := envFloat("DELIVERY_BASE_FARE", 60.0)         // PKR — covers rider time + fuel
+	perKmRate := envFloat("DELIVERY_PER_KM_RATE", 18.0)      // PKR/km — competitive with market
+	minFee := envFloat("DELIVERY_MIN_FEE", 80.0)              // PKR — minimum viable delivery fee
+	maxDistanceKm := envFloat("DELIVERY_MAX_DISTANCE_KM", 25.0) // km — max delivery radius
 	nightMultiplier := 1.0
 	hour := time.Now().Hour()
 	if hour >= 23 || hour <= 6 {
-		nightMultiplier = envFloat("DELIVERY_NIGHT_MULTIPLIER", 1.5)
+		nightMultiplier = envFloat("DELIVERY_NIGHT_MULTIPLIER", 1.3) // night surge — moderate
+	}
+
+	// Distance cap — reject unprofitable long-distance deliveries
+	if km > maxDistanceKm {
+		return 0, 0, 0, "OUT_OF_RANGE", fmt.Errorf("delivery distance %.1fkm exceeds maximum %.0fkm", km, maxDistanceKm)
 	}
 
 	totalFare := (baseFare + (perKmRate * km)) * nightMultiplier
+	// Minimum fee — ensures rider costs are covered
+	if totalFare < minFee {
+		totalFare = minFee
+	}
 	adminComm := totalFare * (envFloat("DELIVERY_COMMISSION_PERCENT", 5.0) / 100.0)
 	riderEarning := totalFare - adminComm
 
