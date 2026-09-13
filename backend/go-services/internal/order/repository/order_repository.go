@@ -38,8 +38,8 @@ func (r *OrderRepository) CreateOrder(ctx context.Context, order *models.Order, 
 	defer tx.Rollback(ctx)
 
 	query := `
-		INSERT INTO orders (order_tracking_id, customer_tracking_id, store_tracking_id, vendor_tracking_id, status, total_amount, currency, payment_gateway, payment_status, customer_lat, customer_lng, device_session_nonce, base_product_amount, delivery_fee_amount, total_billed_amount, routing_status, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, 'pending', $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
+		INSERT INTO orders (order_tracking_id, customer_tracking_id, store_tracking_id, vendor_tracking_id, status, total_amount, total_amount_paisa, currency, payment_gateway, payment_status, customer_lat, customer_lng, device_session_nonce, base_product_amount, base_product_amount_paisa, delivery_fee_amount, delivery_fee_amount_paisa, total_billed_amount, total_billed_amount_paisa, routing_status, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8, 'pending', $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, NOW(), NOW())
 		RETURNING id, created_at, updated_at
 	`
 	err = tx.QueryRow(ctx, query,
@@ -48,14 +48,18 @@ func (r *OrderRepository) CreateOrder(ctx context.Context, order *models.Order, 
 		order.VendorStoreTrackID,
 		order.VendorTrackID,
 		order.TotalAmount,
+		order.TotalAmountPaisa,
 		order.Currency,
 		order.PaymentGateway,
 		order.CustomerLat,
 		order.CustomerLng,
 		order.DeviceSessionNonce,
-		order.BaseProductAmountPaisa,
-		order.DeliveryFeeAmountPaisa,
-		order.TotalBilledAmountPaisa,
+		order.BaseProductAmountPaisa, // base_product_amount (legacy)
+		order.BaseProductAmountPaisa, // base_product_amount_paisa
+		order.DeliveryFeeAmountPaisa, // delivery_fee_amount (legacy)
+		order.DeliveryFeeAmountPaisa, // delivery_fee_amount_paisa
+		order.TotalBilledAmountPaisa, // total_billed_amount (legacy)
+		order.TotalBilledAmountPaisa, // total_billed_amount_paisa
 		order.RoutingStatus,
 	).Scan(&order.ID, &order.CreatedAt, &order.UpdatedAt)
 	if err != nil {
@@ -134,8 +138,8 @@ func (r *OrderRepository) CreateOrderWithReservations(ctx context.Context, order
 	defer tx.Rollback(ctx)
 
 	query := `
-		INSERT INTO orders (order_tracking_id, customer_tracking_id, store_tracking_id, vendor_tracking_id, status, total_amount, currency, payment_gateway, payment_status, customer_lat, customer_lng, device_session_nonce, base_product_amount, delivery_fee_amount, total_billed_amount, routing_status, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, 'pending', $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
+		INSERT INTO orders (order_tracking_id, customer_tracking_id, store_tracking_id, vendor_tracking_id, status, total_amount, total_amount_paisa, currency, payment_gateway, payment_status, customer_lat, customer_lng, device_session_nonce, base_product_amount, base_product_amount_paisa, delivery_fee_amount, delivery_fee_amount_paisa, total_billed_amount, total_billed_amount_paisa, routing_status, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8, 'pending', $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, NOW(), NOW())
 		RETURNING id, created_at, updated_at
 	`
 	err = tx.QueryRow(ctx, query,
@@ -144,14 +148,18 @@ func (r *OrderRepository) CreateOrderWithReservations(ctx context.Context, order
 		order.VendorStoreTrackID,
 		order.VendorTrackID,
 		order.TotalAmount,
+		order.TotalAmountPaisa,
 		order.Currency,
 		order.PaymentGateway,
 		order.CustomerLat,
 		order.CustomerLng,
 		order.DeviceSessionNonce,
-		order.BaseProductAmountPaisa,
-		order.DeliveryFeeAmountPaisa,
-		order.TotalBilledAmountPaisa,
+		order.BaseProductAmountPaisa, // base_product_amount (legacy)
+		order.BaseProductAmountPaisa, // base_product_amount_paisa
+		order.DeliveryFeeAmountPaisa, // delivery_fee_amount (legacy)
+		order.DeliveryFeeAmountPaisa, // delivery_fee_amount_paisa
+		order.TotalBilledAmountPaisa, // total_billed_amount (legacy)
+		order.TotalBilledAmountPaisa, // total_billed_amount_paisa
 		order.RoutingStatus,
 	).Scan(&order.ID, &order.CreatedAt, &order.UpdatedAt)
 	if err != nil {
