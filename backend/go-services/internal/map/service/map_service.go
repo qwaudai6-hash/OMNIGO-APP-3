@@ -56,16 +56,29 @@ func NewMapService(apiKey, styleURL string) *MapService {
 	}
 
 	// Auto-configure endpoints if using self-hosted TileServer GL / Martin container
+	// or open-source tile providers (MapLibre demo, OpenFreeMap, etc.)
 	if styleURL != "" && (!strings.Contains(styleURL, "maptiler.com") || strings.Contains(styleURL, "tileserver")) {
 		baseURL := styleURL
 		if idx := strings.Index(styleURL, "/styles/"); idx != -1 {
 			baseURL = styleURL[:idx]
 		}
-		tileSources["tiles"] = baseURL + "/data/v3/%s"
-		tileSources["openmaptiles"] = baseURL + "/data/v3/%s"
-		tileSources["maptiler_planet"] = baseURL + "/data/v3/%s"
-		tileSources["streets"] = baseURL + "/data/v3/%s"
-		tileSources["basic"] = baseURL + "/data/v3/%s"
+
+		// Detect tile path pattern based on provider
+		tilePath := "/data/v3/%s" // TileServer GL / Martin default
+		if strings.Contains(styleURL, "demotiles.maplibre.org") {
+			tilePath = "/tiles/%s" // MapLibre demo uses /tiles/ not /data/v3/
+		} else if strings.Contains(styleURL, "openfreemap.org") {
+			tilePath = "/tiles/openmaptiles/%s" // OpenFreeMap pattern
+		}
+
+		tileSources["tiles"] = baseURL + tilePath
+		tileSources["openmaptiles"] = baseURL + tilePath
+		tileSources["maptiler_planet"] = baseURL + tilePath
+		tileSources["streets"] = baseURL + tilePath
+		tileSources["basic"] = baseURL + tilePath
+		// MapLibre demo source name
+		tileSources["maplibre"] = baseURL + tilePath
+		tileSources["ne2_shaded"] = baseURL + tilePath
 	}
 
 	return &MapService{

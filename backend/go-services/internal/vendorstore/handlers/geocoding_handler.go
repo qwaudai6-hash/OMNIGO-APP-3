@@ -65,7 +65,7 @@ func init() {
 
 func NewGeocodingHandler() *GeocodingHandler {
 	return &GeocodingHandler{
-		photonURL: getEnv("PHOTON_URL", "http://omnigo-photon:2322"),
+		photonURL: getEnv("PHOTON_URL", "https://photon.komoot.io"),
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -75,7 +75,7 @@ func NewGeocodingHandler() *GeocodingHandler {
 func NewGeocodingHandlerWithCache(rdb redis.UniversalClient) *GeocodingHandler {
 	return &GeocodingHandler{
 		rdb:       rdb,
-		photonURL: getEnv("PHOTON_URL", "http://omnigo-photon:2322"),
+		photonURL: getEnv("PHOTON_URL", "https://photon.komoot.io"),
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},

@@ -35,7 +35,8 @@ type GeoService struct {
 func NewGeoService() *GeoService {
 	photon := os.Getenv("PHOTON_URL")
 	if photon == "" {
-		photon = "http://omnigo-photon:2322"
+		// Default to public Photon — self-hosted Photon is optional
+		photon = "https://photon.komoot.io"
 	}
 	nominatim := os.Getenv("NOMINATIM_BASE_URL")
 	if nominatim == "" {
