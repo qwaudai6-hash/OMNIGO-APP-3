@@ -139,7 +139,22 @@ CREATE TABLE IF NOT EXISTS orders (
     dispute_status        VARCHAR(20) DEFAULT 'NONE',
     delivered_at          TIMESTAMPTZ,
     created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- H4: Paisa columns (int64, 1 PKR = 100 paisa) — source of truth for financial calculations
+    total_amount_paisa       BIGINT DEFAULT 0,
+    admin_commission_paisa   BIGINT DEFAULT 0,
+    vendor_escrow_paisa      BIGINT DEFAULT 0,
+    delivery_escrow_paisa    BIGINT DEFAULT 0,
+    base_product_amount_paisa BIGINT DEFAULT 0,
+    delivery_fee_amount_paisa BIGINT DEFAULT 0,
+    total_billed_amount_paisa BIGINT DEFAULT 0,
+    routing_status           VARCHAR(50) DEFAULT '',
+    -- H4: Handover & return fields
+    handover_photo_url       TEXT,
+    handover_at              TIMESTAMPTZ,
+    handover_notes           TEXT,
+    handed_over_by_tracking_id VARCHAR(100),
+    return_deadline          TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_orders_tracking_id ON orders(order_tracking_id);
 CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_tracking_id);
@@ -189,6 +204,7 @@ CREATE TABLE IF NOT EXISTS deliveries (
     status                  VARCHAR(30) NOT NULL DEFAULT 'broadcasting',
     admin_commission        NUMERIC(10,2) DEFAULT 0,
     rider_earning           NUMERIC(10,2) DEFAULT 0,
+    delivery_fee            NUMERIC(10,2) DEFAULT 0,
     tips                    NUMERIC(10,2) DEFAULT 0.0,
     petrol_allowance        NUMERIC(10,2) DEFAULT 0.0,
     pickup_lat              DOUBLE PRECISION,
@@ -219,7 +235,7 @@ DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_deliveries_status') THEN
         ALTER TABLE deliveries ADD CONSTRAINT chk_deliveries_status
-            CHECK (status IN ('broadcasting','accepted','picked_up','in_transit','completed','failed'));
+            CHECK (status IN ('broadcasting','accepted','picked_up','in_transit','completed','failed','cancelled'));
     END IF;
 END $$;
 
@@ -279,7 +295,11 @@ CREATE TABLE IF NOT EXISTS rider_wallet (
     balance         NUMERIC(12,2) NOT NULL DEFAULT 0,
     cash_in_hand    NUMERIC(10,2) DEFAULT 0.0,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    balance_paisa          BIGINT DEFAULT 0,
+    cash_in_hand_paisa     BIGINT DEFAULT 0,
+    lifetime_earnings_paisa BIGINT DEFAULT 0,
+    is_cash_blocked        BOOLEAN DEFAULT FALSE
 );
 CREATE INDEX IF NOT EXISTS idx_rider_wallet_rider ON rider_wallet(rider_tracking_id);
 
@@ -290,7 +310,11 @@ CREATE TABLE IF NOT EXISTS vendor_wallet (
     balance          NUMERIC(12,2) NOT NULL DEFAULT 0,
     pending_payout   NUMERIC(12,2) DEFAULT 0,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    balance_paisa           BIGINT DEFAULT 0,
+    lifetime_earnings_paisa BIGINT DEFAULT 0,
+    total_payouts_paisa     BIGINT DEFAULT 0,
+    vendor_clawback_paisa   BIGINT DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_vendor_wallet_vendor ON vendor_wallet(vendor_tracking_id);
 
@@ -338,11 +362,13 @@ CREATE TABLE IF NOT EXISTS escrow_holds (
     order_tracking_id VARCHAR(50) NOT NULL,
     vendor_tracking_id VARCHAR(50) NOT NULL,
     amount          NUMERIC(12,2) NOT NULL,
+    amount_paisa    BIGINT DEFAULT 0,
     status          VARCHAR(30) DEFAULT 'held',
     hold_until      TIMESTAMPTZ DEFAULT NOW() + INTERVAL '7 days',
     released_at     TIMESTAMPTZ,
     dispute_id      UUID,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_escrow_order ON escrow_holds(order_tracking_id);
 CREATE INDEX IF NOT EXISTS idx_escrow_vendor ON escrow_holds(vendor_tracking_id);
@@ -354,7 +380,10 @@ CREATE TABLE IF NOT EXISTS cod_debts (
     rider_tracking_id VARCHAR(50) NOT NULL,
     order_tracking_id VARCHAR(50) NOT NULL,
     amount          NUMERIC(10,2) NOT NULL,
+    amount_owed     NUMERIC(10,2) DEFAULT 0,
     status          VARCHAR(30) DEFAULT 'pending',
+    webhook_event_id VARCHAR(255),
+    settled_via     VARCHAR(50),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     settled_at      TIMESTAMPTZ
 );
@@ -382,7 +411,8 @@ CREATE TABLE IF NOT EXISTS reviews (
     user_tracking_id   VARCHAR(50) NOT NULL,
     rating             SMALLINT NOT NULL CHECK (rating >= 1 AND rating <= 5),
     comment            TEXT,
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_reviews_product ON reviews(product_tracking_id);
 
@@ -458,15 +488,20 @@ CREATE INDEX IF NOT EXISTS idx_carts_store ON carts(store_id);
 CREATE TABLE IF NOT EXISTS cart_items (
     id              BIGSERIAL PRIMARY KEY,
     cart_id         BIGINT NOT NULL,
-    product_id      BIGINT NOT NULL,
+    product_id      BIGINT,  -- nullable: legacy column, product_tracking_id is primary
+    product_tracking_id VARCHAR(100),
     quantity        INTEGER NOT NULL CHECK (quantity > 0),
     price           NUMERIC(12,2) NOT NULL DEFAULT 0.0,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(cart_id, product_tracking_id)
+);
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(cart_id, product_id)
 );
 CREATE INDEX IF NOT EXISTS idx_cart_items_cart ON cart_items(cart_id);
 CREATE INDEX IF NOT EXISTS idx_cart_items_product ON cart_items(product_id);
+CREATE INDEX IF NOT EXISTS idx_cart_items_product_tracking ON cart_items(product_tracking_id);
 
 -- ── Chat Messages ─────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS chat_messages (
@@ -478,7 +513,9 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     is_read     BOOLEAN DEFAULT FALSE,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    deleted_at  TIMESTAMPTZ
+    deleted_at  TIMESTAMPTZ,
+    delivered_at TIMESTAMPTZ,
+    read_at     TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_chat_messages_order_id ON chat_messages(order_id);
 CREATE INDEX IF NOT EXISTS idx_chat_messages_sender_id ON chat_messages(sender_id);
