@@ -16,9 +16,11 @@ type Review struct {
 }
 
 // CreateReviewRequest is the payload for submitting a review.
+// CustomerTrackingID is intentionally NOT required in JSON binding:
+// the handler overrides it from the JWT token (see review_handler.go:32).
 type CreateReviewRequest struct {
 	ProductTrackingID  string `json:"product_tracking_id" binding:"required"`
-	CustomerTrackingID string `json:"customer_tracking_id" binding:"required"`
+	CustomerTrackingID string `json:"customer_tracking_id"`
 	Rating             int    `json:"rating" binding:"required,min=1,max=5"`
 	Comment            string `json:"comment"`
 }

@@ -68,16 +68,21 @@ type Order struct {
 //
 // NOTE: VendorStoreTrackID accepts BOTH "vendor_store_tracking_id" (Flutter)
 // and "store_tracking_id" (legacy) via custom UnmarshalJSON below.
+//
+// SECURITY: UserTrackID is NOT in JSON — it is always taken from the JWT token
+// (order_handler.go:51). TotalAmount and Currency are optional: if omitted the
+// server calculates the total from items + delivery fee and defaults currency
+// to PKR.
 type CreateOrderRequest struct {
 	UserTrackID        string               `json:"user_tracking_id"`
 	VendorStoreTrackID string               `json:"vendor_store_tracking_id" binding:"required"`
 	Items              []CreateOrderItemReq `json:"items" binding:"required,dive"`
-	TotalAmount        float64              `json:"total_amount" binding:"required"` // rupees; converted to paisa internally
-	DeliveryFeePaisa   int64                `json:"delivery_fee_paisa"`             // H4: Uber-style delivery fee in paisa (customer pays)
-	RoutingStatus      string               `json:"routing_status"`                 // H3: DYNAMIC_CALCULATED | FALLBACK_HAVERSINE | FAILED_CALCULATION
-	Currency           string               `json:"currency" binding:"required"`
+	TotalAmount        float64              `json:"total_amount"`          // optional; server calculates from items if 0
+	DeliveryFeePaisa   int64                `json:"delivery_fee_paisa"`    // H4: Uber-style delivery fee in paisa (customer pays)
+	RoutingStatus      string               `json:"routing_status"`        // H3: DYNAMIC_CALCULATED | FALLBACK_HAVERSINE | FAILED_CALCULATION
+	Currency           string               `json:"currency"`              // optional; defaults to "PKR"
 	PaymentGateway     string               `json:"payment_gateway"`
-	PaymentMethod      string               `json:"payment_method"` // alias: frontend sends payment_method
+	PaymentMethod      string               `json:"payment_method"`        // alias: frontend sends payment_method
 	DeviceSessionNonce string               `json:"device_session_nonce" binding:"required"`
 	DropoffLat         float64              `json:"dropoff_lat" binding:"required"`
 	DropoffLng         float64              `json:"dropoff_lng" binding:"required"`
@@ -108,11 +113,10 @@ func (r *CreateOrderRequest) UnmarshalJSON(data []byte) error {
 	if r.Items == nil || len(r.Items) == 0 {
 		return fmt.Errorf("Key: 'CreateOrderRequest.Items' Error:Field validation for 'Items' failed on the 'required' tag")
 	}
-	if r.TotalAmount == 0 {
-		return fmt.Errorf("Key: 'CreateOrderRequest.TotalAmount' Error:Field validation for 'TotalAmount' failed on the 'required' tag")
-	}
+	// TotalAmount is optional — server calculates from items if not provided.
+	// Currency defaults to PKR.
 	if r.Currency == "" {
-		return fmt.Errorf("Key: 'CreateOrderRequest.Currency' Error:Field validation for 'Currency' failed on the 'required' tag")
+		r.Currency = "PKR"
 	}
 	if r.DeviceSessionNonce == "" {
 		return fmt.Errorf("Key: 'CreateOrderRequest.DeviceSessionNonce' Error:Field validation for 'DeviceSessionNonce' failed on the 'required' tag")

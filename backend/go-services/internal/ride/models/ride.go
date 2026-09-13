@@ -22,37 +22,39 @@ type Ride struct {
 	UpdatedAt            time.Time `json:"updated_at"`
 }
 
-// RequestRidePayload is used when a customer requests a ride
+// RequestRidePayload is used when a customer requests a ride.
+// CustomerTrackID and FareAmount are intentionally NOT required in JSON
+// binding: the handler overrides CustomerTrackID from the JWT token
+// (see ride_handler.go:41) and FareAmount is calculated server-side
+// from the ride estimate. Sending them from the client is harmless
+// (they get overwritten) but must not block validation.
 type RequestRidePayload struct {
-	CustomerTrackID string  `json:"customer_tracking_id" binding:"required"`
+	CustomerTrackID string  `json:"customer_tracking_id"`
 	VehicleType     string  `json:"vehicle_type" binding:"required"`
 	PickupLat       float64 `json:"pickup_lat" binding:"required"`
 	PickupLng       float64 `json:"pickup_lng" binding:"required"`
 	DropoffLat      float64 `json:"dropoff_lat" binding:"required"`
 	DropoffLng      float64 `json:"dropoff_lng" binding:"required"`
-	FareAmount      float64 `json:"fare_amount" binding:"required"`
+	FareAmount      float64 `json:"fare_amount"`
 }
 
 // AcceptRidePayload is sent by the rider when they accept a ride offer.
+// RiderTrackID is overridden from JWT (ride_handler.go:98).
 type AcceptRidePayload struct {
-	RiderTrackID string `json:"rider_tracking_id" binding:"required"`
+	RiderTrackID string `json:"rider_tracking_id"`
 }
 
 // UpdateRideStatusPayload is sent by the rider to transition the ride state.
+// RiderTrackID is overridden from JWT (ride_handler.go:132).
 type UpdateRideStatusPayload struct {
-	RiderTrackID string `json:"rider_tracking_id" binding:"required"`
+	RiderTrackID string `json:"rider_tracking_id"`
 	Status       string `json:"status" binding:"required,oneof=in_progress cancelled"`
 }
 
 // CompleteRidePayload is sent by the rider at the end of the ride.
-// The full fare is split server-side: admin commission → admin_revenue,
-// remainder → vendor-style escrow (rider earnings). The payment method
-// determines the ledger path:
-//   - "cash"     : rider collects cash, owes platform (cash_receivable debit)
-//   - "wallet"   : direct transfer from customer wallet
-//   - "stripe"   : assume pre-paid at request time (no further action)
+// RiderTrackID is overridden from JWT (ride_handler.go:167).
 type CompleteRidePayload struct {
-	RiderTrackID    string  `json:"rider_tracking_id" binding:"required"`
+	RiderTrackID    string  `json:"rider_tracking_id"`
 	FinalFare       float64 `json:"final_fare" binding:"required,gt=0"`
 	DistanceMeters  float64 `json:"distance_meters"`
 	DurationSeconds int     `json:"duration_seconds"`
@@ -60,10 +62,11 @@ type CompleteRidePayload struct {
 }
 
 // CancelRidePayload is sent by the customer (or the rider) to cancel
-// a ride that has not yet started.
+// a ride that has not yet started. ActorTrackID is overridden from JWT
+// (ride_handler.go:198).
 type CancelRidePayload struct {
-	ActorTrackID string `json:"actor_tracking_id" binding:"required"`
-	ActorRole    string `json:"actor_role" binding:"required,oneof=customer rider"`
+	ActorTrackID string `json:"actor_tracking_id"`
+	ActorRole    string `json:"actor_role"`
 	Reason       string `json:"reason"`
 }
 
@@ -110,14 +113,16 @@ type RideBid struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
-// SubmitBidPayload is sent by a rider to bid on a ride
+// SubmitBidPayload is sent by a rider to bid on a ride.
+// RiderTrackID is overridden from JWT (ride_handler.go:232).
 type SubmitBidPayload struct {
-	RiderTrackID string  `json:"rider_tracking_id" binding:"required"`
+	RiderTrackID string  `json:"rider_tracking_id"`
 	BidAmount    float64 `json:"bid_amount" binding:"required"`
 }
 
-// AcceptBidPayload is sent by the customer to accept a specific driver's bid
+// AcceptBidPayload is sent by the customer to accept a specific driver's bid.
+// CustomerTrackID is overridden from JWT (ride_handler.go:294).
 type AcceptBidPayload struct {
-	CustomerTrackID string `json:"customer_tracking_id" binding:"required"`
+	CustomerTrackID string `json:"customer_tracking_id"`
 	BidID           int    `json:"bid_id" binding:"required"`
 }

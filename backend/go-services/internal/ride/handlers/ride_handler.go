@@ -195,7 +195,9 @@ func (h *RideHandler) CancelRide(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	// SECURITY: override body-supplied identity with JWT claims.
 	req.ActorTrackID = middleware.GetTrackingID(c)
+	req.ActorRole = middleware.GetRole(c)
 
 	ride, err := h.svc.CancelRide(c.Request.Context(), trackingID, &req)
 	if err != nil {

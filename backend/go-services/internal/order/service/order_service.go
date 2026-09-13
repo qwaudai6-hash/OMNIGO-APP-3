@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/http"
 	"strings"
 	"time"
 
@@ -125,10 +126,30 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *models.CreateOrderR
 	}
 
 	// NOTE: We don't have product prices yet (no gRPC call).
-	// The frontend sends TotalAmount which we trust for now.
-	// The background worker will reconcile prices via product service.
+	// If the frontend sends TotalAmount we trust it for now; otherwise we
+	// fetch prices from the product service and calculate server-side.
+	// The background worker will reconcile final prices via product service.
 	// H4: Uber-style — customer pays product total + delivery fee.
-	productTotalPaisa := int64(math.Round(float64(req.TotalAmount) * 100))
+	var productTotalPaisa int64
+	if req.TotalAmount > 0 {
+		productTotalPaisa = int64(math.Round(float64(req.TotalAmount) * 100))
+	} else {
+		// Server-side calculation: fetch each product's price and sum up.
+		calculatedTotal := 0.0
+		for _, item := range req.Items {
+			price, _, err := s.fetchProductPrice(ctx, item.ProductTrackingID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch price for product %s: %w", item.ProductTrackingID, err)
+			}
+			calculatedTotal += price * float64(item.Quantity)
+		}
+		req.TotalAmount = calculatedTotal
+		productTotalPaisa = int64(math.Round(calculatedTotal * 100))
+	}
+	// Default currency if not provided
+	if req.Currency == "" {
+		req.Currency = "PKR"
+	}
 	// Resolve VendorTrackID from the store's vendor_tracking_id.
 	// The old code set this to the store tracking ID as a "placeholder",
 	// but the repo validates it against the users table and panics.
@@ -238,6 +259,59 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *models.CreateOrderR
 	}
 
 	return order, nil
+}
+
+// fetchProductPrice calls the Product Service to get the real price for a product
+// using its tracking ID. Returns (price, stock, error).
+func (s *OrderService) fetchProductPrice(ctx context.Context, productTrackingID string) (float64, int, error) {
+	if s.productServiceURL == "" {
+		return 0, 0, errors.New("product service URL not configured")
+	}
+
+	var url string
+	var req *http.Request
+	var err error
+
+	if s.internalSigner != nil {
+		url = fmt.Sprintf("%s/api/v1/internal/products/tracking/%s", s.productServiceURL, productTrackingID)
+		req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return 0, 0, err
+		}
+		s.internalSigner.SignRequest(req, nil)
+	} else {
+		url = fmt.Sprintf("%s/api/v1/products/tracking/%s", s.productServiceURL, productTrackingID)
+		req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to call product service: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, 0, fmt.Errorf("product service returned status %d", resp.StatusCode)
+	}
+
+	var data struct {
+		Price     float64 `json:"price"`
+		BasePrice float64 `json:"base_price"`
+		Stock     int     `json:"stock"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return 0, 0, fmt.Errorf("failed to decode product response: %w", err)
+	}
+
+	price := data.Price
+	if data.BasePrice > 0 {
+		price = data.BasePrice
+	}
+	return price, data.Stock, nil
 }
 
 // releaseStockCompensating runs asynchronously to release stock if order creation fails

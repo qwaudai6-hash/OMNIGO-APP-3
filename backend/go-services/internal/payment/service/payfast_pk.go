@@ -1,14 +1,15 @@
 package service
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -42,29 +43,35 @@ func (s *PayFastPKService) IsConfigured() bool {
 
 type tokenResponse struct {
 	AccessToken string `json:"ACCESS_TOKEN"`
-	ExpiresIn   int    `json:"EXPIRES_IN"`
-	TokenType   string `json:"TOKEN_TYPE"`
+	GeneratedDT string `json:"GENERATED_DATE_TIME"`
 }
 
-func (s *PayFastPKService) fetchAccessToken(ctx context.Context) (string, error) {
-	payload := map[string]string{
-		"MERCHANT_ID": s.merchantID,
-		"SECURED_KEY": s.securedKey,
-		"grant_type":  "client_credentials",
-	}
-	body, _ := json.Marshal(payload)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		s.baseURL+"/Transaction/GetAccessToken", bytes.NewReader(body))
+// fetchAccessToken calls PayFast GetAccessToken with form-encoded body per official PHP sample.
+// Required fields: MERCHANT_ID, SECURED_KEY, BASKET_ID, TXNAMT, CURRENCY_CODE, APPLY_DISCOUNT.
+func (s *PayFastPKService) fetchAccessToken(ctx context.Context, basketID string, amount float64) (string, error) {
+	tokenURL := s.baseURL + "/Transaction/GetAccessToken"
+
+	formData := url.Values{}
+	formData.Set("MERCHANT_ID", s.merchantID)
+	formData.Set("SECURED_KEY", s.securedKey)
+	formData.Set("BASKET_ID", basketID)
+	formData.Set("TXNAMT", fmt.Sprintf("%.2f", amount))
+	formData.Set("CURRENCY_CODE", "PKR")
+	formData.Set("APPLY_DISCOUNT", "true")
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(formData.Encode()))
 	if err != nil {
 		return "", fmt.Errorf("payfast token request build: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("payfast token http: %w", err)
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("payfast token status %d: %s", resp.StatusCode, raw)
 	}
@@ -82,22 +89,26 @@ func (s *PayFastPKService) CreateCheckoutSession(ctx context.Context, req Checko
 	if !s.IsConfigured() {
 		return CheckoutResponse{}, fmt.Errorf("payfast: not configured")
 	}
-	token, err := s.fetchAccessToken(ctx)
+	token, err := s.fetchAccessToken(ctx, req.OrderID, req.Amount)
 	if err != nil {
 		return CheckoutResponse{}, fmt.Errorf("payfast: token: %w", err)
 	}
+
+	orderDate := time.Now().Format("20060102")
+	signature := s.computeSignature(req.OrderID, token)
+
 	redirectURL := fmt.Sprintf(
 		"%s/Transaction/PostTransaction?BASKET_ID=%s&TXNAMT=%.2f&CURRENCY_CODE=%s&SUCCESS_URL=%s&FAILURE_URL=%s&ACCESS_TOKEN=%s&MERCHANT_ID=%s&ORDER_DATE=%s&SIGNATURE=%s",
 		s.baseURL,
-		req.OrderID,
+		url.QueryEscape(req.OrderID),
 		req.Amount,
-		req.Currency,
-		req.ReturnURL,
-		req.CancelURL,
-		token,
-		s.merchantID,
-		time.Now().Format("20060102"),
-		s.computeSignature(req.OrderID, token),
+		url.QueryEscape(req.Currency),
+		url.QueryEscape(req.ReturnURL),
+		url.QueryEscape(req.CancelURL),
+		url.QueryEscape(token),
+		url.QueryEscape(s.merchantID),
+		orderDate,
+		url.QueryEscape(signature),
 	)
 	return CheckoutResponse{
 		Gateway:     "payfast",
@@ -119,9 +130,6 @@ func (e *PayFastGatewayError) Error() string {
 }
 
 func (s *PayFastPKService) Refund(_ context.Context, transactionID string, amount float64) error {
-	// FIX H9: Return a typed error instead of a plain error.
-	// The refund handler can detect this and create a 'pending_manual' record
-	// so admins can track and process PayFast refunds manually.
 	return &PayFastGatewayError{TransactionID: transactionID, Amount: amount}
 }
 
@@ -133,10 +141,10 @@ func (s *PayFastPKService) VerifyWebhook(payload []byte, signature string) (Webh
 		return WebhookEvent{}, fmt.Errorf("payfast ipn: decode: %w", err)
 	}
 	basketID := params["BASKET_ID"]
-	errCode  := params["PAYFAST_ERR"]
-	orderID  := params["ORDER_ID"]
+	errCode := params["PAYFAST_ERR"]
+	orderID := params["ORDER_ID"]
 	txnStatus := params["TXN_STATUS"]
-	txnID    := params["TXN_ID"]
+	txnID := params["TXN_ID"]
 	amountStr := params["TXNAMT"]
 
 	raw := basketID + "|" + s.securedKey + "|" + s.merchantID + "|" + errCode
@@ -151,8 +159,13 @@ func (s *PayFastPKService) VerifyWebhook(payload []byte, signature string) (Webh
 	if txnStatus == "0000" || txnStatus == "00" {
 		status = "SUCCESS"
 	}
+
 	var amount float64
-	fmt.Sscanf(amountStr, "%f", &amount)
+	if _, err := fmt.Sscanf(amountStr, "%f", &amount); err != nil {
+		return WebhookEvent{}, fmt.Errorf("payfast ipn: invalid amount %q: %w", amountStr, err)
+	}
+	amount = math.Round(amount*100) / 100
+
 	return WebhookEvent{
 		OrderID:       orderID,
 		TransactionID: txnID,
