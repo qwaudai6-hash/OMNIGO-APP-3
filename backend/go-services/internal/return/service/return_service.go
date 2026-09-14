@@ -622,7 +622,7 @@ func (s *ReturnService) AutoResolveStaleDisputes(ctx context.Context) (int, erro
 		}
 		_, _ = db.Exec(ctx, `UPDATE orders SET status = $1, updated_at = NOW() WHERE order_tracking_id = $2`, orderStatus, orderID)
 
-		fmt.Printf("[Return] Auto-resolved dispute %d for order %s: %s\n", id, orderID, newStatus)
+		fmt.Printf("[Return] Auto-resolved dispute %s for order %s: %s\n", id, orderID, newStatus)
 		resolved++
 	}
 	return resolved, nil

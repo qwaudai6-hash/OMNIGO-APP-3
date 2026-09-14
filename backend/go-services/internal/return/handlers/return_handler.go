@@ -17,10 +17,11 @@ func NewReturnHandler(svc *service.ReturnService) *ReturnHandler {
 	return &ReturnHandler{svc: svc}
 }
 
-// RequestReturn handles POST /orders/:tracking_id/return-request
+// RequestReturn handles POST /api/v1/returns/:id/request
 // Customer requests a return on a delivered/completed order.
+// The :id param is the order_tracking_id.
 func (h *ReturnHandler) RequestReturn(c *gin.Context) {
-	trackingID := c.Param("tracking_id")
+	trackingID := c.Param("id")
 	if trackingID == "" {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "tracking_id is required"})
 		return
@@ -346,7 +347,7 @@ func (h *ReturnHandler) CancelReturn(c *gin.Context) {
 func (h *ReturnHandler) RegisterRoutes(router *gin.Engine) {
 	returns := router.Group("/api/v1/returns", middleware.JWTAuth())
 	{
-		returns.POST("/:tracking_id/request", h.RequestReturn)  // FIX: moved from /orders/:id/return-request
+		returns.POST("/:id/request", h.RequestReturn)  // :id = order_tracking_id
 		returns.GET("/:id", h.GetReturnRequest)
 		returns.GET("/order/:order_tracking_id", h.GetReturnByOrder)
 		returns.POST("/:id/accept-pickup", h.AcceptReturnPickup)
