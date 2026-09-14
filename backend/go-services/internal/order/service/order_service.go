@@ -457,6 +457,16 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, trackingID string,
 	}
 
 	// Side effects — only execute after confirmed status change
+	if status == "delivered" {
+		// Set return deadline (36 hours from now) so customers can request returns
+		returnDeadline := time.Now().Add(36 * time.Hour)
+		if _, err := s.repo.DB().Exec(ctx,
+			`UPDATE orders SET return_deadline = $1 WHERE order_tracking_id = $2`,
+			returnDeadline, trackingID,
+		); err != nil {
+			log.Printf("[ORDER-%s] Warning: failed to set return_deadline: %v", trackingID, err)
+		}
+	}
 	if status == "cancelled" || status == "failed" {
 		if len(order.Items) > 0 {
 			_ = s.ReleaseStockForOrder(ctx, order)

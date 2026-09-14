@@ -748,7 +748,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_outbox_pending ON chat_delivery_outbox (next
 
 -- ── Missing Table: return_requests (migration 0051) ───────────────────────
 CREATE TABLE IF NOT EXISTS return_requests (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id VARCHAR(100) PRIMARY KEY,  -- RET-xxx tracking ID from Go tracking.Generate()
     order_tracking_id VARCHAR(100) NOT NULL,
     customer_tracking_id VARCHAR(100) NOT NULL,
     vendor_tracking_id VARCHAR(100) NOT NULL,
@@ -763,6 +763,15 @@ CREATE TABLE IF NOT EXISTS return_requests (
     verified_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
     cancelled_at TIMESTAMPTZ,
+    pickup_photo_url TEXT,
+    delivery_photo_url TEXT,
+    vendor_verification_photo TEXT,
+    return_delivery_fee_paisa BIGINT DEFAULT 0,
+    payment_method VARCHAR(50),
+    payment_status VARCHAR(30) DEFAULT 'pending',
+    escrow_hold_id VARCHAR(100),
+    dispute_reason TEXT,
+    dispute_resolved_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
