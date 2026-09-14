@@ -207,7 +207,7 @@ class ApiEndpoints {
   static String customerReturnOrder(String trackingId) =>
       '$orderBase/orders/$trackingId/return';
   static String customerReturnRequest(String trackingId) =>
-      '$orderBase/orders/$trackingId/return-request';
+      '$baseUrl/api/v1/returns/$trackingId/request';
   static String refundStatus(String orderId) =>
       '$orderBase/finance/refund/$orderId';
 

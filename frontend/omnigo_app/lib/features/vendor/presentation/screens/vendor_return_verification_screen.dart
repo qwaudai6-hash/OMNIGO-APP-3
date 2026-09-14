@@ -76,7 +76,7 @@ class _VendorReturnVerificationScreenState extends State<VendorReturnVerificatio
       };
 
       await sl<ApiClient>().post(
-        '/api/v1/returns/$returnId/verify',
+        '/api/v1/returns/$returnId/vendor-verify',
         body,
       );
 

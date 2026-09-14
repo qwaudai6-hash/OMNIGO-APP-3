@@ -346,6 +346,7 @@ func (h *ReturnHandler) CancelReturn(c *gin.Context) {
 func (h *ReturnHandler) RegisterRoutes(router *gin.Engine) {
 	returns := router.Group("/api/v1/returns", middleware.JWTAuth())
 	{
+		returns.POST("/:tracking_id/request", h.RequestReturn)  // FIX: moved from /orders/:id/return-request
 		returns.GET("/:id", h.GetReturnRequest)
 		returns.GET("/order/:order_tracking_id", h.GetReturnByOrder)
 		returns.POST("/:id/accept-pickup", h.AcceptReturnPickup)
@@ -355,7 +356,4 @@ func (h *ReturnHandler) RegisterRoutes(router *gin.Engine) {
 		returns.POST("/:id/vendor-dispute", h.DisputeReturn)
 		returns.POST("/:id/cancel", h.CancelReturn)
 	}
-
-	// Return request is registered on order routes
-	router.POST("/api/v1/orders/:tracking_id/return-request", middleware.JWTAuth(), h.RequestReturn)
 }
