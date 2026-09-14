@@ -608,3 +608,235 @@ CREATE TABLE IF NOT EXISTS customer_saved_cards (
 CREATE INDEX IF NOT EXISTS idx_saved_cards_customer ON customer_saved_cards(customer_tracking_id);
 CREATE INDEX IF NOT EXISTS idx_saved_cards_token ON customer_saved_cards(instrument_token);
 
+-- ═══════════════════════════════════════════════════════════════════════════
+--  POST-BASELINE ADDITIONS — All tables/columns from migrations 0026-0052
+--  Consolidated here so Railway restarts don't lose them.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- ── Missing Columns: orders (paisa + handover + return) ────────────────────
+-- (already added in earlier fix, keeping for completeness)
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS total_amount_paisa BIGINT DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS admin_commission_paisa BIGINT DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS vendor_escrow_paisa BIGINT DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_escrow_paisa BIGINT DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS base_product_amount_paisa BIGINT DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_fee_amount_paisa BIGINT DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS total_billed_amount_paisa BIGINT DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS routing_status VARCHAR(50) DEFAULT '';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS handover_photo_url TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS handover_at TIMESTAMPTZ;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS handover_notes TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS handed_over_by_tracking_id VARCHAR(100);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS return_deadline TIMESTAMPTZ;
+
+-- ── Missing Columns: rides ─────────────────────────────────────────────────
+ALTER TABLE rides ADD COLUMN IF NOT EXISTS actual_distance_meters DOUBLE PRECISION;
+ALTER TABLE rides ADD COLUMN IF NOT EXISTS actual_duration_seconds DOUBLE PRECISION;
+
+-- ── Missing Columns: payment_transactions ──────────────────────────────────
+ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS amount_paisa BIGINT DEFAULT 0;
+
+-- ── Missing Columns: customer_wallet (paisa) ──────────────────────────────
+ALTER TABLE customer_wallet ADD COLUMN IF NOT EXISTS balance_paisa BIGINT DEFAULT 0;
+ALTER TABLE customer_wallet ADD COLUMN IF NOT EXISTS lifetime_spent_paisa BIGINT DEFAULT 0;
+
+-- ── Missing Columns: deliveries (paisa) ───────────────────────────────────
+ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS amount_paisa BIGINT DEFAULT 0;
+ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS commission_paisa BIGINT DEFAULT 0;
+
+-- ── Missing Columns: vendor_payouts ───────────────────────────────────────
+ALTER TABLE vendor_payouts ADD COLUMN IF NOT EXISTS batch_id VARCHAR(100);
+ALTER TABLE vendor_payouts ADD COLUMN IF NOT EXISTS method VARCHAR(50);
+ALTER TABLE vendor_payouts ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+ALTER TABLE vendor_payouts ADD COLUMN IF NOT EXISTS amount_paisa BIGINT DEFAULT 0;
+
+-- ── Missing Columns: outbox_events ────────────────────────────────────────
+ALTER TABLE outbox_events ADD COLUMN IF NOT EXISTS key VARCHAR(255);
+ALTER TABLE outbox_events ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
+
+-- ── Missing Columns: users ────────────────────────────────────────────────
+ALTER TABLE users ADD COLUMN IF NOT EXISTS background_check_url TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS two_factor_enabled BOOLEAN NOT NULL DEFAULT false;
+
+-- ── Missing Columns: stores ───────────────────────────────────────────────
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS banner_url TEXT;
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true;
+
+-- ── Missing Table: stock_reservations (migration 000048) ───────────────────
+CREATE TABLE IF NOT EXISTS stock_reservations (
+    id                  BIGSERIAL PRIMARY KEY,
+    order_tracking_id   VARCHAR(50) NOT NULL,
+    product_tracking_id VARCHAR(50) NOT NULL,
+    quantity            INTEGER NOT NULL CHECK (quantity > 0),
+    status              VARCHAR(30) NOT NULL DEFAULT 'pending',
+    grpc_request_id     VARCHAR(100),
+    error_message       TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    confirmed_at        TIMESTAMPTZ,
+    released_at         TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_stock_reservations_order ON stock_reservations(order_tracking_id);
+CREATE INDEX IF NOT EXISTS idx_stock_reservations_status ON stock_reservations(status);
+
+-- ── Missing Table: delivery_bids (migration 0030) ─────────────────────────
+CREATE TABLE IF NOT EXISTS delivery_bids (
+    id                    BIGSERIAL PRIMARY KEY,
+    bid_id                VARCHAR(50) UNIQUE NOT NULL,
+    customer_tracking_id  VARCHAR(100) NOT NULL,
+    vehicle_type          VARCHAR(30)  NOT NULL,
+    service_type          VARCHAR(20)  DEFAULT 'passenger',
+    pickup_lat            DOUBLE PRECISION NOT NULL,
+    pickup_lng            DOUBLE PRECISION NOT NULL,
+    dropoff_lat           DOUBLE PRECISION NOT NULL,
+    dropoff_lng           DOUBLE PRECISION NOT NULL,
+    negotiated_fare       NUMERIC(10,2) NOT NULL,
+    status                VARCHAR(30) NOT NULL DEFAULT 'searching',
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_delivery_bids_customer ON delivery_bids(customer_tracking_id);
+CREATE INDEX IF NOT EXISTS idx_delivery_bids_status ON delivery_bids(status);
+
+-- ── Missing Table: delivery_bid_counters (migration 0030) ─────────────────
+CREATE TABLE IF NOT EXISTS delivery_bid_counters (
+    id                    BIGSERIAL PRIMARY KEY,
+    bid_id                VARCHAR(50) NOT NULL,
+    rider_tracking_id     VARCHAR(100) NOT NULL,
+    rider_name            VARCHAR(100),
+    rating                VARCHAR(10),
+    vehicle_plate         VARCHAR(30),
+    proposed_fare         NUMERIC(10,2) NOT NULL,
+    eta                   VARCHAR(20),
+    status                VARCHAR(20) NOT NULL DEFAULT 'pending',
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_delivery_bid_counters_bid ON delivery_bid_counters(bid_id);
+CREATE INDEX IF NOT EXISTS idx_delivery_bid_counters_rider ON delivery_bid_counters(rider_tracking_id);
+
+-- ── Missing Table: payfast_events (migration 0026) ────────────────────────
+CREATE TABLE IF NOT EXISTS payfast_events (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    basket_id           TEXT NOT NULL,
+    gateway_txn_id      TEXT,
+    event_type          TEXT NOT NULL DEFAULT 'ipn_received',
+    status_code         TEXT,
+    amount              NUMERIC(12,2),
+    payload             JSONB NOT NULL,
+    received_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    processed_at        TIMESTAMPTZ,
+    process_error       TEXT,
+    order_id            TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_payfast_events_type ON payfast_events (event_type);
+CREATE INDEX IF NOT EXISTS idx_payfast_events_order ON payfast_events (order_id) WHERE order_id IS NOT NULL;
+
+-- ── Missing Table: chat_delivery_outbox (migration 0028) ──────────────────
+CREATE TABLE IF NOT EXISTS chat_delivery_outbox (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    message_id      TEXT NOT NULL,
+    order_id        TEXT NOT NULL,
+    receiver_id     TEXT NOT NULL,
+    status          VARCHAR(20) NOT NULL DEFAULT 'pending',
+    attempts        INT NOT NULL DEFAULT 0,
+    last_attempt_at TIMESTAMPTZ,
+    next_retry_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_chat_outbox_pending ON chat_delivery_outbox (next_retry_at) WHERE status = 'pending';
+
+-- ── Missing Table: return_requests (migration 0051) ───────────────────────
+CREATE TABLE IF NOT EXISTS return_requests (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_tracking_id VARCHAR(100) NOT NULL,
+    customer_tracking_id VARCHAR(100) NOT NULL,
+    vendor_tracking_id VARCHAR(100) NOT NULL,
+    store_tracking_id VARCHAR(100) NOT NULL,
+    rider_tracking_id VARCHAR(100),
+    gig_tracking_id VARCHAR(100),
+    reason TEXT NOT NULL,
+    return_items JSONB NOT NULL DEFAULT '[]',
+    status VARCHAR(30) NOT NULL DEFAULT 'return_requested',
+    requested_at TIMESTAMPTZ DEFAULT NOW(),
+    pickup_deadline TIMESTAMPTZ,
+    verified_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    cancelled_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_return_requests_order ON return_requests(order_tracking_id);
+CREATE INDEX IF NOT EXISTS idx_return_requests_status ON return_requests(status);
+
+-- ── Missing Table: return_gigs (migration 0052) ──────────────────────────
+CREATE TABLE IF NOT EXISTS return_gigs (
+    id SERIAL PRIMARY KEY,
+    tracking_id VARCHAR(100) UNIQUE NOT NULL,
+    return_request_id VARCHAR(100) NOT NULL,
+    order_tracking_id VARCHAR(100) NOT NULL,
+    vendor_store_tracking_id VARCHAR(100) NOT NULL,
+    assigned_rider_id VARCHAR(100),
+    customer_tracking_id VARCHAR(100) NOT NULL,
+    return_reason TEXT,
+    items_summary TEXT,
+    customer_name VARCHAR(200),
+    customer_address TEXT,
+    customer_phone VARCHAR(50),
+    status VARCHAR(30) NOT NULL DEFAULT 'broadcasting',
+    rider_earning NUMERIC(10,2) DEFAULT 0,
+    delivery_fee NUMERIC(10,2) DEFAULT 0,
+    pickup_lat DOUBLE PRECISION,
+    pickup_lng DOUBLE PRECISION,
+    dropoff_lat DOUBLE PRECISION,
+    dropoff_lng DOUBLE PRECISION,
+    otp_code VARCHAR(10),
+    pickup_photo_url TEXT,
+    delivery_photo_url TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_return_gigs_order ON return_gigs(order_tracking_id);
+CREATE INDEX IF NOT EXISTS idx_return_gigs_status ON return_gigs(status);
+
+-- ── Missing Table: rider_payouts (migration 000044) ───────────────────────
+CREATE TABLE IF NOT EXISTS rider_payouts (
+    id              BIGSERIAL PRIMARY KEY,
+    rider_tracking_id VARCHAR(100) NOT NULL,
+    amount          NUMERIC(10,2) NOT NULL,
+    amount_paisa    BIGINT DEFAULT 0,
+    method          VARCHAR(50),
+    account_number  VARCHAR(100),
+    account_title   VARCHAR(200),
+    status          VARCHAR(30) DEFAULT 'pending',
+    batch_id        VARCHAR(100),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at    TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_rider_payouts_rider ON rider_payouts(rider_tracking_id);
+CREATE INDEX IF NOT EXISTS idx_rider_payouts_status ON rider_payouts(status);
+
+-- ── Missing Table: stripe_events (migration 000045) ───────────────────────
+CREATE TABLE IF NOT EXISTS stripe_events (
+    id              BIGSERIAL PRIMARY KEY,
+    stripe_event_id VARCHAR(255) UNIQUE NOT NULL,
+    event_type      VARCHAR(100) NOT NULL,
+    order_id        VARCHAR(100),
+    is_unprocessed  BOOLEAN DEFAULT true,
+    payload         JSONB,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_stripe_events_order ON stripe_events(order_id);
+
+-- ── Missing Table: payment_idempotency ────────────────────────────────────
+CREATE TABLE IF NOT EXISTS payment_idempotency (
+    id              BIGSERIAL PRIMARY KEY,
+    idempotency_key VARCHAR(255) UNIQUE NOT NULL,
+    order_tracking_id VARCHAR(100),
+    status          VARCHAR(30) DEFAULT 'processing',
+    result          JSONB,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+

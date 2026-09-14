@@ -707,7 +707,17 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               if (pStatus == 'paid' || pStatus == 'confirmed' || pStatus == 'settlement_pending') {
                 isOrderPaid = true;
               }
-            } catch (_) {}
+            } catch (e) {
+              // Payment verification failed — do NOT cancel the order blindly.
+              // The payment may have succeeded but the status check timed out.
+              debugPrint('Payment verification failed: $e');
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Could not verify payment status: $e. Please check your orders.')),
+                );
+              }
+              return; // Exit without cancelling — let the user check manually
+            }
 
             if (!verified && !isOrderPaid) {
               await _cancelOrderOnFailure(realOrderTrackingId.toString(), 'Payment verification not completed');

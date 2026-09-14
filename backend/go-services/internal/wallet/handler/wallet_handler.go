@@ -390,8 +390,8 @@ func (h *WalletHandler) processWalletCallback(ctx context.Context, cb *service.W
 
 		// Insert payment transaction (idempotent via ON CONFLICT).
 		_, err := h.db.Exec(ctx, `
-			INSERT INTO payment_transactions (id, order_tracking_id, gateway, gateway_txn_id, amount, currency, status, kind, idempotency_key, created_at, updated_at)
-			VALUES (gen_random_uuid(), $1, $2, $3, $4, 'PKR', 'settlement_pending', 'payment', $5, NOW(), NOW())
+			INSERT INTO payment_transactions (order_tracking_id, gateway, gateway_txn_id, amount, currency, status, kind, idempotency_key, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, 'PKR', 'settlement_pending', 'payment', $5, NOW(), NOW())
 			ON CONFLICT (idempotency_key) DO NOTHING
 		`, cb.OrderID, cb.Gateway, cb.TransactionID, amountPKR, fmt.Sprintf("wallet:%s", cb.TransactionID))
 		if err != nil {
@@ -407,10 +407,9 @@ func (h *WalletHandler) processWalletCallback(ctx context.Context, cb *service.W
 			"amount":         amountPKR,
 		})
 		_, err = h.db.Exec(ctx, `
-			INSERT INTO outbox_events (id, topic, key, payload, status, created_at, updated_at)
-			VALUES (gen_random_uuid(), 'payment_settlement', $1, $2, 'PENDING', NOW(), NOW())
-			ON CONFLICT (idempotency_key) DO NOTHING
-		`, cb.OrderID, eventPayload, fmt.Sprintf("wallet_settle:%s", cb.OrderID))
+			INSERT INTO outbox_events (aggregate_id, topic, payload, status, created_at, updated_at)
+			VALUES ($1, 'payment_settlement', $2, 'PENDING', NOW(), NOW())
+		`, cb.OrderID, eventPayload)
 		if err != nil {
 			log.Printf("[WalletCallback] Warning: failed to create outbox event for order %s: %v", cb.OrderID, err)
 		}

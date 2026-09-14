@@ -1022,20 +1022,21 @@ func (s *PayFastService) Handle3DSCallback(ctx context.Context, mdParam, paRes, 
 
 	// 1. Fetch 3DS Payment Record with Replay Defense Guard
 	var orderID string
-	var amountPaisa int64
+	var amountRupees float64
 	var metaJSON []byte
 	var customerTrackingID string
 	err = s.db.QueryRow(ctx,
-		`SELECT pt.order_tracking_id, pt.amount_paisa, pt.metadata, o.customer_tracking_id 
+		`SELECT pt.order_tracking_id, pt.amount, pt.metadata, o.customer_tracking_id 
 		 FROM payment_transactions pt
 		 JOIN orders o ON o.order_tracking_id = pt.order_tracking_id
 		 WHERE pt.transaction_id = $1 AND pt.status = '3ds_required'`,
 		internalTxnID,
-	).Scan(&orderID, &amountPaisa, &metaJSON, &customerTrackingID)
+	).Scan(&orderID, &amountRupees, &metaJSON, &customerTrackingID)
 
 	if err != nil {
 		return "", errors.New("no pending 3DS payment found for transaction (possible replay or already finalized)")
 	}
+	amountPaisa := int64(math.Round(amountRupees * 100))
 
 	var meta PaymentMetadata
 	if err := json.Unmarshal(metaJSON, &meta); err != nil {
@@ -1412,23 +1413,27 @@ func (s *PayFastService) HandleIPN(ctx context.Context, params IPNParams) error 
 	// Robust transaction lookup: match by gateway_txn_id first if supplied, otherwise fallback to active/latest txn for order
 	var internalTxnID, gatewayTxnID string
 	var amountPaisa int64
+	var amountRupees float64
 
 	if params.TransactionID != "" {
 		err = s.db.QueryRow(ctx,
-			`SELECT transaction_id, COALESCE(gateway_txn_id, ''), amount_paisa 
+			`SELECT transaction_id, COALESCE(gateway_txn_id, ''), amount 
 			 FROM payment_transactions 
 			 WHERE gateway_txn_id = $1 OR (order_tracking_id = $2 AND status IN ('processing', '3ds_required', 'gateway_pending', 'pending'))
 			 ORDER BY created_at DESC LIMIT 1`,
 			params.TransactionID, basketID,
-		).Scan(&internalTxnID, &gatewayTxnID, &amountPaisa)
+		).Scan(&internalTxnID, &gatewayTxnID, &amountRupees)
 	} else {
 		err = s.db.QueryRow(ctx,
-			`SELECT transaction_id, COALESCE(gateway_txn_id, ''), amount_paisa 
+			`SELECT transaction_id, COALESCE(gateway_txn_id, ''), amount 
 			 FROM payment_transactions 
 			 WHERE order_tracking_id = $1 
 			 ORDER BY created_at DESC LIMIT 1`,
 			basketID,
-		).Scan(&internalTxnID, &gatewayTxnID, &amountPaisa)
+		).Scan(&internalTxnID, &gatewayTxnID, &amountRupees)
+	}
+	if err == nil {
+		amountPaisa = int64(math.Round(amountRupees * 100))
 	}
 
 	if err != nil {

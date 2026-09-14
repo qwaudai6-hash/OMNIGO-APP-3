@@ -504,6 +504,13 @@ class CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
           });
         }
       } else {
+        // Response is not a List — unexpected format, reset loading state
+        if (mounted) {
+          setState(() {
+            _isLoadingCatalog = false;
+          });
+          debugPrint('Unexpected catalog response format: ${response.runtimeType}');
+        }
       }
     } catch (e) {
       if (mounted) {

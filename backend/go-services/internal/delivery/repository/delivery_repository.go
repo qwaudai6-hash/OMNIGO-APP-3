@@ -774,8 +774,8 @@ func (r *DeliveryRepository) UpdateOrderDisputeStatus(ctx context.Context, order
 // amountPaisa is in paisa (int64).
 func (r *DeliveryRepository) RecordCODDebt(ctx context.Context, orderTrackingID, riderTrackingID string, amountPaisa int64) error {
 	query := `
-		INSERT INTO cod_debts (id, order_tracking_id, rider_tracking_id, amount_owed, status)
-		SELECT gen_random_uuid(), $1, $2, $3, 'pending'
+		INSERT INTO cod_debts (order_tracking_id, rider_tracking_id, amount_owed, status)
+		SELECT $1, $2, $3, 'pending'
 		WHERE NOT EXISTS (
 			SELECT 1 FROM cod_debts d
 			WHERE d.order_tracking_id = $1 AND d.status IN ('pending', 'settled')
